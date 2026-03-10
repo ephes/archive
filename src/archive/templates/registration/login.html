@@ -1,0 +1,15 @@
+{% extends "archive/base.html" %}
+
+{% block title %}Login{% endblock %}
+
+{% block content %}
+<section class="form-card">
+    <p class="kicker">Editor access</p>
+    <h2>Sign in</h2>
+    <form method="post">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <button type="submit">Log in</button>
+    </form>
+</section>
+{% endblock %}

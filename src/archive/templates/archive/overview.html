@@ -1,0 +1,47 @@
+{% extends "archive/base.html" %}
+
+{% block title %}Archive{% endblock %}
+
+{% block content %}
+<section class="hero">
+    {% if current_page %}
+        <p class="kicker">{{ current_page.starts_on }} to {{ current_page.ends_on }}</p>
+        <h2>{{ current_page.label }}</h2>
+    {% else %}
+        <p class="kicker">Nothing captured yet.</p>
+        <h2>Archive inbox is empty</h2>
+    {% endif %}
+</section>
+
+{% if items %}
+    <section class="cards">
+        {% for item in items %}
+            <article class="card">
+                <p class="pill">{{ item.get_kind_display }}</p>
+                <h3 class="card-title"><a href="{{ item.get_absolute_url }}">{{ item.display_title }}</a></h3>
+                <p class="meta">{{ item.shared_at|date:"j M Y, H:i" }}{% if item.source %} · {{ item.source }}{% endif %}</p>
+                {% if item.notes %}
+                    <p>{{ item.notes|linebreaksbr }}</p>
+                {% endif %}
+            </article>
+        {% endfor %}
+    </section>
+{% else %}
+    <section class="empty">
+        <p>No public items for this week yet.</p>
+    </section>
+{% endif %}
+
+<nav class="nav-row" aria-label="Week navigation">
+    <div>
+        {% if newer_page %}
+            <a href="{% url 'archive:overview' %}?week={{ newer_page.token }}">Newer week</a>
+        {% endif %}
+    </div>
+    <div>
+        {% if older_page %}
+            <a href="{% url 'archive:overview' %}?week={{ older_page.token }}">Older week</a>
+        {% endif %}
+    </div>
+</nav>
+{% endblock %}

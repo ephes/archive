@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Archive{% endblock %}</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --bg: #f5f0e6;
+            --card: rgba(255, 251, 245, 0.88);
+            --ink: #1f1b17;
+            --muted: #675f56;
+            --line: rgba(31, 27, 23, 0.14);
+            --accent: #9f3529;
+            --accent-soft: rgba(159, 53, 41, 0.1);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: "Iowan Old Style", "Palatino Linotype", serif;
+            color: var(--ink);
+            background:
+                radial-gradient(circle at top left, rgba(159, 53, 41, 0.1), transparent 28rem),
+                linear-gradient(180deg, #f8f4ec 0%, var(--bg) 100%);
+        }
+
+        a {
+            color: var(--accent);
+        }
+
+        .shell {
+            width: min(72rem, calc(100vw - 2rem));
+            margin: 0 auto;
+            padding: 2rem 0 4rem;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            gap: 1rem;
+            align-items: baseline;
+            margin-bottom: 2rem;
+        }
+
+        header h1,
+        h2,
+        h3 {
+            margin: 0;
+        }
+
+        .kicker,
+        .meta,
+        nav {
+            color: var(--muted);
+        }
+
+        .hero {
+            padding: 1.5rem;
+            border: 1px solid var(--line);
+            border-radius: 1.5rem;
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.5), var(--card));
+            box-shadow: 0 1rem 3rem rgba(88, 66, 46, 0.08);
+        }
+
+        .cards {
+            display: grid;
+            gap: 1rem;
+            margin-top: 1.5rem;
+        }
+
+        .card,
+        .detail,
+        .form-card,
+        .empty {
+            padding: 1.25rem;
+            border: 1px solid var(--line);
+            border-radius: 1.25rem;
+            background: var(--card);
+            box-shadow: 0 0.5rem 2rem rgba(88, 66, 46, 0.06);
+        }
+
+        .card-title {
+            font-size: 1.3rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .pill {
+            display: inline-flex;
+            padding: 0.25rem 0.6rem;
+            border-radius: 999px;
+            background: var(--accent-soft);
+            font-size: 0.88rem;
+        }
+
+        .nav-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 1rem;
+            margin-top: 1.5rem;
+        }
+
+        form p {
+            display: grid;
+            gap: 0.35rem;
+            margin-bottom: 1rem;
+        }
+
+        input,
+        textarea,
+        select {
+            width: 100%;
+            padding: 0.75rem 0.9rem;
+            border: 1px solid var(--line);
+            border-radius: 0.9rem;
+            font: inherit;
+            background: rgba(255, 255, 255, 0.82);
+        }
+
+        button {
+            border: 0;
+            border-radius: 999px;
+            padding: 0.8rem 1.2rem;
+            font: inherit;
+            color: #fffaf4;
+            background: var(--accent);
+            cursor: pointer;
+        }
+
+        audio {
+            width: 100%;
+            margin-top: 1rem;
+        }
+
+        @media (max-width: 640px) {
+            header {
+                flex-direction: column;
+            }
+
+            .nav-row {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="shell">
+        <header>
+            <div>
+                <p class="kicker">Public archive of links, episodes, and videos</p>
+                <h1><a href="{% url 'archive:overview' %}">Archive</a></h1>
+            </div>
+            <nav>
+                {% if request.user.is_authenticated %}
+                    <a href="{% url 'archive:item-new' %}">Capture manually</a>
+                    ·
+                    <a href="{% url 'admin:index' %}">Admin</a>
+                {% else %}
+                    <a href="{% url 'archive:login' %}">Editor login</a>
+                {% endif %}
+            </nav>
+        </header>
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{% extends "archive/base.html" %}
+
+{% block title %}Capture Item{% endblock %}
+
+{% block content %}
+<section class="form-card">
+    <p class="kicker">Authenticated fallback capture</p>
+    <h2>New archive item</h2>
+    <form method="post">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <button type="submit">Save item</button>
+    </form>
+</section>
+{% endblock %}

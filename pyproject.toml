@@ -1,0 +1,66 @@
+[project]
+name = "archive"
+version = "0.1.0"
+description = "Self-hosted archive for podcast episodes, articles, videos, and social links."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "django>=6.0",
+    "gunicorn>=23.0.0",
+    "whitenoise>=6.11.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/archive"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/README.md",
+    "/justfile",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18.0",
+    "pytest>=8.4.0",
+    "pytest-django>=4.11.0",
+    "ruff>=0.13.0",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+DJANGO_SETTINGS_MODULE = "config.settings.test"
+django_find_project = false
+testpaths = ["tests"]
+pythonpath = [
+    "src/django",
+    "src",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = ["migrations"]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+]
+
+[tool.mypy]
+files = ["src", "tests"]
+python_version = "3.12"
+ignore_missing_imports = true
+exclude = ["src/archive/migrations/"]

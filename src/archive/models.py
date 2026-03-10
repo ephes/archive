@@ -52,6 +52,20 @@ class Item(models.Model):
     def display_title(self) -> str:
         return self.title or self.original_url
 
+    @property
+    def feed_description(self) -> str:
+        if self.short_summary.strip():
+            return self.short_summary.strip()
+        if self.notes.strip():
+            return self.notes.strip()
+        if self.source.strip():
+            return f"Archived from {self.source.strip()}."
+        return f"Archived {self.get_kind_display().lower()}: {self.original_url}"
+
+    @property
+    def feed_published_at(self):
+        return self.published_at or self.shared_at
+
     def get_absolute_url(self) -> str:
         return reverse("archive:item-detail", kwargs={"pk": self.pk})
 

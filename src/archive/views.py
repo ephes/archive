@@ -6,10 +6,12 @@ import json
 from django.conf import settings
 from django.contrib.auth.views import LoginView, LogoutView
 from django.core.exceptions import ValidationError
+from django.core.paginator import EmptyPage, Paginator
 from django.core.validators import URLValidator
-from django.http import HttpRequest, HttpResponse, HttpResponseBadRequest, JsonResponse
+from django.http import Http404, HttpRequest, HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods
 from django.views.generic.edit import CreateView
@@ -19,6 +21,7 @@ from archive.models import Item
 from archive.services import infer_kind, to_week_page, week_bounds
 
 url_validator = URLValidator()
+FEED_PAGE_SIZE = 50
 
 
 class ArchiveLoginView(LoginView):
@@ -39,6 +42,20 @@ def _build_week_navigation(items) -> list:
         seen.add(page.token)
         week_pages.append(page)
     return week_pages
+
+
+def _feed_page_url(request: HttpRequest, page: int) -> str:
+    if page <= 1:
+        return request.build_absolute_uri(reverse("archive:rss-feed"))
+    return request.build_absolute_uri(reverse("archive:rss-feed-page", kwargs={"page": page}))
+
+
+def _public_feed_items():
+    return (
+        Item.objects.filter(is_public=True, published_at__isnull=False)
+        .exclude(title="")
+        .order_by("-published_at", "-id")
+    )
 
 
 @require_GET
@@ -76,6 +93,61 @@ def overview(request: HttpRequest) -> HttpResponse:
             "newer_page": newer_page,
             "older_page": older_page,
         },
+    )
+
+
+@require_GET
+def rss_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
+    if page == 1 and request.resolver_match and request.resolver_match.url_name == "rss-feed-page":
+        return redirect("archive:rss-feed", permanent=True)
+
+    public_items = _public_feed_items()
+    paginator = Paginator(public_items, FEED_PAGE_SIZE)
+
+    if paginator.count == 0:
+        if page != 1:
+            raise Http404("Unknown feed page")
+        page_items = []
+        newer_url = None
+        older_url = None
+    else:
+        try:
+            page_obj = paginator.page(page)
+        except EmptyPage as exc:
+            raise Http404("Unknown feed page") from exc
+        page_items = list(page_obj.object_list)
+        newer_url = _feed_page_url(request, page - 1) if page_obj.has_previous() else None
+        older_url = _feed_page_url(request, page + 1) if page_obj.has_next() else None
+
+    feed_items = [
+        {
+            "title": item.display_title,
+            "link": request.build_absolute_uri(item.get_absolute_url()),
+            "description": item.feed_description,
+            "pub_date": item.feed_published_at,
+            "kind": item.get_kind_display(),
+        }
+        for item in page_items
+    ]
+
+    return render(
+        request,
+        "archive/rss.xml",
+        {
+            "feed_title": "Archive" if page == 1 else f"Archive (page {page})",
+            "feed_description": (
+                "Public archive feed for links, episodes, videos, and articles."
+                if page == 1
+                else f"Archive feed page {page}."
+            ),
+            "site_url": request.build_absolute_uri(reverse("archive:overview")),
+            "self_url": _feed_page_url(request, page),
+            "previous_url": newer_url,
+            "next_url": older_url,
+            "last_build_date": page_items[0].feed_published_at if page_items else timezone.now(),
+            "feed_items": feed_items,
+        },
+        content_type="application/rss+xml; charset=utf-8",
     )
 
 

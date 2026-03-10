@@ -8,17 +8,19 @@ from django.contrib.auth.views import LoginView, LogoutView
 from django.core.exceptions import ValidationError
 from django.core.paginator import EmptyPage, Paginator
 from django.core.validators import URLValidator
+from django.db.models.functions import Trim
 from django.http import Http404, HttpRequest, HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods
 from django.views.generic.edit import CreateView
 
 from archive.forms import ItemForm
 from archive.models import Item
-from archive.services import infer_kind, to_week_page, week_bounds
+from archive.services import infer_kind, prepare_item_for_enrichment, to_week_page, week_bounds
 
 url_validator = URLValidator()
 FEED_PAGE_SIZE = 50
@@ -53,7 +55,8 @@ def _feed_page_url(request: HttpRequest, page: int) -> str:
 def _public_feed_items():
     return (
         Item.objects.filter(is_public=True, published_at__isnull=False)
-        .exclude(title="")
+        .annotate(feed_title=Trim("title"))
+        .exclude(feed_title="")
         .order_by("-published_at", "-id")
     )
 
@@ -174,6 +177,7 @@ class ItemCreateView(CreateView):
             explicit_kind=item.kind,
             audio_url=item.audio_url,
         )
+        prepare_item_for_enrichment(item)
         item.save()
         return redirect(item.get_absolute_url())
 
@@ -195,24 +199,45 @@ def api_create_item(request: HttpRequest) -> JsonResponse:
     title = (payload.get("title") or "").strip()
     notes = (payload.get("notes") or "").strip()
     audio_url = (payload.get("audio_url") or "").strip()
+    media_url = (payload.get("media_url") or "").strip()
     source = (payload.get("source") or "").strip()
+    author = (payload.get("author") or "").strip()
     explicit_kind = (payload.get("kind") or "").strip()
+    original_published_at_raw = (payload.get("original_published_at") or "").strip()
 
     try:
         url_validator(url)
         if audio_url:
             url_validator(audio_url)
+        if media_url:
+            url_validator(media_url)
     except ValidationError:
         return JsonResponse({"error": "Invalid or missing url"}, status=400)
 
-    item = Item.objects.create(
+    original_published_at = None
+    if original_published_at_raw:
+        original_published_at = parse_datetime(original_published_at_raw)
+        if original_published_at is None:
+            return JsonResponse({"error": "Invalid original_published_at"}, status=400)
+        if timezone.is_naive(original_published_at):
+            original_published_at = timezone.make_aware(
+                original_published_at,
+                timezone.get_current_timezone(),
+            )
+
+    item = Item(
         original_url=url,
         title=title,
         notes=notes,
         audio_url=audio_url,
+        media_url=media_url,
         source=source,
+        author=author,
+        original_published_at=original_published_at,
         kind=infer_kind(url=url, explicit_kind=explicit_kind, audio_url=audio_url),
     )
+    prepare_item_for_enrichment(item)
+    item.save()
     return JsonResponse(
         {
             "id": item.pk,

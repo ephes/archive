@@ -85,6 +85,20 @@ def test_rss_feed_includes_only_eligible_public_items_and_uses_detail_urls(clien
 
 
 @pytest.mark.django_db
+def test_rss_feed_excludes_whitespace_only_titles(client) -> None:
+    Item.objects.create(
+        original_url="https://example.com/whitespace",
+        title="   ",
+    )
+
+    response = client.get(reverse("archive:rss-feed"))
+
+    assert response.status_code == 200
+    channel = parse_channel(response.content)
+    assert channel.findall("item") == []
+
+
+@pytest.mark.django_db
 def test_rss_feed_archive_uses_fixed_size_item_windows(client) -> None:
     now = timezone.now()
     for index in range(55):

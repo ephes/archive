@@ -40,7 +40,11 @@ class Item(models.Model):
     notes = models.TextField(blank=True)
     tags = models.TextField(blank=True)
     audio_url = models.URLField(blank=True)
+    media_url = models.URLField(blank=True)
     source = models.CharField(max_length=255, blank=True)
+    author = models.CharField(max_length=255, blank=True)
+    original_published_at = models.DateTimeField(blank=True, null=True)
+    enrichment_error = models.TextField(blank=True)
 
     class Meta:
         ordering = ("-shared_at", "-id")
@@ -65,6 +69,10 @@ class Item(models.Model):
     @property
     def feed_published_at(self):
         return self.published_at or self.shared_at
+
+    @property
+    def has_required_feed_metadata(self) -> bool:
+        return bool(self.title.strip())
 
     def get_absolute_url(self) -> str:
         return reverse("archive:item-detail", kwargs={"pk": self.pk})

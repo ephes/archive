@@ -10,8 +10,9 @@ class ItemAdmin(admin.ModelAdmin):
         "kind",
         "is_public",
         "enrichment_status",
+        "source",
         "shared_at",
     )
     list_filter = ("kind", "is_public", "enrichment_status")
-    search_fields = ("title", "original_url", "source", "notes", "short_summary")
-    readonly_fields = ("shared_at", "published_at")
+    search_fields = ("title", "original_url", "source", "author", "notes", "short_summary")
+    readonly_fields = ("shared_at", "published_at", "enrichment_error")

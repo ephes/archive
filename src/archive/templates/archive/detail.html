@@ -6,7 +6,15 @@
 <article class="detail">
     <p class="pill">{{ item.get_kind_display }}</p>
     <h2>{{ item.display_title }}</h2>
-    <p class="meta">{{ item.shared_at|date:"j M Y, H:i" }}{% if item.source %} · {{ item.source }}{% endif %}</p>
+    <p class="meta">
+        {{ item.shared_at|date:"j M Y, H:i" }}
+        {% if item.source %} · {{ item.source }}{% endif %}
+        {% if item.author %} · {{ item.author }}{% endif %}
+    </p>
+
+    {% if item.original_published_at %}
+        <p class="meta">Originally published {{ item.original_published_at|date:"j M Y, H:i" }}</p>
+    {% endif %}
 
     {% if item.notes %}
         <p>{{ item.notes|linebreaksbr }}</p>
@@ -16,6 +24,10 @@
         <audio controls preload="none" src="{{ item.audio_url }}">
             <a href="{{ item.audio_url }}">Listen</a>
         </audio>
+    {% endif %}
+
+    {% if item.media_url and item.media_url != item.audio_url %}
+        <p><a href="{{ item.media_url }}" rel="noopener noreferrer">Open media</a></p>
     {% endif %}
 
     <p><a href="{{ item.original_url }}" rel="noopener noreferrer">Open original</a></p>

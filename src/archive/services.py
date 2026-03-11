@@ -6,13 +6,20 @@ from datetime import date, datetime, time, timedelta
 from urllib.parse import urlparse
 
 from django.db import transaction
+from django.db.models import Case, F, Q, Value, When
 from django.utils import timezone
 
 from archive.metadata import AUDIO_SUFFIXES, extract_metadata_from_url
 from archive.models import EnrichmentStatus, Item, ItemKind
+from archive.summaries import generate_item_summaries
 
 logger = logging.getLogger(__name__)
 VIDEO_HOSTS = {"youtube.com", "www.youtube.com", "youtu.be", "vimeo.com", "www.vimeo.com"}
+SUMMARY_RETRY_DELAYS = (
+    timedelta(minutes=5),
+    timedelta(minutes=30),
+    timedelta(hours=2),
+)
 
 
 def infer_kind(url: str, explicit_kind: str = "", audio_url: str = "") -> str:
@@ -73,15 +80,170 @@ def prepare_item_for_enrichment(item: Item) -> Item:
     else:
         item.enrichment_status = EnrichmentStatus.PENDING
         item.enrichment_error = ""
+
+    if _has_generated_summaries(item):
+        item.summary_status = EnrichmentStatus.COMPLETE
+        item.summary_error = ""
+        item.summary_retry_count = 0
+        item.summary_retry_at = None
+    else:
+        item.summary_status = EnrichmentStatus.PENDING
+        item.summary_error = ""
+        item.summary_retry_count = 0
+        item.summary_retry_at = None
     return item
 
 
-def enrich_item_metadata(item: Item, timeout: int = 15) -> bool:
+def enrich_item_metadata(item: Item, timeout: int = 15, summary_timeout: int = 60) -> bool:
+    metadata_success = True
+    summary_success = True
+
+    if item.enrichment_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
+        metadata_success = _enrich_item_metadata_fields(item=item, timeout=timeout)
+
+    if item.summary_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
+        summary_success = enrich_item_summaries(item=item, timeout=summary_timeout)
+
+    return metadata_success and summary_success
+
+
+def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
+    if _has_generated_summaries(item):
+        if item.summary_status != EnrichmentStatus.COMPLETE or item.summary_error:
+            item.summary_status = EnrichmentStatus.COMPLETE
+            item.summary_error = ""
+            item.summary_retry_count = 0
+            item.summary_retry_at = None
+            item.save(
+                update_fields=[
+                    "summary_status",
+                    "summary_error",
+                    "summary_retry_count",
+                    "summary_retry_at",
+                ]
+            )
+        return True
+
+    try:
+        generated = generate_item_summaries(item=item, timeout=timeout)
+    except Exception as exc:
+        logger.exception("Summary generation failed for item %s", item.pk)
+        return _mark_summary_failure(item, str(exc))
+
+    update_fields: list[str] = []
+    if not item.short_summary and generated.short_summary:
+        item.short_summary = generated.short_summary
+        update_fields.append("short_summary")
+    if not item.long_summary and generated.long_summary:
+        item.long_summary = generated.long_summary
+        update_fields.append("long_summary")
+    if not item.tags and generated.tags:
+        item.tags = "\n".join(generated.tags)
+        update_fields.append("tags")
+
+    if not _has_generated_summaries(item):
+        return _mark_summary_failure(item, "Summary response did not produce all required fields")
+
+    item.summary_status = EnrichmentStatus.COMPLETE
+    item.summary_error = ""
+    item.summary_retry_count = 0
+    item.summary_retry_at = None
+    update_fields.extend(
+        ["summary_status", "summary_error", "summary_retry_count", "summary_retry_at"]
+    )
+    item.save(update_fields=sorted(set(update_fields)))
+    return True
+
+
+def recover_processing_items() -> int:
+    return Item.objects.filter(
+        Q(enrichment_status=EnrichmentStatus.PROCESSING)
+        | Q(summary_status=EnrichmentStatus.PROCESSING)
+    ).update(
+        enrichment_status=Case(
+            When(
+                enrichment_status=EnrichmentStatus.PROCESSING,
+                then=Value(EnrichmentStatus.PENDING),
+            ),
+            default=F("enrichment_status"),
+        ),
+        summary_status=Case(
+            When(
+                summary_status=EnrichmentStatus.PROCESSING,
+                then=Value(EnrichmentStatus.PENDING),
+            ),
+            default=F("summary_status"),
+        ),
+        summary_retry_at=Case(
+            When(summary_status=EnrichmentStatus.PROCESSING, then=Value(None)),
+            default=F("summary_retry_at"),
+        ),
+    )
+
+
+def claim_pending_item() -> Item | None:
+    now = timezone.now()
+    with transaction.atomic():
+        item = (
+            Item.objects.select_for_update()
+            .filter(
+                Q(enrichment_status=EnrichmentStatus.PENDING)
+                | _claimable_summary_query(now)
+            )
+            .order_by("shared_at", "id")
+            .first()
+        )
+        if item is None:
+            return None
+
+        update_fields: list[str] = []
+        if item.enrichment_status == EnrichmentStatus.PENDING:
+            item.enrichment_status = EnrichmentStatus.PROCESSING
+            item.enrichment_error = ""
+            update_fields.extend(["enrichment_status", "enrichment_error"])
+        if _summary_should_start(item, now):
+            item.summary_status = EnrichmentStatus.PROCESSING
+            item.summary_error = ""
+            item.summary_retry_at = None
+            update_fields.extend(["summary_status", "summary_error", "summary_retry_at"])
+
+        item.save(update_fields=sorted(set(update_fields)))
+    return item
+
+
+def enrich_pending_items(limit: int = 1, timeout: int = 15, summary_timeout: int = 60) -> int:
+    processed = 0
+    for _ in range(limit):
+        item = claim_pending_item()
+        if item is None:
+            break
+        enrich_item_metadata(item=item, timeout=timeout, summary_timeout=summary_timeout)
+        processed += 1
+    return processed
+
+
+def _has_full_metadata(item: Item) -> bool:
+    return all(
+        (
+            item.has_required_feed_metadata,
+            item.source.strip(),
+            item.author.strip(),
+            item.original_published_at is not None,
+            item.media_url.strip() or item.audio_url.strip(),
+        )
+    )
+
+
+def _has_generated_summaries(item: Item) -> bool:
+    return bool(item.short_summary.strip() and item.long_summary.strip() and item.tag_list)
+
+
+def _enrich_item_metadata_fields(item: Item, timeout: int = 15) -> bool:
     try:
         metadata = extract_metadata_from_url(item.original_url, timeout=timeout)
     except Exception as exc:
         logger.exception("Metadata extraction failed for item %s", item.pk)
-        return _mark_enrichment_failure(item, str(exc))
+        return _mark_metadata_failure(item, str(exc))
 
     update_fields: list[str] = []
     if not item.title and metadata.title:
@@ -115,52 +277,7 @@ def enrich_item_metadata(item: Item, timeout: int = 15) -> bool:
     return True
 
 
-def recover_processing_items() -> int:
-    return Item.objects.filter(enrichment_status=EnrichmentStatus.PROCESSING).update(
-        enrichment_status=EnrichmentStatus.PENDING,
-    )
-
-
-def claim_pending_item() -> Item | None:
-    with transaction.atomic():
-        item = (
-            Item.objects.select_for_update()
-            .filter(enrichment_status=EnrichmentStatus.PENDING)
-            .order_by("shared_at", "id")
-            .first()
-        )
-        if item is None:
-            return None
-        item.enrichment_status = EnrichmentStatus.PROCESSING
-        item.enrichment_error = ""
-        item.save(update_fields=["enrichment_status", "enrichment_error"])
-    return item
-
-
-def enrich_pending_items(limit: int = 1, timeout: int = 15) -> int:
-    processed = 0
-    for _ in range(limit):
-        item = claim_pending_item()
-        if item is None:
-            break
-        enrich_item_metadata(item=item, timeout=timeout)
-        processed += 1
-    return processed
-
-
-def _has_full_metadata(item: Item) -> bool:
-    return all(
-        (
-            item.has_required_feed_metadata,
-            item.source.strip(),
-            item.author.strip(),
-            item.original_published_at is not None,
-            item.media_url.strip() or item.audio_url.strip(),
-        )
-    )
-
-
-def _mark_enrichment_failure(item: Item, error_message: str) -> bool:
+def _mark_metadata_failure(item: Item, error_message: str) -> bool:
     item.enrichment_error = error_message
     if item.has_required_feed_metadata:
         item.enrichment_status = EnrichmentStatus.COMPLETE
@@ -168,6 +285,53 @@ def _mark_enrichment_failure(item: Item, error_message: str) -> bool:
         item.enrichment_status = EnrichmentStatus.FAILED
     item.save(update_fields=["enrichment_status", "enrichment_error"])
     return False
+
+
+def _mark_summary_failure(item: Item, error_message: str) -> bool:
+    item.summary_error = error_message
+    item.summary_retry_count += 1
+    if _has_generated_summaries(item):
+        item.summary_status = EnrichmentStatus.COMPLETE
+        item.summary_retry_count = 0
+        item.summary_retry_at = None
+    else:
+        item.summary_status = EnrichmentStatus.FAILED
+        item.summary_retry_at = _next_summary_retry_at(item.summary_retry_count)
+    item.save(
+        update_fields=[
+            "summary_status",
+            "summary_error",
+            "summary_retry_count",
+            "summary_retry_at",
+        ]
+    )
+    return False
+
+
+def _next_summary_retry_at(retry_count: int) -> datetime | None:
+    # retry_count tracks failures so far after incrementing in _mark_summary_failure:
+    # 1/2/3 map to the configured backoff slots, and 4 means retries are exhausted.
+    if retry_count > len(SUMMARY_RETRY_DELAYS):
+        return None
+    return timezone.now() + SUMMARY_RETRY_DELAYS[retry_count - 1]
+
+
+def _claimable_summary_query(now: datetime) -> Q:
+    return Q(summary_status=EnrichmentStatus.PENDING) | (
+        Q(summary_status=EnrichmentStatus.FAILED)
+        & Q(summary_retry_count__lte=len(SUMMARY_RETRY_DELAYS))
+        & (Q(summary_retry_at__isnull=True) | Q(summary_retry_at__lte=now))
+    )
+
+
+def _summary_should_start(item: Item, now: datetime) -> bool:
+    if item.summary_status == EnrichmentStatus.PENDING:
+        return True
+    if item.summary_status != EnrichmentStatus.FAILED:
+        return False
+    if item.summary_retry_count > len(SUMMARY_RETRY_DELAYS):
+        return False
+    return item.summary_retry_at is None or item.summary_retry_at <= now
 
 
 def _infer_kind_from_metadata(item: Item, kind_hint: str) -> str:

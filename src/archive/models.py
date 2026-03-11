@@ -31,12 +31,18 @@ class Item(models.Model):
         choices=EnrichmentStatus.choices,
         default=EnrichmentStatus.PENDING,
     )
+    summary_status = models.CharField(
+        max_length=16,
+        choices=EnrichmentStatus.choices,
+        default=EnrichmentStatus.PENDING,
+    )
     is_public = models.BooleanField(default=True)
     original_url = models.URLField()
     title = models.CharField(max_length=500, blank=True)
     shared_at = models.DateTimeField(default=timezone.now, db_index=True)
     published_at = models.DateTimeField(blank=True, null=True)
     short_summary = models.TextField(blank=True)
+    long_summary = models.TextField(blank=True)
     notes = models.TextField(blank=True)
     tags = models.TextField(blank=True)
     audio_url = models.URLField(blank=True)
@@ -45,6 +51,9 @@ class Item(models.Model):
     author = models.CharField(max_length=255, blank=True)
     original_published_at = models.DateTimeField(blank=True, null=True)
     enrichment_error = models.TextField(blank=True)
+    summary_error = models.TextField(blank=True)
+    summary_retry_count = models.PositiveSmallIntegerField(default=0)
+    summary_retry_at = models.DateTimeField(blank=True, null=True)
 
     class Meta:
         ordering = ("-shared_at", "-id")
@@ -76,6 +85,11 @@ class Item(models.Model):
 
     def get_absolute_url(self) -> str:
         return reverse("archive:item-detail", kwargs={"pk": self.pk})
+
+    @property
+    def tag_list(self) -> list[str]:
+        raw_tags = self.tags.replace(",", "\n").splitlines()
+        return [tag.strip() for tag in raw_tags if tag.strip()]
 
     def save(self, *args, **kwargs) -> None:
         if self.is_public and self.published_at is None:

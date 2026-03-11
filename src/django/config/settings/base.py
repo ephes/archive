@@ -91,6 +91,9 @@ LOGIN_REDIRECT_URL = "archive:item-new"
 LOGOUT_REDIRECT_URL = "archive:overview"
 
 ARCHIVE_API_TOKEN = os.getenv("ARCHIVE_API_TOKEN", "")
+ARCHIVE_SUMMARY_API_KEY = os.getenv("ARCHIVE_SUMMARY_API_KEY", "")
+ARCHIVE_SUMMARY_API_BASE = os.getenv("ARCHIVE_SUMMARY_API_BASE", "https://api.openai.com/v1")
+ARCHIVE_SUMMARY_MODEL = os.getenv("ARCHIVE_SUMMARY_MODEL", "gpt-4o-mini")
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

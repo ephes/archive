@@ -20,6 +20,31 @@
         <p>{{ item.notes|linebreaksbr }}</p>
     {% endif %}
 
+    {% if item.short_summary %}
+        <section class="content-block">
+            <h3>Short summary</h3>
+            <p>{{ item.short_summary|linebreaksbr }}</p>
+        </section>
+    {% endif %}
+
+    {% if item.long_summary %}
+        <section class="content-block">
+            <h3>Long summary</h3>
+            <p>{{ item.long_summary|linebreaksbr }}</p>
+        </section>
+    {% endif %}
+
+    {% if item.tag_list %}
+        <section class="content-block">
+            <h3>Tags</h3>
+            <ul class="tag-list">
+                {% for tag in item.tag_list %}
+                    <li>{{ tag }}</li>
+                {% endfor %}
+            </ul>
+        </section>
+    {% endif %}
+
     {% if item.audio_url %}
         <audio controls preload="none" src="{{ item.audio_url }}">
             <a href="{{ item.audio_url }}">Listen</a>

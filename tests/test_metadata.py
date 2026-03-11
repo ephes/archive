@@ -9,12 +9,14 @@ from django.utils import timezone
 from archive.metadata import MetadataExtractionError, extract_metadata_from_html
 from archive.models import EnrichmentStatus, Item, ItemKind
 from archive.services import (
+    SUMMARY_RETRY_DELAYS,
     claim_pending_item,
     enrich_item_metadata,
     enrich_pending_items,
     prepare_item_for_enrichment,
     recover_processing_items,
 )
+from archive.summaries import GeneratedSummary
 
 
 @pytest.mark.django_db
@@ -84,6 +86,14 @@ def test_enrich_item_metadata_updates_missing_fields_without_overwriting_existin
         )
 
     monkeypatch.setattr("archive.services.extract_metadata_from_url", fake_extract)
+    monkeypatch.setattr(
+        "archive.services.generate_item_summaries",
+        lambda item, timeout: GeneratedSummary(
+            short_summary="Short generated summary",
+            long_summary="Long generated summary with more detail.",
+            tags=("radio", "culture", "interview"),
+        ),
+    )
 
     assert enrich_item_metadata(item) is True
 
@@ -105,6 +115,11 @@ def test_enrich_item_metadata_updates_missing_fields_without_overwriting_existin
     assert item.kind == ItemKind.PODCAST_EPISODE
     assert item.enrichment_status == EnrichmentStatus.COMPLETE
     assert item.enrichment_error == ""
+    assert item.short_summary == "Short generated summary"
+    assert item.long_summary == "Long generated summary with more detail."
+    assert item.tags == "radio\nculture\ninterview"
+    assert item.summary_status == EnrichmentStatus.COMPLETE
+    assert item.summary_error == ""
 
 
 @pytest.mark.django_db
@@ -144,6 +159,14 @@ def test_api_items_are_public_immediately_and_join_feed_after_enrichment(
         )
 
     monkeypatch.setattr("archive.services.extract_metadata_from_url", fake_extract)
+    monkeypatch.setattr(
+        "archive.services.generate_item_summaries",
+        lambda item, timeout: GeneratedSummary(
+            short_summary="A compact generated summary.",
+            long_summary="A longer generated summary for the detail page.",
+            tags=("example", "shared", "article"),
+        ),
+    )
 
     assert enrich_pending_items(limit=1) == 1
 
@@ -151,7 +174,10 @@ def test_api_items_are_public_immediately_and_join_feed_after_enrichment(
     assert item.title == "Extracted title"
     assert item.source == "Example Site"
     assert item.enrichment_status == EnrichmentStatus.COMPLETE
+    assert item.summary_status == EnrichmentStatus.COMPLETE
+    assert item.short_summary == "A compact generated summary."
     assert b"Extracted title" in client.get(reverse("archive:rss-feed")).content
+    assert b"A compact generated summary." in client.get(reverse("archive:rss-feed")).content
 
 
 @pytest.mark.django_db
@@ -159,6 +185,10 @@ def test_enrich_item_metadata_marks_failures(monkeypatch) -> None:
     item = Item.objects.create(
         original_url="https://example.com/demo",
         kind=ItemKind.LINK,
+        short_summary="Ready",
+        long_summary="Already summarized.",
+        tags="demo",
+        summary_status=EnrichmentStatus.COMPLETE,
     )
 
     def fake_extract(url: str, timeout: int):
@@ -180,6 +210,10 @@ def test_enrich_item_metadata_keeps_feed_ready_items_complete_when_fetch_fails(m
         title="Already ready",
         kind=ItemKind.LINK,
         enrichment_status=EnrichmentStatus.PROCESSING,
+        short_summary="Ready",
+        long_summary="Already summarized.",
+        tags="ready",
+        summary_status=EnrichmentStatus.COMPLETE,
     )
 
     def fake_extract(url: str, timeout: int):
@@ -199,6 +233,9 @@ def test_prepare_item_for_enrichment_marks_fully_populated_items_complete() -> N
     item = Item(
         original_url="https://example.com/demo",
         title="Complete item",
+        short_summary="Short",
+        long_summary="Long",
+        tags="complete",
         source="Example",
         author="Author",
         original_published_at=timezone.now(),
@@ -209,6 +246,8 @@ def test_prepare_item_for_enrichment_marks_fully_populated_items_complete() -> N
 
     assert item.enrichment_status == EnrichmentStatus.COMPLETE
     assert item.enrichment_error == ""
+    assert item.summary_status == EnrichmentStatus.COMPLETE
+    assert item.summary_error == ""
 
 
 @pytest.mark.django_db
@@ -227,6 +266,29 @@ def test_recover_processing_items_requeues_stale_items() -> None:
     stuck.refresh_from_db()
     assert stuck.enrichment_status == EnrichmentStatus.PENDING
     assert claim_pending_item() is not None
+
+
+@pytest.mark.django_db
+def test_recover_processing_items_requeues_summary_only_processing_items() -> None:
+    stuck = Item.objects.create(
+        original_url="https://example.com/stuck-summary",
+        title="Existing metadata",
+        source="Example",
+        author="Author",
+        original_published_at=timezone.now(),
+        media_url="https://cdn.example.com/video.mp4",
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.PROCESSING,
+        summary_retry_count=1,
+        summary_retry_at=timezone.now() + timedelta(minutes=5),
+    )
+
+    assert recover_processing_items() == 1
+
+    stuck.refresh_from_db()
+    assert stuck.enrichment_status == EnrichmentStatus.COMPLETE
+    assert stuck.summary_status == EnrichmentStatus.PENDING
+    assert stuck.summary_retry_at is None
 
 
 @pytest.mark.django_db
@@ -259,10 +321,204 @@ def test_enrich_pending_items_claims_oldest_pending_item(monkeypatch) -> None:
         )
 
     monkeypatch.setattr("archive.services.extract_metadata_from_url", fake_extract)
+    monkeypatch.setattr(
+        "archive.services.generate_item_summaries",
+        lambda item, timeout: GeneratedSummary(
+            short_summary=f"Summary for {item.original_url}",
+            long_summary=f"Long summary for {item.original_url}",
+            tags=("queued", "summary", "test"),
+        ),
+    )
 
     assert enrich_pending_items(limit=1) == 1
 
     older.refresh_from_db()
     newer.refresh_from_db()
     assert older.enrichment_status == EnrichmentStatus.COMPLETE
+    assert older.summary_status == EnrichmentStatus.COMPLETE
     assert newer.enrichment_status == EnrichmentStatus.PENDING
+    assert newer.summary_status == EnrichmentStatus.PENDING
+
+
+@pytest.mark.django_db
+def test_enrich_pending_items_runs_summary_backfill_without_refetching_metadata(
+    monkeypatch,
+) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/backfill",
+        title="Already enriched",
+        source="Example",
+        author="Author",
+        original_published_at=timezone.now(),
+        media_url="https://cdn.example.com/video.mp4",
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.PENDING,
+    )
+
+    def unexpected_extract(url: str, timeout: int):
+        raise AssertionError("metadata extraction should be skipped for summary backfill")
+
+    monkeypatch.setattr("archive.services.extract_metadata_from_url", unexpected_extract)
+    monkeypatch.setattr(
+        "archive.services.generate_item_summaries",
+        lambda item, timeout: GeneratedSummary(
+            short_summary="Backfilled short summary",
+            long_summary="Backfilled long summary",
+            tags=("backfill", "summary", "test"),
+        ),
+    )
+
+    assert enrich_pending_items(limit=1) == 1
+
+    item.refresh_from_db()
+    assert item.enrichment_status == EnrichmentStatus.COMPLETE
+    assert item.summary_status == EnrichmentStatus.COMPLETE
+    assert item.short_summary == "Backfilled short summary"
+
+
+@pytest.mark.django_db
+def test_enrich_item_metadata_keeps_manual_generated_values(monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/manual-summary",
+        title="Manual summary item",
+        short_summary="Manual short summary",
+        tags="manual",
+    )
+    prepare_item_for_enrichment(item)
+    item.save(update_fields=["enrichment_status", "summary_status", "summary_error"])
+
+    monkeypatch.setattr(
+        "archive.services.extract_metadata_from_url",
+        lambda url, timeout: extract_metadata_from_html(
+            html="""
+            <html>
+              <head>
+                <meta property="og:site_name" content="Example Site">
+                <meta name="author" content="Example Author">
+                <meta property="article:published_time" content="2026-03-01T12:34:56+00:00">
+                <meta property="og:audio" content="https://cdn.example.com/audio.mp3">
+              </head>
+            </html>
+            """,
+            base_url=url,
+        ),
+    )
+    monkeypatch.setattr(
+        "archive.services.generate_item_summaries",
+        lambda item, timeout: GeneratedSummary(
+            short_summary="Generated short summary should not overwrite",
+            long_summary="Generated long summary should fill only the missing field.",
+            tags=("generated", "manual", "test"),
+        ),
+    )
+
+    assert enrich_item_metadata(item) is True
+
+    item.refresh_from_db()
+    assert item.short_summary == "Manual short summary"
+    assert item.long_summary == "Generated long summary should fill only the missing field."
+    assert item.tags == "manual"
+    assert item.summary_status == EnrichmentStatus.COMPLETE
+
+
+@pytest.mark.django_db
+def test_enrich_item_metadata_marks_summary_failures(monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/summary-failure",
+        title="Summary failure item",
+        source="Example Site",
+        author="Example Author",
+        original_published_at=timezone.now(),
+        media_url="https://cdn.example.com/video.mp4",
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.PROCESSING,
+    )
+
+    monkeypatch.setattr(
+        "archive.services.generate_item_summaries",
+        lambda item, timeout: (_ for _ in ()).throw(RuntimeError("bad prompt")),
+    )
+
+    assert enrich_item_metadata(item) is False
+
+    item.refresh_from_db()
+    assert item.enrichment_status == EnrichmentStatus.COMPLETE
+    assert item.summary_status == EnrichmentStatus.FAILED
+    assert "bad prompt" in item.summary_error
+    assert item.summary_retry_count == 1
+    assert item.summary_retry_at is not None
+
+
+@pytest.mark.django_db
+def test_failed_summary_is_not_retried_before_backoff_window() -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/retry-window",
+        title="Retry later",
+        source="Example",
+        author="Author",
+        original_published_at=timezone.now(),
+        media_url="https://cdn.example.com/video.mp4",
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.FAILED,
+        summary_retry_count=1,
+        summary_retry_at=timezone.now() + timedelta(minutes=1),
+    )
+
+    assert claim_pending_item() is None
+
+    item.refresh_from_db()
+    assert item.summary_status == EnrichmentStatus.FAILED
+
+
+@pytest.mark.django_db
+def test_failed_summary_is_retried_after_backoff_window() -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/retry-now",
+        title="Retry now",
+        source="Example",
+        author="Author",
+        original_published_at=timezone.now(),
+        media_url="https://cdn.example.com/video.mp4",
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.FAILED,
+        summary_retry_count=1,
+        summary_retry_at=timezone.now() - timedelta(seconds=1),
+        summary_error="temporary outage",
+    )
+
+    claimed = claim_pending_item()
+
+    assert claimed is not None
+    assert claimed.pk == item.pk
+    item.refresh_from_db()
+    assert item.summary_status == EnrichmentStatus.PROCESSING
+    assert item.summary_error == ""
+    assert item.summary_retry_at is None
+
+
+@pytest.mark.django_db
+def test_summary_failures_stop_retrying_after_retry_limit(monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/retry-limit",
+        title="Retry limit",
+        source="Example",
+        author="Author",
+        original_published_at=timezone.now(),
+        media_url="https://cdn.example.com/video.mp4",
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.PROCESSING,
+        summary_retry_count=len(SUMMARY_RETRY_DELAYS),
+    )
+
+    monkeypatch.setattr(
+        "archive.services.generate_item_summaries",
+        lambda item, timeout: (_ for _ in ()).throw(RuntimeError("still broken")),
+    )
+
+    assert enrich_item_metadata(item) is False
+
+    item.refresh_from_db()
+    assert item.summary_status == EnrichmentStatus.FAILED
+    assert item.summary_retry_count == len(SUMMARY_RETRY_DELAYS) + 1
+    assert item.summary_retry_at is None
+    assert claim_pending_item() is None

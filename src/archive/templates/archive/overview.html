@@ -20,7 +20,9 @@
                 <p class="pill">{{ item.get_kind_display }}</p>
                 <h3 class="card-title"><a href="{{ item.get_absolute_url }}">{{ item.display_title }}</a></h3>
                 <p class="meta">{{ item.shared_at|date:"j M Y, H:i" }}{% if item.source %} · {{ item.source }}{% endif %}</p>
-                {% if item.notes %}
+                {% if item.short_summary %}
+                    <p>{{ item.short_summary|linebreaksbr }}</p>
+                {% elif item.notes %}
                     <p>{{ item.notes|linebreaksbr }}</p>
                 {% endif %}
             </article>

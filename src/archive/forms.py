@@ -1,6 +1,6 @@
 from django.forms import ModelForm, Textarea
 
-from archive.models import Item
+from archive.models import EnrichmentStatus, Item
 
 
 class ItemForm(ModelForm):
@@ -11,6 +11,7 @@ class ItemForm(ModelForm):
             "title",
             "short_summary",
             "long_summary",
+            "transcript",
             "tags",
             "notes",
             "kind",
@@ -21,6 +22,26 @@ class ItemForm(ModelForm):
         widgets = {
             "short_summary": Textarea(attrs={"rows": 3}),
             "long_summary": Textarea(attrs={"rows": 6}),
+            "transcript": Textarea(attrs={"rows": 16}),
             "tags": Textarea(attrs={"rows": 3}),
             "notes": Textarea(attrs={"rows": 5}),
         }
+
+    def save(self, commit: bool = True) -> Item:
+        item = super().save(commit=False)
+
+        if "short_summary" in self.changed_data:
+            item.short_summary_generated = False
+        if "long_summary" in self.changed_data:
+            item.long_summary_generated = False
+        if "tags" in self.changed_data:
+            item.tags_generated = False
+        if "transcript" in self.changed_data:
+            item.transcript_generated = False
+            item.transcript_status = EnrichmentStatus.COMPLETE
+            item.transcript_error = ""
+
+        if commit:
+            item.save()
+            self.save_m2m()
+        return item

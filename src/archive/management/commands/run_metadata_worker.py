@@ -9,7 +9,7 @@ from archive.services import claim_pending_item, enrich_item_metadata, recover_p
 
 
 class Command(BaseCommand):
-    help = "Process pending Archive metadata, summary, and tag jobs."
+    help = "Process pending Archive metadata, transcript, summary, and tag jobs."
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -45,6 +45,12 @@ class Command(BaseCommand):
             default=60,
             help="Per-request timeout in seconds for summary generation.",
         )
+        parser.add_argument(
+            "--transcription-timeout",
+            type=int,
+            default=300,
+            help="Per-request timeout in seconds for media download and transcription.",
+        )
 
     def _request_shutdown(self, signum, _frame) -> None:
         self.stderr.write(f"Received signal {signum}; shutting down after current item.")
@@ -72,11 +78,14 @@ class Command(BaseCommand):
                     item=item,
                     timeout=options["timeout"],
                     summary_timeout=options["summary_timeout"],
+                    transcription_timeout=options["transcription_timeout"],
                 )
                 item.refresh_from_db(
                     fields=[
                         "enrichment_status",
                         "enrichment_error",
+                        "transcript_status",
+                        "transcript_error",
                         "summary_status",
                         "summary_error",
                         "title",
@@ -89,6 +98,8 @@ class Command(BaseCommand):
                         "Background enrichment did not fully succeed for item "
                         f"{item.pk}; metadata_status={item.enrichment_status}; "
                         f"metadata_error={item.enrichment_error}; "
+                        f"transcript_status={item.transcript_status}; "
+                        f"transcript_error={item.transcript_error}; "
                         f"summary_status={item.summary_status}; "
                         f"summary_error={item.summary_error}"
                     )

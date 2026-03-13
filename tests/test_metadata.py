@@ -12,6 +12,7 @@ from archive.services import (
     SUMMARY_RETRY_DELAYS,
     claim_pending_item,
     enrich_item_metadata,
+    enrich_item_transcript,
     enrich_pending_items,
     prepare_item_for_enrichment,
     recover_processing_items,
@@ -94,6 +95,10 @@ def test_enrich_item_metadata_updates_missing_fields_without_overwriting_existin
             tags=("radio", "culture", "interview"),
         ),
     )
+    monkeypatch.setattr(
+        "archive.services.generate_item_transcript",
+        lambda item, timeout: "Transcript paragraph one.\n\nTranscript paragraph two.",
+    )
 
     assert enrich_item_metadata(item) is True
 
@@ -115,6 +120,8 @@ def test_enrich_item_metadata_updates_missing_fields_without_overwriting_existin
     assert item.kind == ItemKind.PODCAST_EPISODE
     assert item.enrichment_status == EnrichmentStatus.COMPLETE
     assert item.enrichment_error == ""
+    assert item.transcript == "Transcript paragraph one.\n\nTranscript paragraph two."
+    assert item.transcript_status == EnrichmentStatus.COMPLETE
     assert item.short_summary == "Short generated summary"
     assert item.long_summary == "Long generated summary with more detail."
     assert item.tags == "radio\nculture\ninterview"
@@ -152,6 +159,7 @@ def test_api_items_are_public_immediately_and_join_feed_after_enrichment(
               <head>
                 <meta property="og:title" content="Extracted title">
                 <meta property="og:site_name" content="Example Site">
+                <meta property="og:audio" content="https://cdn.example.com/audio.mp3">
               </head>
             </html>
             """,
@@ -167,6 +175,10 @@ def test_api_items_are_public_immediately_and_join_feed_after_enrichment(
             tags=("example", "shared", "article"),
         ),
     )
+    monkeypatch.setattr(
+        "archive.services.generate_item_transcript",
+        lambda item, timeout: "Transcript from audio.",
+    )
 
     assert enrich_pending_items(limit=1) == 1
 
@@ -174,6 +186,8 @@ def test_api_items_are_public_immediately_and_join_feed_after_enrichment(
     assert item.title == "Extracted title"
     assert item.source == "Example Site"
     assert item.enrichment_status == EnrichmentStatus.COMPLETE
+    assert item.transcript == "Transcript from audio."
+    assert item.transcript_status == EnrichmentStatus.COMPLETE
     assert item.summary_status == EnrichmentStatus.COMPLETE
     assert item.short_summary == "A compact generated summary."
     assert b"Extracted title" in client.get(reverse("archive:rss-feed")).content
@@ -236,6 +250,7 @@ def test_prepare_item_for_enrichment_marks_fully_populated_items_complete() -> N
         short_summary="Short",
         long_summary="Long",
         tags="complete",
+        transcript="Transcript",
         source="Example",
         author="Author",
         original_published_at=timezone.now(),
@@ -248,6 +263,8 @@ def test_prepare_item_for_enrichment_marks_fully_populated_items_complete() -> N
     assert item.enrichment_error == ""
     assert item.summary_status == EnrichmentStatus.COMPLETE
     assert item.summary_error == ""
+    assert item.transcript_status == EnrichmentStatus.COMPLETE
+    assert item.transcript_error == ""
 
 
 @pytest.mark.django_db
@@ -292,6 +309,20 @@ def test_recover_processing_items_requeues_summary_only_processing_items() -> No
 
 
 @pytest.mark.django_db
+def test_recover_processing_items_requeues_transcript_processing_items() -> None:
+    stuck = Item.objects.create(
+        original_url="https://example.com/stuck-transcript.mp3",
+        kind=ItemKind.PODCAST_EPISODE,
+        transcript_status=EnrichmentStatus.PROCESSING,
+    )
+
+    assert recover_processing_items() == 1
+
+    stuck.refresh_from_db()
+    assert stuck.transcript_status == EnrichmentStatus.PENDING
+
+
+@pytest.mark.django_db
 def test_enrich_pending_items_claims_oldest_pending_item(monkeypatch) -> None:
     older = Item.objects.create(
         original_url="https://example.com/older",
@@ -329,12 +360,17 @@ def test_enrich_pending_items_claims_oldest_pending_item(monkeypatch) -> None:
             tags=("queued", "summary", "test"),
         ),
     )
+    monkeypatch.setattr(
+        "archive.services.generate_item_transcript",
+        lambda item, timeout: "Transcript",
+    )
 
     assert enrich_pending_items(limit=1) == 1
 
     older.refresh_from_db()
     newer.refresh_from_db()
     assert older.enrichment_status == EnrichmentStatus.COMPLETE
+    assert older.transcript_status == EnrichmentStatus.COMPLETE
     assert older.summary_status == EnrichmentStatus.COMPLETE
     assert newer.enrichment_status == EnrichmentStatus.PENDING
     assert newer.summary_status == EnrichmentStatus.PENDING
@@ -367,11 +403,16 @@ def test_enrich_pending_items_runs_summary_backfill_without_refetching_metadata(
             tags=("backfill", "summary", "test"),
         ),
     )
+    monkeypatch.setattr(
+        "archive.services.generate_item_transcript",
+        lambda item, timeout: "Transcript for the item.",
+    )
 
     assert enrich_pending_items(limit=1) == 1
 
     item.refresh_from_db()
     assert item.enrichment_status == EnrichmentStatus.COMPLETE
+    assert item.transcript_status == EnrichmentStatus.COMPLETE
     assert item.summary_status == EnrichmentStatus.COMPLETE
     assert item.short_summary == "Backfilled short summary"
 
@@ -411,6 +452,10 @@ def test_enrich_item_metadata_keeps_manual_generated_values(monkeypatch) -> None
             tags=("generated", "manual", "test"),
         ),
     )
+    monkeypatch.setattr(
+        "archive.services.generate_item_transcript",
+        lambda item, timeout: "Generated transcript",
+    )
 
     assert enrich_item_metadata(item) is True
 
@@ -419,6 +464,76 @@ def test_enrich_item_metadata_keeps_manual_generated_values(monkeypatch) -> None
     assert item.long_summary == "Generated long summary should fill only the missing field."
     assert item.tags == "manual"
     assert item.summary_status == EnrichmentStatus.COMPLETE
+    assert item.transcript == "Generated transcript"
+
+
+@pytest.mark.django_db
+def test_transcript_requeues_and_refreshes_generated_summaries(monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/episode.mp3",
+        title="Transcript refresh",
+        kind=ItemKind.PODCAST_EPISODE,
+        short_summary="Old generated short summary",
+        long_summary="Old generated long summary.",
+        tags="old\ngenerated",
+        short_summary_generated=True,
+        long_summary_generated=True,
+        tags_generated=True,
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        transcript_status=EnrichmentStatus.PROCESSING,
+    )
+
+    monkeypatch.setattr(
+        "archive.services.generate_item_transcript",
+        lambda item, timeout: "Fresh transcript text.",
+    )
+    monkeypatch.setattr(
+        "archive.services.generate_item_summaries",
+        lambda item, timeout: GeneratedSummary(
+            short_summary="Improved short summary",
+            long_summary="Improved long summary",
+            tags=("improved", "transcript", "refresh"),
+        ),
+    )
+
+    assert enrich_item_metadata(item) is True
+
+    item.refresh_from_db()
+    assert item.transcript == "Fresh transcript text."
+    assert item.summary_status == EnrichmentStatus.COMPLETE
+    assert item.short_summary == "Improved short summary"
+    assert item.long_summary == "Improved long summary"
+    assert item.tags == "improved\ntranscript\nrefresh"
+
+
+@pytest.mark.django_db
+def test_transcript_does_not_overwrite_manual_summary_fields(monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/manual.mp3",
+        title="Manual fields",
+        kind=ItemKind.PODCAST_EPISODE,
+        short_summary="Manual short summary",
+        long_summary="Manual long summary",
+        tags="manual",
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        transcript_status=EnrichmentStatus.PROCESSING,
+    )
+
+    monkeypatch.setattr(
+        "archive.services.generate_item_transcript",
+        lambda item, timeout: "Fresh transcript text.",
+    )
+
+    assert enrich_item_metadata(item) is True
+
+    item.refresh_from_db()
+    assert item.transcript == "Fresh transcript text."
+    assert item.summary_status == EnrichmentStatus.COMPLETE
+    assert item.short_summary == "Manual short summary"
+    assert item.long_summary == "Manual long summary"
+    assert item.tags == "manual"
 
 
 @pytest.mark.django_db
@@ -437,6 +552,10 @@ def test_enrich_item_metadata_marks_summary_failures(monkeypatch) -> None:
     monkeypatch.setattr(
         "archive.services.generate_item_summaries",
         lambda item, timeout: (_ for _ in ()).throw(RuntimeError("bad prompt")),
+    )
+    monkeypatch.setattr(
+        "archive.services.generate_item_transcript",
+        lambda item, timeout: "Transcript text",
     )
 
     assert enrich_item_metadata(item) is False
@@ -462,6 +581,7 @@ def test_failed_summary_is_not_retried_before_backoff_window() -> None:
         summary_status=EnrichmentStatus.FAILED,
         summary_retry_count=1,
         summary_retry_at=timezone.now() + timedelta(minutes=1),
+        transcript_status=EnrichmentStatus.COMPLETE,
     )
 
     assert claim_pending_item() is None
@@ -484,6 +604,7 @@ def test_failed_summary_is_retried_after_backoff_window() -> None:
         summary_retry_count=1,
         summary_retry_at=timezone.now() - timedelta(seconds=1),
         summary_error="temporary outage",
+        transcript_status=EnrichmentStatus.COMPLETE,
     )
 
     claimed = claim_pending_item()
@@ -508,13 +629,13 @@ def test_summary_failures_stop_retrying_after_retry_limit(monkeypatch) -> None:
         enrichment_status=EnrichmentStatus.COMPLETE,
         summary_status=EnrichmentStatus.PROCESSING,
         summary_retry_count=len(SUMMARY_RETRY_DELAYS),
+        transcript_status=EnrichmentStatus.COMPLETE,
     )
 
     monkeypatch.setattr(
         "archive.services.generate_item_summaries",
         lambda item, timeout: (_ for _ in ()).throw(RuntimeError("still broken")),
     )
-
     assert enrich_item_metadata(item) is False
 
     item.refresh_from_db()
@@ -522,3 +643,25 @@ def test_summary_failures_stop_retrying_after_retry_limit(monkeypatch) -> None:
     assert item.summary_retry_count == len(SUMMARY_RETRY_DELAYS) + 1
     assert item.summary_retry_at is None
     assert claim_pending_item() is None
+
+
+@pytest.mark.django_db
+def test_enrich_item_transcript_marks_failures(monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/failure.mp3",
+        title="Transcript failure",
+        kind=ItemKind.PODCAST_EPISODE,
+        transcript_status=EnrichmentStatus.PROCESSING,
+    )
+
+    monkeypatch.setattr(
+        "archive.services.generate_item_transcript",
+        lambda item, timeout: (_ for _ in ()).throw(RuntimeError("bad audio")),
+    )
+
+    assert enrich_item_transcript(item) is False
+
+    item.refresh_from_db()
+    assert item.transcript_status == EnrichmentStatus.FAILED
+    assert item.transcript_error == "bad audio"
+

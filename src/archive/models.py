@@ -36,6 +36,11 @@ class Item(models.Model):
         choices=EnrichmentStatus.choices,
         default=EnrichmentStatus.PENDING,
     )
+    transcript_status = models.CharField(
+        max_length=16,
+        choices=EnrichmentStatus.choices,
+        default=EnrichmentStatus.PENDING,
+    )
     is_public = models.BooleanField(default=True)
     original_url = models.URLField()
     title = models.CharField(max_length=500, blank=True)
@@ -43,6 +48,7 @@ class Item(models.Model):
     published_at = models.DateTimeField(blank=True, null=True)
     short_summary = models.TextField(blank=True)
     long_summary = models.TextField(blank=True)
+    transcript = models.TextField(blank=True)
     notes = models.TextField(blank=True)
     tags = models.TextField(blank=True)
     audio_url = models.URLField(blank=True)
@@ -52,8 +58,13 @@ class Item(models.Model):
     original_published_at = models.DateTimeField(blank=True, null=True)
     enrichment_error = models.TextField(blank=True)
     summary_error = models.TextField(blank=True)
+    transcript_error = models.TextField(blank=True)
     summary_retry_count = models.PositiveSmallIntegerField(default=0)
     summary_retry_at = models.DateTimeField(blank=True, null=True)
+    short_summary_generated = models.BooleanField(default=False)
+    long_summary_generated = models.BooleanField(default=False)
+    tags_generated = models.BooleanField(default=False)
+    transcript_generated = models.BooleanField(default=False)
 
     class Meta:
         ordering = ("-shared_at", "-id")
@@ -90,6 +101,10 @@ class Item(models.Model):
     def tag_list(self) -> list[str]:
         raw_tags = self.tags.replace(",", "\n").splitlines()
         return [tag.strip() for tag in raw_tags if tag.strip()]
+
+    @property
+    def has_transcript(self) -> bool:
+        return bool(self.transcript.strip())
 
     def save(self, *args, **kwargs) -> None:
         if self.is_public and self.published_at is None:

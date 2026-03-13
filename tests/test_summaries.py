@@ -7,6 +7,7 @@ import pytest
 from archive.models import Item
 from archive.summaries import (
     SummaryGenerationError,
+    _build_summary_prompt,
     extract_summary_source_from_html,
     generate_item_summaries,
 )
@@ -83,3 +84,29 @@ def test_generate_item_summaries_requires_configured_api_key(settings) -> None:
 
     with pytest.raises(SummaryGenerationError, match="not configured"):
         generate_item_summaries(item=item)
+
+
+@pytest.mark.django_db
+def test_build_summary_prompt_includes_transcript_context() -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/episode",
+        title="Example episode",
+        source="Example Radio",
+        transcript="First transcript paragraph.\n\nSecond transcript paragraph.",
+    )
+
+    prompt = _build_summary_prompt(
+        item=item,
+        source=type(
+            "Source",
+            (),
+            {
+                "meta_description": "Meta description",
+                "extracted_text": "Body text with useful context.",
+            },
+        )(),
+    )
+
+    assert "Transcript:" in prompt
+    assert "First transcript paragraph." in prompt
+    assert "Extracted source text:" in prompt

@@ -8,6 +8,7 @@ Current shipped scope:
 - Milestone 2: public RSS feed with fixed-size archive pagination and autodiscovery
 - Milestone 3: background URL metadata extraction for title/source/author/publication time/media URL
 - Milestone 4: background short summary, long summary, and tag generation with operator-editable values
+- Milestone 5: background transcription for audio/video items with transcript-aware summary/tag refresh
 
 Public endpoints:
 
@@ -137,15 +138,19 @@ Important values:
 - `ARCHIVE_SUMMARY_API_KEY`
 - `ARCHIVE_SUMMARY_API_BASE` defaults to `https://api.openai.com/v1`
 - `ARCHIVE_SUMMARY_MODEL` defaults to `gpt-4o-mini`
+- `ARCHIVE_TRANSCRIPTION_API_KEY` defaults to `ARCHIVE_SUMMARY_API_KEY`
+- `ARCHIVE_TRANSCRIPTION_API_BASE` defaults to `ARCHIVE_SUMMARY_API_BASE`
+- `ARCHIVE_TRANSCRIPTION_MODEL` defaults to `gpt-4o-mini-transcribe`
 
 ## Background processing
 
-Metadata extraction plus summary/tag generation runs in a separate worker process:
+Metadata extraction plus transcription plus summary/tag generation runs in a separate worker process:
 
 ```bash
 just manage run_metadata_worker --once
 ```
 
-Summary generation is asynchronous and does not block capture or immediate publication. Failed summary
-jobs retry automatically with bounded backoff (5 minutes, 30 minutes, 2 hours) before remaining in a
-failed state for operator review.
+Summary generation is asynchronous and does not block capture or immediate publication. Audio/video
+transcription is also asynchronous and writes transcript text back onto the item when a direct media source
+can be fetched within the API size limit. Failed summary jobs retry automatically with bounded backoff
+(5 minutes, 30 minutes, 2 hours) before remaining in a failed state for operator review.

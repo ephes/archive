@@ -34,6 +34,13 @@
         </section>
     {% endif %}
 
+    {% if item.transcript %}
+        <section class="content-block">
+            <h3>Transcript</h3>
+            <p>{{ item.transcript|linebreaksbr }}</p>
+        </section>
+    {% endif %}
+
     {% if item.tag_list %}
         <section class="content-block">
             <h3>Tags</h3>

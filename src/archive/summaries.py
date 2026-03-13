@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 MAX_SUMMARY_SOURCE_BYTES = 1024 * 1024
 MAX_SUMMARY_INPUT_CHARS = 12_000
+MAX_TRANSCRIPT_INPUT_CHARS = 8_000
+MAX_SOURCE_WITH_TRANSCRIPT_INPUT_CHARS = 4_000
 
 
 class SummaryGenerationError(RuntimeError):
@@ -156,6 +158,15 @@ def extract_summary_source_from_html(html: str) -> SummarySource:
 
 
 def _build_summary_prompt(item: Item, source: SummarySource) -> str:
+    transcript_excerpt = _truncate_text(item.transcript, max_chars=MAX_TRANSCRIPT_INPUT_CHARS)
+    source_excerpt = _truncate_text(
+        source.extracted_text,
+        max_chars=(
+            MAX_SOURCE_WITH_TRANSCRIPT_INPUT_CHARS
+            if transcript_excerpt
+            else MAX_SUMMARY_INPUT_CHARS
+        ),
+    )
     sections = [
         "Generate archive metadata for this captured item.",
         "Return JSON with keys short_summary, long_summary, and tags.",
@@ -172,8 +183,11 @@ def _build_summary_prompt(item: Item, source: SummarySource) -> str:
         f"Shared notes: {item.notes or '(missing)'}",
         f"Page description: {source.meta_description or '(missing)'}",
         "",
+        "Transcript:",
+        transcript_excerpt or "(missing)",
+        "",
         "Extracted source text:",
-        source.extracted_text or "(missing)",
+        source_excerpt or "(missing)",
     ]
     return "\n".join(sections)
 
@@ -276,8 +290,8 @@ def _normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def _truncate_text(value: str) -> str:
+def _truncate_text(value: str, max_chars: int = MAX_SUMMARY_INPUT_CHARS) -> str:
     normalized = value.strip()
-    if len(normalized) <= MAX_SUMMARY_INPUT_CHARS:
+    if len(normalized) <= max_chars:
         return normalized
-    return normalized[:MAX_SUMMARY_INPUT_CHARS].rsplit(" ", 1)[0].strip()
+    return normalized[:max_chars].rsplit(" ", 1)[0].strip()

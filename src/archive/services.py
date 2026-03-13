@@ -12,6 +12,7 @@ from django.utils import timezone
 from archive.metadata import AUDIO_SUFFIXES, extract_metadata_from_url
 from archive.models import EnrichmentStatus, Item, ItemKind
 from archive.summaries import generate_item_summaries
+from archive.transcriptions import can_transcribe_item, generate_item_transcript
 
 logger = logging.getLogger(__name__)
 VIDEO_HOSTS = {"youtube.com", "www.youtube.com", "youtu.be", "vimeo.com", "www.vimeo.com"}
@@ -20,6 +21,7 @@ SUMMARY_RETRY_DELAYS = (
     timedelta(minutes=30),
     timedelta(hours=2),
 )
+TRANSCRIBABLE_ITEM_KINDS = (ItemKind.PODCAST_EPISODE, ItemKind.VIDEO)
 
 
 def infer_kind(url: str, explicit_kind: str = "", audio_url: str = "") -> str:
@@ -91,24 +93,41 @@ def prepare_item_for_enrichment(item: Item) -> Item:
         item.summary_error = ""
         item.summary_retry_count = 0
         item.summary_retry_at = None
+
+    if item.has_transcript:
+        item.transcript_status = EnrichmentStatus.COMPLETE
+        item.transcript_error = ""
+        item.transcript_generated = bool(item.transcript_generated)
+    else:
+        item.transcript_status = EnrichmentStatus.PENDING
+        item.transcript_error = ""
     return item
 
 
-def enrich_item_metadata(item: Item, timeout: int = 15, summary_timeout: int = 60) -> bool:
+def enrich_item_metadata(
+    item: Item,
+    timeout: int = 15,
+    summary_timeout: int = 60,
+    transcription_timeout: int = 300,
+) -> bool:
     metadata_success = True
+    transcript_success = True
     summary_success = True
 
     if item.enrichment_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
         metadata_success = _enrich_item_metadata_fields(item=item, timeout=timeout)
 
+    if item.transcript_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
+        transcript_success = enrich_item_transcript(item=item, timeout=transcription_timeout)
+
     if item.summary_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
         summary_success = enrich_item_summaries(item=item, timeout=summary_timeout)
 
-    return metadata_success and summary_success
+    return metadata_success and transcript_success and summary_success
 
 
 def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
-    if _has_generated_summaries(item):
+    if not _summary_generation_needed(item):
         if item.summary_status != EnrichmentStatus.COMPLETE or item.summary_error:
             item.summary_status = EnrichmentStatus.COMPLETE
             item.summary_error = ""
@@ -131,15 +150,18 @@ def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
         return _mark_summary_failure(item, str(exc))
 
     update_fields: list[str] = []
-    if not item.short_summary and generated.short_summary:
+    if (not item.short_summary or item.short_summary_generated) and generated.short_summary:
         item.short_summary = generated.short_summary
-        update_fields.append("short_summary")
-    if not item.long_summary and generated.long_summary:
+        item.short_summary_generated = True
+        update_fields.extend(["short_summary", "short_summary_generated"])
+    if (not item.long_summary or item.long_summary_generated) and generated.long_summary:
         item.long_summary = generated.long_summary
-        update_fields.append("long_summary")
-    if not item.tags and generated.tags:
+        item.long_summary_generated = True
+        update_fields.extend(["long_summary", "long_summary_generated"])
+    if (not item.tags or item.tags_generated) and generated.tags:
         item.tags = "\n".join(generated.tags)
-        update_fields.append("tags")
+        item.tags_generated = True
+        update_fields.extend(["tags", "tags_generated"])
 
     if not _has_generated_summaries(item):
         return _mark_summary_failure(item, "Summary response did not produce all required fields")
@@ -155,10 +177,59 @@ def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
     return True
 
 
+def enrich_item_transcript(item: Item, timeout: int = 300) -> bool:
+    if item.has_transcript:
+        if item.transcript_status != EnrichmentStatus.COMPLETE or item.transcript_error:
+            item.transcript_status = EnrichmentStatus.COMPLETE
+            item.transcript_error = ""
+            item.save(update_fields=["transcript_status", "transcript_error"])
+        return True
+
+    if not can_transcribe_item(item):
+        if item.transcript_status != EnrichmentStatus.COMPLETE or item.transcript_error:
+            item.transcript_status = EnrichmentStatus.COMPLETE
+            item.transcript_error = ""
+            item.save(update_fields=["transcript_status", "transcript_error"])
+        return True
+
+    try:
+        transcript = generate_item_transcript(item=item, timeout=timeout)
+    except Exception as exc:
+        logger.exception("Transcript generation failed for item %s", item.pk)
+        return _mark_transcript_failure(item, str(exc))
+
+    item.transcript = transcript
+    item.transcript_generated = True
+    item.transcript_status = EnrichmentStatus.COMPLETE
+    item.transcript_error = ""
+    update_fields = [
+        "transcript",
+        "transcript_generated",
+        "transcript_status",
+        "transcript_error",
+    ]
+
+    if _summary_should_refresh_from_transcript(item):
+        item.summary_status = EnrichmentStatus.PENDING
+        item.summary_error = ""
+        item.summary_retry_count = 0
+        item.summary_retry_at = None
+        update_fields.extend(
+            [
+                "summary_status",
+                "summary_error",
+                "summary_retry_count",
+                "summary_retry_at",
+            ]
+        )
+
+    item.save(update_fields=sorted(set(update_fields)))
+    return True
 def recover_processing_items() -> int:
     return Item.objects.filter(
         Q(enrichment_status=EnrichmentStatus.PROCESSING)
         | Q(summary_status=EnrichmentStatus.PROCESSING)
+        | Q(transcript_status=EnrichmentStatus.PROCESSING)
     ).update(
         enrichment_status=Case(
             When(
@@ -174,6 +245,13 @@ def recover_processing_items() -> int:
             ),
             default=F("summary_status"),
         ),
+        transcript_status=Case(
+            When(
+                transcript_status=EnrichmentStatus.PROCESSING,
+                then=Value(EnrichmentStatus.PENDING),
+            ),
+            default=F("transcript_status"),
+        ),
         summary_retry_at=Case(
             When(summary_status=EnrichmentStatus.PROCESSING, then=Value(None)),
             default=F("summary_retry_at"),
@@ -188,6 +266,7 @@ def claim_pending_item() -> Item | None:
             Item.objects.select_for_update()
             .filter(
                 Q(enrichment_status=EnrichmentStatus.PENDING)
+                | _claimable_transcript_query()
                 | _claimable_summary_query(now)
             )
             .order_by("shared_at", "id")
@@ -206,18 +285,33 @@ def claim_pending_item() -> Item | None:
             item.summary_error = ""
             item.summary_retry_at = None
             update_fields.extend(["summary_status", "summary_error", "summary_retry_at"])
+        if _transcript_should_start(item):
+            item.transcript_status = EnrichmentStatus.PROCESSING
+            item.transcript_error = ""
+            update_fields.extend(["transcript_status", "transcript_error"])
 
-        item.save(update_fields=sorted(set(update_fields)))
+        if update_fields:
+            item.save(update_fields=sorted(set(update_fields)))
     return item
 
 
-def enrich_pending_items(limit: int = 1, timeout: int = 15, summary_timeout: int = 60) -> int:
+def enrich_pending_items(
+    limit: int = 1,
+    timeout: int = 15,
+    summary_timeout: int = 60,
+    transcription_timeout: int = 300,
+) -> int:
     processed = 0
     for _ in range(limit):
         item = claim_pending_item()
         if item is None:
             break
-        enrich_item_metadata(item=item, timeout=timeout, summary_timeout=summary_timeout)
+        enrich_item_metadata(
+            item=item,
+            timeout=timeout,
+            summary_timeout=summary_timeout,
+            transcription_timeout=transcription_timeout,
+        )
         processed += 1
     return processed
 
@@ -236,6 +330,21 @@ def _has_full_metadata(item: Item) -> bool:
 
 def _has_generated_summaries(item: Item) -> bool:
     return bool(item.short_summary.strip() and item.long_summary.strip() and item.tag_list)
+
+
+def _summary_generation_needed(item: Item) -> bool:
+    if not _has_generated_summaries(item):
+        return True
+    return (
+        any(
+            (
+                item.short_summary_generated,
+                item.long_summary_generated,
+                item.tags_generated,
+            )
+        )
+        and item.has_transcript
+    )
 
 
 def _enrich_item_metadata_fields(item: Item, timeout: int = 15) -> bool:
@@ -308,6 +417,14 @@ def _mark_summary_failure(item: Item, error_message: str) -> bool:
     return False
 
 
+def _mark_transcript_failure(item: Item, error_message: str) -> bool:
+    item.transcript_error = error_message
+    if item.has_transcript:
+        item.transcript_status = EnrichmentStatus.COMPLETE
+    else:
+        item.transcript_status = EnrichmentStatus.FAILED
+    item.save(update_fields=["transcript_status", "transcript_error"])
+    return False
 def _next_summary_retry_at(retry_count: int) -> datetime | None:
     # retry_count tracks failures so far after incrementing in _mark_summary_failure:
     # 1/2/3 map to the configured backoff slots, and 4 means retries are exhausted.
@@ -332,6 +449,28 @@ def _summary_should_start(item: Item, now: datetime) -> bool:
     if item.summary_retry_count > len(SUMMARY_RETRY_DELAYS):
         return False
     return item.summary_retry_at is None or item.summary_retry_at <= now
+
+
+def _claimable_transcript_query() -> Q:
+    transcribable_query = ~Q(audio_url="") | ~Q(media_url="") | Q(kind__in=TRANSCRIBABLE_ITEM_KINDS)
+    return Q(transcript_status=EnrichmentStatus.PENDING) & transcribable_query
+
+
+def _transcript_should_start(item: Item) -> bool:
+    return item.transcript_status == EnrichmentStatus.PENDING and can_transcribe_item(item)
+
+
+def _summary_should_refresh_from_transcript(item: Item) -> bool:
+    return any(
+        (
+            not item.short_summary,
+            not item.long_summary,
+            not item.tags,
+            item.short_summary_generated,
+            item.long_summary_generated,
+            item.tags_generated,
+        )
+    )
 
 
 def _infer_kind_from_metadata(item: Item, kind_hint: str) -> str:

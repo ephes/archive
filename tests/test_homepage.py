@@ -74,6 +74,7 @@ def test_detail_page_shows_audio_player(client) -> None:
         title="Radio feature",
         short_summary="Short summary",
         long_summary="Long summary for the item.",
+        transcript="Transcript paragraph one.\n\nTranscript paragraph two.",
         tags="radio\nfeature\nculture",
         audio_url="https://cdn.example.com/audio.mp3",
         kind=ItemKind.PODCAST_EPISODE,
@@ -86,6 +87,7 @@ def test_detail_page_shows_audio_player(client) -> None:
     assert b"Open original" in response.content
     assert b"Short summary" in response.content
     assert b"Long summary for the item." in response.content
+    assert b"Transcript paragraph one." in response.content
     assert b"feature" in response.content
 
 
@@ -206,6 +208,7 @@ def test_editor_form_requires_login_and_creates_item(client, editor_user) -> Non
             "title": "Manual capture",
             "short_summary": "Manual short summary",
             "long_summary": "Manual long summary",
+            "transcript": "Manual transcript",
             "tags": "manual\ntest",
             "notes": "Fallback form",
             "kind": ItemKind.LINK,
@@ -220,6 +223,7 @@ def test_editor_form_requires_login_and_creates_item(client, editor_user) -> Non
     assert response["Location"].endswith(item.get_absolute_url())
     assert item.short_summary == "Manual short summary"
     assert item.long_summary == "Manual long summary"
+    assert item.transcript == "Manual transcript"
     assert item.tags == "manual\ntest"
 
 
@@ -232,6 +236,7 @@ def test_editor_form_exposes_generated_fields_for_manual_edits(client, editor_us
     assert response.status_code == 200
     assert b'name="short_summary"' in response.content
     assert b'name="long_summary"' in response.content
+    assert b'name="transcript"' in response.content
     assert b'name="tags"' in response.content
 
 

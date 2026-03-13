@@ -14,6 +14,7 @@ class ItemAdmin(admin.ModelAdmin):
         "enrichment_status",
         "summary_status",
         "transcript_status",
+        "article_audio_status",
         "source",
         "shared_at",
     )
@@ -23,6 +24,7 @@ class ItemAdmin(admin.ModelAdmin):
         "enrichment_status",
         "summary_status",
         "transcript_status",
+        "article_audio_status",
     )
     search_fields = (
         "title",
@@ -41,6 +43,7 @@ class ItemAdmin(admin.ModelAdmin):
         "enrichment_error",
         "summary_error",
         "transcript_error",
+        "article_audio_error",
         "summary_retry_count",
         "summary_retry_at",
     )

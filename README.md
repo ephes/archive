@@ -141,6 +141,13 @@ Important values:
 - `ARCHIVE_TRANSCRIPTION_API_KEY` defaults to `ARCHIVE_SUMMARY_API_KEY`
 - `ARCHIVE_TRANSCRIPTION_API_BASE` defaults to `ARCHIVE_SUMMARY_API_BASE`
 - `ARCHIVE_TRANSCRIPTION_MODEL` defaults to `gpt-4o-mini-transcribe`
+- `ARCHIVE_ARTICLE_AUDIO_API_KEY` defaults to `ARCHIVE_TRANSCRIPTION_API_KEY`
+- `ARCHIVE_ARTICLE_AUDIO_API_BASE` defaults to `ARCHIVE_TRANSCRIPTION_API_BASE`
+- `ARCHIVE_ARTICLE_AUDIO_MODEL` defaults to `tts-1`
+- `ARCHIVE_ARTICLE_AUDIO_VOICE` defaults to empty and lets Voxhelm choose its default voice
+- `ARCHIVE_ARTICLE_AUDIO_LANGUAGE` defaults to empty
+- `ARCHIVE_ARTICLE_AUDIO_POLL_SECONDS` defaults to `30`
+- `ARCHIVE_ARTICLE_AUDIO_MAX_BYTES` defaults to `52428800` (50 MiB)
 
 ## Background processing
 
@@ -153,4 +160,6 @@ just manage run_metadata_worker --once
 Summary generation is asynchronous and does not block capture or immediate publication. Audio/video
 transcription is also asynchronous and writes transcript text back onto the item when a direct media source
 can be fetched within the API size limit. Failed summary jobs retry automatically with bounded backoff
-(5 minutes, 30 minutes, 2 hours) before remaining in a failed state for operator review.
+(5 minutes, 30 minutes, 2 hours) before remaining in a failed state for operator review. Article items can
+also submit a Voxhelm batch `synthesize` job once a summary exists; Archive stores the private artifact
+reference and exposes the finished audio through a public item-scoped proxy URL on the detail page.

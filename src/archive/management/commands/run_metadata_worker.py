@@ -9,7 +9,7 @@ from archive.services import claim_pending_item, enrich_item_metadata, recover_p
 
 
 class Command(BaseCommand):
-    help = "Process pending Archive metadata, transcript, summary, and tag jobs."
+    help = "Process pending Archive metadata, transcript, summary, tag, and article-audio jobs."
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -88,6 +88,8 @@ class Command(BaseCommand):
                         "transcript_error",
                         "summary_status",
                         "summary_error",
+                        "article_audio_status",
+                        "article_audio_error",
                         "title",
                     ]
                 )
@@ -101,7 +103,9 @@ class Command(BaseCommand):
                         f"transcript_status={item.transcript_status}; "
                         f"transcript_error={item.transcript_error}; "
                         f"summary_status={item.summary_status}; "
-                        f"summary_error={item.summary_error}"
+                        f"summary_error={item.summary_error}; "
+                        f"article_audio_status={item.article_audio_status}; "
+                        f"article_audio_error={item.article_audio_error}"
                     )
             if options["once"]:
                 self.stdout.write(self.style.SUCCESS(f"Processed {processed} item(s)."))

@@ -5,7 +5,9 @@ from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
 
-from archive.models import Item, ItemKind
+from archive.article_audio import DownloadedArticleAudio
+from archive.forms import ItemForm
+from archive.models import EnrichmentStatus, Item, ItemKind
 from archive.services import infer_kind
 
 
@@ -89,6 +91,48 @@ def test_detail_page_shows_audio_player(client) -> None:
     assert b"Long summary for the item." in response.content
     assert b"Transcript paragraph one." in response.content
     assert b"feature" in response.content
+
+
+@pytest.mark.django_db
+def test_detail_page_shows_generated_article_audio_player(client) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/article",
+        title="Generated article audio",
+        short_summary="Short summary",
+        long_summary="Long summary for the article.",
+        kind=ItemKind.ARTICLE,
+        article_audio_status="complete",
+        article_audio_generated=True,
+        article_audio_artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+    )
+
+    response = client.get(reverse("archive:item-detail", kwargs={"pk": item.pk}))
+
+    assert response.status_code == 200
+    article_audio_url = reverse("archive:item-article-audio", kwargs={"pk": item.pk})
+    assert article_audio_url.encode() in response.content
+
+
+@pytest.mark.django_db
+def test_item_article_audio_proxy_returns_generated_audio(client, monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/article",
+        title="Generated article audio",
+        kind=ItemKind.ARTICLE,
+        article_audio_status="complete",
+        article_audio_generated=True,
+        article_audio_artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+    )
+    monkeypatch.setattr(
+        "archive.views.download_generated_article_audio",
+        lambda item: DownloadedArticleAudio(content_type="audio/mpeg", payload=b"ID3-audio"),
+    )
+
+    response = client.get(reverse("archive:item-article-audio", kwargs={"pk": item.pk}))
+
+    assert response.status_code == 200
+    assert response["Content-Type"] == "audio/mpeg"
+    assert response.content == b"ID3-audio"
 
 
 @pytest.mark.django_db
@@ -238,6 +282,54 @@ def test_editor_form_exposes_generated_fields_for_manual_edits(client, editor_us
     assert b'name="long_summary"' in response.content
     assert b'name="transcript"' in response.content
     assert b'name="tags"' in response.content
+
+
+@pytest.mark.django_db
+def test_item_form_marks_new_non_article_items_article_audio_complete() -> None:
+    form = ItemForm(
+        data={
+            "original_url": "https://example.com/link",
+            "title": "Manual link",
+            "short_summary": "",
+            "long_summary": "",
+            "transcript": "",
+            "tags": "",
+            "notes": "",
+            "kind": ItemKind.LINK,
+            "source": "",
+            "audio_url": "",
+            "is_public": True,
+        }
+    )
+
+    assert form.is_valid(), form.errors
+    item = form.save()
+
+    assert item.article_audio_status == EnrichmentStatus.COMPLETE
+
+
+@pytest.mark.django_db
+def test_item_form_marks_new_article_items_article_audio_pending() -> None:
+    form = ItemForm(
+        data={
+            "original_url": "https://example.com/article",
+            "title": "Manual article",
+            "short_summary": "Short summary",
+            "long_summary": "Long summary",
+            "transcript": "",
+            "tags": "",
+            "notes": "",
+            "kind": ItemKind.ARTICLE,
+            "source": "",
+            "audio_url": "",
+            "is_public": True,
+        }
+    )
+
+    assert form.is_valid(), form.errors
+    item = form.save()
+
+    assert item.article_audio_status == EnrichmentStatus.PENDING
 
 
 @pytest.mark.django_db

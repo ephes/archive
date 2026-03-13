@@ -52,9 +52,9 @@
         </section>
     {% endif %}
 
-    {% if item.audio_url %}
-        <audio controls preload="none" src="{{ item.audio_url }}">
-            <a href="{{ item.audio_url }}">Listen</a>
+    {% if item.has_playable_audio %}
+        <audio controls preload="none" src="{{ item.playback_audio_url }}">
+            <a href="{{ item.playback_audio_url }}">Listen</a>
         </audio>
     {% endif %}
 

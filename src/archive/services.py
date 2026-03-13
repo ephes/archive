@@ -5,10 +5,12 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from urllib.parse import urlparse
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Case, F, Q, Value, When
 from django.utils import timezone
 
+from archive.article_audio import can_generate_article_audio, generate_item_article_audio
 from archive.metadata import AUDIO_SUFFIXES, extract_metadata_from_url
 from archive.models import EnrichmentStatus, Item, ItemKind
 from archive.summaries import generate_item_summaries
@@ -101,6 +103,20 @@ def prepare_item_for_enrichment(item: Item) -> Item:
     else:
         item.transcript_status = EnrichmentStatus.PENDING
         item.transcript_error = ""
+
+    if item.has_generated_article_audio:
+        item.article_audio_status = EnrichmentStatus.COMPLETE
+        item.article_audio_error = ""
+        item.article_audio_generated = bool(item.article_audio_generated)
+        item.article_audio_poll_at = None
+    elif _supports_article_audio(item):
+        item.article_audio_status = EnrichmentStatus.PENDING
+        item.article_audio_error = ""
+        item.article_audio_poll_at = None
+    else:
+        item.article_audio_status = EnrichmentStatus.COMPLETE
+        item.article_audio_error = ""
+        item.article_audio_poll_at = None
     return item
 
 
@@ -109,10 +125,12 @@ def enrich_item_metadata(
     timeout: int = 15,
     summary_timeout: int = 60,
     transcription_timeout: int = 300,
+    article_audio_timeout: int = 30,
 ) -> bool:
     metadata_success = True
     transcript_success = True
     summary_success = True
+    article_audio_success = True
 
     if item.enrichment_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
         metadata_success = _enrich_item_metadata_fields(item=item, timeout=timeout)
@@ -123,7 +141,10 @@ def enrich_item_metadata(
     if item.summary_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
         summary_success = enrich_item_summaries(item=item, timeout=summary_timeout)
 
-    return metadata_success and transcript_success and summary_success
+    if item.article_audio_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
+        article_audio_success = enrich_item_article_audio(item=item, timeout=article_audio_timeout)
+
+    return metadata_success and transcript_success and summary_success and article_audio_success
 
 
 def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
@@ -225,11 +246,103 @@ def enrich_item_transcript(item: Item, timeout: int = 300) -> bool:
 
     item.save(update_fields=sorted(set(update_fields)))
     return True
+
+
+def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
+    if item.has_generated_article_audio:
+        if (
+            item.article_audio_status != EnrichmentStatus.COMPLETE
+            or item.article_audio_error
+            or item.article_audio_poll_at is not None
+        ):
+            item.article_audio_status = EnrichmentStatus.COMPLETE
+            item.article_audio_error = ""
+            item.article_audio_poll_at = None
+            item.save(
+                update_fields=[
+                    "article_audio_status",
+                    "article_audio_error",
+                    "article_audio_poll_at",
+                ]
+            )
+        return True
+
+    if not _supports_article_audio(item):
+        if (
+            item.article_audio_status != EnrichmentStatus.COMPLETE
+            or item.article_audio_error
+            or item.article_audio_poll_at is not None
+        ):
+            item.article_audio_status = EnrichmentStatus.COMPLETE
+            item.article_audio_error = ""
+            item.article_audio_poll_at = None
+            item.save(
+                update_fields=[
+                    "article_audio_status",
+                    "article_audio_error",
+                    "article_audio_poll_at",
+                ]
+            )
+        return True
+
+    if not _article_audio_source_ready(item):
+        item.article_audio_status = EnrichmentStatus.PENDING
+        item.article_audio_error = ""
+        item.article_audio_poll_at = None
+        item.save(
+            update_fields=["article_audio_status", "article_audio_error", "article_audio_poll_at"]
+        )
+        return True
+
+    try:
+        update = generate_item_article_audio(item=item, timeout=timeout)
+    except Exception as exc:
+        logger.exception("Article audio generation failed for item %s", item.pk)
+        return _mark_article_audio_failure(item, str(exc))
+
+    if update.is_complete:
+        item.article_audio_job_id = update.job_id
+        item.article_audio_artifact_path = update.artifact_path
+        item.article_audio_generated = True
+        item.article_audio_status = EnrichmentStatus.COMPLETE
+        item.article_audio_error = ""
+        item.article_audio_poll_at = None
+        item.save(
+            update_fields=[
+                "article_audio_job_id",
+                "article_audio_artifact_path",
+                "article_audio_generated",
+                "article_audio_status",
+                "article_audio_error",
+                "article_audio_poll_at",
+            ]
+        )
+        return True
+
+    if update.is_pending:
+        item.article_audio_job_id = update.job_id
+        item.article_audio_status = EnrichmentStatus.PENDING
+        item.article_audio_error = ""
+        item.article_audio_poll_at = _next_article_audio_poll_at()
+        item.save(
+            update_fields=[
+                "article_audio_job_id",
+                "article_audio_status",
+                "article_audio_error",
+                "article_audio_poll_at",
+            ]
+        )
+        return True
+
+    return _mark_article_audio_failure(item, update.error_message)
+
+
 def recover_processing_items() -> int:
     return Item.objects.filter(
         Q(enrichment_status=EnrichmentStatus.PROCESSING)
         | Q(summary_status=EnrichmentStatus.PROCESSING)
         | Q(transcript_status=EnrichmentStatus.PROCESSING)
+        | Q(article_audio_status=EnrichmentStatus.PROCESSING)
     ).update(
         enrichment_status=Case(
             When(
@@ -252,9 +365,20 @@ def recover_processing_items() -> int:
             ),
             default=F("transcript_status"),
         ),
+        article_audio_status=Case(
+            When(
+                article_audio_status=EnrichmentStatus.PROCESSING,
+                then=Value(EnrichmentStatus.PENDING),
+            ),
+            default=F("article_audio_status"),
+        ),
         summary_retry_at=Case(
             When(summary_status=EnrichmentStatus.PROCESSING, then=Value(None)),
             default=F("summary_retry_at"),
+        ),
+        article_audio_poll_at=Case(
+            When(article_audio_status=EnrichmentStatus.PROCESSING, then=Value(None)),
+            default=F("article_audio_poll_at"),
         ),
     )
 
@@ -268,6 +392,7 @@ def claim_pending_item() -> Item | None:
                 Q(enrichment_status=EnrichmentStatus.PENDING)
                 | _claimable_transcript_query()
                 | _claimable_summary_query(now)
+                | _claimable_article_audio_query(now)
             )
             .order_by("shared_at", "id")
             .first()
@@ -289,6 +414,10 @@ def claim_pending_item() -> Item | None:
             item.transcript_status = EnrichmentStatus.PROCESSING
             item.transcript_error = ""
             update_fields.extend(["transcript_status", "transcript_error"])
+        if _article_audio_should_start(item, now):
+            item.article_audio_status = EnrichmentStatus.PROCESSING
+            item.article_audio_error = ""
+            update_fields.extend(["article_audio_status", "article_audio_error"])
 
         if update_fields:
             item.save(update_fields=sorted(set(update_fields)))
@@ -300,6 +429,7 @@ def enrich_pending_items(
     timeout: int = 15,
     summary_timeout: int = 60,
     transcription_timeout: int = 300,
+    article_audio_timeout: int = 30,
 ) -> int:
     processed = 0
     for _ in range(limit):
@@ -311,6 +441,7 @@ def enrich_pending_items(
             timeout=timeout,
             summary_timeout=summary_timeout,
             transcription_timeout=transcription_timeout,
+            article_audio_timeout=article_audio_timeout,
         )
         processed += 1
     return processed
@@ -381,6 +512,7 @@ def _enrich_item_metadata_fields(item: Item, timeout: int = 15) -> bool:
 
     item.enrichment_status = EnrichmentStatus.COMPLETE
     item.enrichment_error = ""
+    _refresh_article_audio_state(item, update_fields)
     update_fields.extend(["enrichment_status", "enrichment_error"])
     item.save(update_fields=sorted(set(update_fields)))
     return True
@@ -425,6 +557,22 @@ def _mark_transcript_failure(item: Item, error_message: str) -> bool:
         item.transcript_status = EnrichmentStatus.FAILED
     item.save(update_fields=["transcript_status", "transcript_error"])
     return False
+
+
+def _mark_article_audio_failure(item: Item, error_message: str) -> bool:
+    item.article_audio_error = error_message
+    item.article_audio_status = EnrichmentStatus.FAILED
+    item.article_audio_poll_at = None
+    item.save(
+        update_fields=[
+            "article_audio_status",
+            "article_audio_error",
+            "article_audio_poll_at",
+        ]
+    )
+    return False
+
+
 def _next_summary_retry_at(retry_count: int) -> datetime | None:
     # retry_count tracks failures so far after incrementing in _mark_summary_failure:
     # 1/2/3 map to the configured backoff slots, and 4 means retries are exhausted.
@@ -460,6 +608,25 @@ def _transcript_should_start(item: Item) -> bool:
     return item.transcript_status == EnrichmentStatus.PENDING and can_transcribe_item(item)
 
 
+def _claimable_article_audio_query(now: datetime) -> Q:
+    has_script_source = ~Q(long_summary="") | ~Q(short_summary="") | ~Q(notes="")
+    return (
+        Q(article_audio_status=EnrichmentStatus.PENDING)
+        & Q(kind=ItemKind.ARTICLE)
+        & Q(summary_status=EnrichmentStatus.COMPLETE)
+        & has_script_source
+        & (Q(article_audio_poll_at__isnull=True) | Q(article_audio_poll_at__lte=now))
+    )
+
+
+def _article_audio_should_start(item: Item, now: datetime) -> bool:
+    if item.article_audio_status != EnrichmentStatus.PENDING:
+        return False
+    if item.article_audio_poll_at is not None and item.article_audio_poll_at > now:
+        return False
+    return _supports_article_audio(item) and _article_audio_source_ready(item)
+
+
 def _summary_should_refresh_from_transcript(item: Item) -> bool:
     return any(
         (
@@ -471,6 +638,51 @@ def _summary_should_refresh_from_transcript(item: Item) -> bool:
             item.tags_generated,
         )
     )
+
+
+def _supports_article_audio(item: Item) -> bool:
+    return item.kind == ItemKind.ARTICLE
+
+
+def _article_audio_source_ready(item: Item) -> bool:
+    return item.summary_status == EnrichmentStatus.COMPLETE and can_generate_article_audio(item)
+
+
+def _next_article_audio_poll_at() -> datetime:
+    return timezone.now() + timedelta(seconds=settings.ARCHIVE_ARTICLE_AUDIO_POLL_SECONDS)
+
+
+def _refresh_article_audio_state(item: Item, update_fields: list[str]) -> None:
+    if item.has_generated_article_audio:
+        if item.article_audio_status != EnrichmentStatus.COMPLETE:
+            item.article_audio_status = EnrichmentStatus.COMPLETE
+            update_fields.append("article_audio_status")
+        if item.article_audio_error:
+            item.article_audio_error = ""
+            update_fields.append("article_audio_error")
+        if item.article_audio_poll_at is not None:
+            item.article_audio_poll_at = None
+            update_fields.append("article_audio_poll_at")
+        return
+
+    if _supports_article_audio(item):
+        if item.article_audio_status == EnrichmentStatus.COMPLETE:
+            item.article_audio_status = EnrichmentStatus.PENDING
+            update_fields.append("article_audio_status")
+        if item.article_audio_error:
+            item.article_audio_error = ""
+            update_fields.append("article_audio_error")
+        return
+
+    if item.article_audio_status != EnrichmentStatus.COMPLETE:
+        item.article_audio_status = EnrichmentStatus.COMPLETE
+        update_fields.append("article_audio_status")
+    if item.article_audio_error:
+        item.article_audio_error = ""
+        update_fields.append("article_audio_error")
+    if item.article_audio_poll_at is not None:
+        item.article_audio_poll_at = None
+        update_fields.append("article_audio_poll_at")
 
 
 def _infer_kind_from_metadata(item: Item, kind_hint: str) -> str:

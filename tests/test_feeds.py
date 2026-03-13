@@ -127,8 +127,7 @@ def test_rss_feed_archive_uses_fixed_size_item_windows(client) -> None:
     assert archive_items[-1].findtext("title") == "Item 54"
 
     main_links = {
-        (link.attrib["rel"], link.attrib["href"])
-        for link in channel.findall("atom:link", ATOM_NS)
+        (link.attrib["rel"], link.attrib["href"]) for link in channel.findall("atom:link", ATOM_NS)
     }
     archive_links = {
         (link.attrib["rel"], link.attrib["href"])

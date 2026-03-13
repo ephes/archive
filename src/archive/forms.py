@@ -1,6 +1,6 @@
 from django.forms import ModelForm, Textarea
 
-from archive.models import EnrichmentStatus, Item
+from archive.models import EnrichmentStatus, Item, ItemKind
 
 
 class ItemForm(ModelForm):
@@ -29,6 +29,7 @@ class ItemForm(ModelForm):
 
     def save(self, commit: bool = True) -> Item:
         item = super().save(commit=False)
+        is_new = item.pk is None
 
         if "short_summary" in self.changed_data:
             item.short_summary_generated = False
@@ -40,8 +41,28 @@ class ItemForm(ModelForm):
             item.transcript_generated = False
             item.transcript_status = EnrichmentStatus.COMPLETE
             item.transcript_error = ""
+        if is_new or "kind" in self.changed_data:
+            _normalize_article_audio_status(item)
 
         if commit:
             item.save()
             self.save_m2m()
         return item
+
+
+def _normalize_article_audio_status(item: Item) -> None:
+    if item.has_generated_article_audio:
+        item.article_audio_status = EnrichmentStatus.COMPLETE
+        item.article_audio_error = ""
+        item.article_audio_poll_at = None
+        return
+
+    if item.kind == ItemKind.ARTICLE:
+        item.article_audio_status = EnrichmentStatus.PENDING
+        item.article_audio_error = ""
+        item.article_audio_poll_at = None
+        return
+
+    item.article_audio_status = EnrichmentStatus.COMPLETE
+    item.article_audio_error = ""
+    item.article_audio_poll_at = None

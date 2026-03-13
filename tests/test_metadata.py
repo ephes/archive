@@ -6,11 +6,13 @@ import pytest
 from django.urls import reverse
 from django.utils import timezone
 
+from archive.article_audio import ArticleAudioJobUpdate
 from archive.metadata import MetadataExtractionError, extract_metadata_from_html
 from archive.models import EnrichmentStatus, Item, ItemKind
 from archive.services import (
     SUMMARY_RETRY_DELAYS,
     claim_pending_item,
+    enrich_item_article_audio,
     enrich_item_metadata,
     enrich_item_transcript,
     enrich_pending_items,
@@ -665,3 +667,59 @@ def test_enrich_item_transcript_marks_failures(monkeypatch) -> None:
     assert item.transcript_status == EnrichmentStatus.FAILED
     assert item.transcript_error == "bad audio"
 
+
+@pytest.mark.django_db
+def test_enrich_item_article_audio_records_pending_job(monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/article",
+        title="Article headline",
+        short_summary="Short summary",
+        long_summary="Long summary for audio.",
+        kind=ItemKind.ARTICLE,
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        article_audio_status=EnrichmentStatus.PROCESSING,
+    )
+
+    monkeypatch.setattr(
+        "archive.services.generate_item_article_audio",
+        lambda item, timeout: ArticleAudioJobUpdate(job_id="job-123", state="queued"),
+    )
+
+    assert enrich_item_article_audio(item) is True
+
+    item.refresh_from_db()
+    assert item.article_audio_status == EnrichmentStatus.PENDING
+    assert item.article_audio_job_id == "job-123"
+    assert item.article_audio_poll_at is not None
+
+
+@pytest.mark.django_db
+def test_enrich_pending_items_completes_generated_article_audio(monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/article",
+        title="Article headline",
+        short_summary="Short summary",
+        long_summary="Long summary for audio.",
+        kind=ItemKind.ARTICLE,
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        transcript_status=EnrichmentStatus.COMPLETE,
+        article_audio_status=EnrichmentStatus.PENDING,
+    )
+
+    monkeypatch.setattr(
+        "archive.services.generate_item_article_audio",
+        lambda item, timeout: ArticleAudioJobUpdate(
+            job_id="job-123",
+            state="succeeded",
+            artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+        ),
+    )
+
+    assert enrich_pending_items(limit=1) == 1
+
+    item.refresh_from_db()
+    assert item.article_audio_status == EnrichmentStatus.COMPLETE
+    assert item.article_audio_generated is True
+    assert item.article_audio_artifact_path == "/v1/jobs/job-123/artifacts/speech.mp3"

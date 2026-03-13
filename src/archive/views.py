@@ -18,6 +18,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods
 from django.views.generic.edit import CreateView
 
+from archive.article_audio import ArticleAudioGenerationError, download_generated_article_audio
 from archive.forms import ItemForm
 from archive.models import Item
 from archive.services import infer_kind, prepare_item_for_enrichment, to_week_page, week_bounds
@@ -158,6 +159,22 @@ def rss_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
 def item_detail(request: HttpRequest, pk: int) -> HttpResponse:
     item = get_object_or_404(Item, pk=pk, is_public=True)
     return render(request, "archive/detail.html", {"item": item})
+
+
+@require_GET
+def item_article_audio(request: HttpRequest, pk: int) -> HttpResponse:
+    item = get_object_or_404(Item, pk=pk, is_public=True)
+    if not item.has_generated_article_audio:
+        raise Http404("Article audio is not available")
+
+    try:
+        audio = download_generated_article_audio(item=item)
+    except ArticleAudioGenerationError:
+        return HttpResponse("Article audio is temporarily unavailable.", status=502)
+
+    response = HttpResponse(audio.payload, content_type=audio.content_type)
+    response["Cache-Control"] = "public, max-age=3600"
+    return response
 
 
 class ItemCreateView(CreateView):

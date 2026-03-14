@@ -81,12 +81,11 @@ def archive_item_audio(item: Item, timeout: int = 300) -> ArchivedAudio:
 
 
 def open_archived_audio(item: Item):
-    if not item.archived_audio_path.strip():
-        raise MediaArchivalError("Item does not have archived audio")
-    try:
-        return storages["archive_media"].open(item.archived_audio_path, mode="rb")
-    except OSError as exc:
-        raise MediaArchivalError(f"Archived audio open failed: {exc}") from exc
+    return _open_archived_file(item.archived_audio_path, label="audio")
+
+
+def open_archived_video(item: Item):
+    return _open_archived_file(item.archived_video_path, label="video")
 
 
 def _archive_direct_audio(item: Item, source_url: str, timeout: int) -> ArchivedAudio:
@@ -387,6 +386,16 @@ def _save_storage_file(
     if storage.exists(target_name):
         storage.delete(target_name)
     return storage.save(target_name, File(file_handle, name=upload_name))
+
+
+def _open_archived_file(path: str, *, label: str):
+    normalized_path = path.strip()
+    if not normalized_path:
+        raise MediaArchivalError(f"Item does not have archived {label}")
+    try:
+        return storages["archive_media"].open(normalized_path, mode="rb")
+    except OSError as exc:
+        raise MediaArchivalError(f"Archived {label} open failed: {exc}") from exc
 
 
 def _delete_stored_object(object_name: str) -> None:

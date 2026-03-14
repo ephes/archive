@@ -8,7 +8,7 @@ Current shipped scope:
 - Milestone 2: public RSS feed with fixed-size archive pagination and autodiscovery
 - Milestone 3: background URL metadata extraction for title/source/author/publication time/media URL
 - Milestone 4: background short summary, long summary, and tag generation with operator-editable values
-- Milestone 5: background transcription for audio/video items with transcript-aware summary/tag refresh
+- Milestone 5: background transcription for audio/video items with archived-local-media preference and transcript-aware summary/tag refresh
 - Milestone 6: background archival of eligible remote audio/video, including YouTube page URLs, stable local audio enclosure URLs, and a separate podcast-style RSS feed
 
 Public endpoints:
@@ -176,8 +176,9 @@ Optional worker flags for the Milestone 6 slice:
   video-to-audio extraction work
 
 Summary generation is asynchronous and does not block capture or immediate publication. Audio/video
-transcription is also asynchronous and writes transcript text back onto the item when a direct media source
-can be fetched within the API size limit. Failed summary jobs retry automatically with bounded backoff
+transcription is also asynchronous and writes transcript text back onto the item when a transcribable media
+source is available, preferring archived local audio first, then archived local video, and falling back to
+direct remote media URLs within the API size limit. Failed summary jobs retry automatically with bounded backoff
 (5 minutes, 30 minutes, 2 hours) before remaining in a failed state for operator review. Article items can
 also submit a Voxhelm batch `synthesize` job once a summary exists; Archive stores the private artifact
 reference and exposes the finished audio through a public item-scoped proxy URL on the detail page. Podcast

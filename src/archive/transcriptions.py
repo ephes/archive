@@ -4,6 +4,7 @@ import json
 import mimetypes
 import re
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -11,6 +12,7 @@ from urllib.request import Request, urlopen
 
 from django.conf import settings
 
+from archive.media_archival import MediaArchivalError, open_archived_audio, open_archived_video
 from archive.metadata import REQUEST_HEADERS
 from archive.models import Item, ItemKind
 
@@ -51,8 +53,16 @@ class DownloadedMedia:
     payload: bytes
 
 
+@dataclass(frozen=True)
+class TranscriptionSource:
+    kind: str
+    location: str
+    content_type: str = ""
+    size_bytes: int = 0
+
+
 def can_transcribe_item(item: Item) -> bool:
-    return _select_transcription_source_url(item) is not None
+    return _select_transcription_source(item) is not None
 
 
 def generate_item_transcript(item: Item, timeout: int = 300) -> str:
@@ -60,11 +70,11 @@ def generate_item_transcript(item: Item, timeout: int = 300) -> str:
     if not api_key:
         raise TranscriptionGenerationError("Transcription is not configured")
 
-    source_url = _select_transcription_source_url(item)
-    if source_url is None:
+    source = _select_transcription_source(item)
+    if source is None:
         raise TranscriptionGenerationError("Item does not have a transcribable media source yet")
 
-    media = _download_media(source_url=source_url, timeout=timeout)
+    media = _load_transcription_media(item=item, source=source, timeout=timeout)
     prompt = _build_transcription_prompt(item=item)
     raw_transcript = _request_transcription(media=media, prompt=prompt, timeout=timeout)
     transcript = _normalize_transcript(raw_transcript)
@@ -73,7 +83,32 @@ def generate_item_transcript(item: Item, timeout: int = 300) -> str:
     return transcript
 
 
-def _select_transcription_source_url(item: Item) -> str | None:
+def _select_transcription_source(item: Item) -> TranscriptionSource | None:
+    archived_audio_path = item.archived_audio_path.strip()
+    if archived_audio_path:
+        return TranscriptionSource(
+            kind="archived_audio",
+            location=archived_audio_path,
+            content_type=item.archived_audio_content_type.strip(),
+            size_bytes=item.archived_audio_size_bytes,
+        )
+
+    archived_video_path = item.archived_video_path.strip()
+    if archived_video_path:
+        return TranscriptionSource(
+            kind="archived_video",
+            location=archived_video_path,
+            content_type=item.archived_video_content_type.strip(),
+            size_bytes=item.archived_video_size_bytes,
+        )
+
+    source_url = _select_remote_transcription_source_url(item)
+    if source_url is None:
+        return None
+    return TranscriptionSource(kind="remote_url", location=source_url)
+
+
+def _select_remote_transcription_source_url(item: Item) -> str | None:
     candidates = [item.audio_url.strip(), item.media_url.strip(), item.original_url.strip()]
     seen: set[str] = set()
     for candidate in candidates:
@@ -90,12 +125,23 @@ def _select_transcription_source_url(item: Item) -> str | None:
     return None
 
 
+def _load_transcription_media(
+    *,
+    item: Item,
+    source: TranscriptionSource,
+    timeout: int,
+) -> DownloadedMedia:
+    if source.kind == "remote_url":
+        return _download_remote_media(source_url=source.location, timeout=timeout)
+    return _read_archived_media(item=item, source=source)
+
+
 def _looks_like_media_url(url: str) -> bool:
     path = urlparse(url).path.lower()
     return any(path.endswith(suffix) for suffix in SUPPORTED_SUFFIXES)
 
 
-def _download_media(source_url: str, timeout: int) -> DownloadedMedia:
+def _download_remote_media(source_url: str, timeout: int) -> DownloadedMedia:
     request = Request(
         source_url,
         headers={
@@ -122,6 +168,42 @@ def _download_media(source_url: str, timeout: int) -> DownloadedMedia:
 
     if len(payload) > MAX_TRANSCRIPTION_BYTES:
         raise TranscriptionGenerationError("Media source exceeded 25 MiB transcription limit")
+
+    guessed_content_type = content_type or SUPPORTED_SUFFIXES[suffix]
+    if guessed_content_type == "application/octet-stream":
+        guessed_content_type = SUPPORTED_SUFFIXES[suffix]
+
+    return DownloadedMedia(
+        filename=f"transcription-input{suffix}",
+        content_type=guessed_content_type,
+        payload=payload,
+    )
+
+
+def _read_archived_media(item: Item, source: TranscriptionSource) -> DownloadedMedia:
+    opener = open_archived_audio if source.kind == "archived_audio" else open_archived_video
+    source_label = "audio" if source.kind == "archived_audio" else "video"
+    content_type = source.content_type.lower()
+    suffix = _detect_suffix(url=source.location, content_type=content_type)
+    if not suffix:
+        raise TranscriptionGenerationError(
+            f"Unsupported archived {source_label} type for transcription: "
+            f"{content_type or source.location or 'unknown'}"
+        )
+
+    if source.size_bytes > MAX_TRANSCRIPTION_BYTES:
+        raise TranscriptionGenerationError("Archived media exceeded 25 MiB transcription limit")
+
+    try:
+        with closing(opener(item)) as media_file:
+            payload = media_file.read(MAX_TRANSCRIPTION_BYTES + 1)
+    except MediaArchivalError as exc:
+        raise TranscriptionGenerationError(str(exc)) from exc
+    except OSError as exc:
+        raise TranscriptionGenerationError(f"Archived {source_label} read failed: {exc}") from exc
+
+    if len(payload) > MAX_TRANSCRIPTION_BYTES:
+        raise TranscriptionGenerationError("Archived media exceeded 25 MiB transcription limit")
 
     guessed_content_type = content_type or SUPPORTED_SUFFIXES[suffix]
     if guessed_content_type == "application/octet-stream":

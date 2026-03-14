@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import importlib
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
+from django.core.files.base import ContentFile
+from django.core.files.storage import storages
 from django.urls import reverse
 from django.utils import timezone
 
@@ -41,6 +44,12 @@ def stub_archive_audio(monkeypatch, size_bytes: int = 12345) -> None:
             size_bytes=size_bytes,
         ),
     )
+
+
+def _save_archived_media(path: str, payload: bytes) -> None:
+    if storages["archive_media"].exists(path):
+        storages["archive_media"].delete(path)
+    storages["archive_media"].save(path, ContentFile(payload))
 
 
 @pytest.mark.django_db
@@ -349,6 +358,22 @@ def test_recover_processing_items_requeues_transcript_processing_items() -> None
 
     stuck.refresh_from_db()
     assert stuck.transcript_status == EnrichmentStatus.PENDING
+
+
+@pytest.mark.django_db
+def test_claim_pending_item_includes_archived_media_only_transcripts() -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/archived-only",
+        archived_audio_path="items/1/audio/source.mp3",
+        transcript_status=EnrichmentStatus.PENDING,
+    )
+
+    claimed = claim_pending_item()
+
+    assert claimed is not None
+    assert claimed.pk == item.pk
+    item.refresh_from_db()
+    assert item.transcript_status == EnrichmentStatus.PROCESSING
 
 
 @pytest.mark.django_db
@@ -776,6 +801,69 @@ def test_transcript_does_not_overwrite_manual_summary_fields(monkeypatch) -> Non
     assert item.short_summary == "Manual short summary"
     assert item.long_summary == "Manual long summary"
     assert item.tags == "manual"
+
+
+@pytest.mark.django_db
+def test_youtube_item_transcribes_from_archived_media_after_archival(monkeypatch, settings) -> None:
+    item = Item.objects.create(
+        original_url="https://www.youtube.com/watch?v=demo123",
+        title="Archived YouTube item",
+        kind=ItemKind.VIDEO,
+        short_summary="Manual short summary",
+        long_summary="Manual long summary",
+        tags="manual",
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        media_archive_status=EnrichmentStatus.PROCESSING,
+        transcript_status=EnrichmentStatus.PROCESSING,
+    )
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
+    settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://api.openai.com/v1"
+    settings.ARCHIVE_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
+
+    def fake_archive_item_audio(item, timeout):
+        audio_path = f"items/{item.pk}/audio/extracted.mp3"
+        video_path = f"items/{item.pk}/video/source.mp4"
+        _save_archived_media(audio_path, b"archived-youtube-audio")
+        _save_archived_media(video_path, b"archived-youtube-video")
+        return ArchivedAudio(
+            object_name=audio_path,
+            content_type="audio/mpeg",
+            size_bytes=len(b"archived-youtube-audio"),
+            source_object_name=video_path,
+            source_content_type="video/mp4",
+            source_size_bytes=len(b"archived-youtube-video"),
+        )
+
+    class _FakeTranscriptionResponse:
+        headers = SimpleNamespace(get_content_type=lambda: "application/json")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"text":"Transcript from archived YouTube audio."}'
+
+    def fake_urlopen(request, timeout):
+        assert request.full_url != "https://www.youtube.com/watch?v=demo123"
+        assert request.full_url == "https://api.openai.com/v1/audio/transcriptions"
+        assert b"archived-youtube-audio" in request.data
+        return _FakeTranscriptionResponse()
+
+    monkeypatch.setattr("archive.services.archive_item_audio", fake_archive_item_audio)
+    monkeypatch.setattr("archive.transcriptions.urlopen", fake_urlopen)
+
+    assert enrich_item_metadata(item) is True
+
+    item.refresh_from_db()
+    assert item.media_archive_status == EnrichmentStatus.COMPLETE
+    assert item.archived_audio_path == f"items/{item.pk}/audio/extracted.mp3"
+    assert item.archived_video_path == f"items/{item.pk}/video/source.mp4"
+    assert item.transcript == "Transcript from archived YouTube audio."
+    assert item.transcript_status == EnrichmentStatus.COMPLETE
 
 
 @pytest.mark.django_db

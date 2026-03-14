@@ -755,7 +755,13 @@ def _summary_should_start(item: Item, now: datetime) -> bool:
 
 
 def _claimable_transcript_query() -> Q:
-    transcribable_query = ~Q(audio_url="") | ~Q(media_url="") | Q(kind__in=TRANSCRIBABLE_ITEM_KINDS)
+    transcribable_query = (
+        ~Q(archived_audio_path="")
+        | ~Q(archived_video_path="")
+        | ~Q(audio_url="")
+        | ~Q(media_url="")
+        | Q(kind__in=TRANSCRIBABLE_ITEM_KINDS)
+    )
     return Q(transcript_status=EnrichmentStatus.PENDING) & transcribable_query
 
 

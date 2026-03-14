@@ -329,6 +329,9 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
     item.archived_audio_path = archived_audio.object_name
     item.archived_audio_content_type = archived_audio.content_type
     item.archived_audio_size_bytes = archived_audio.size_bytes
+    item.archived_video_path = archived_audio.source_object_name
+    item.archived_video_content_type = archived_audio.source_content_type
+    item.archived_video_size_bytes = archived_audio.source_size_bytes
     item.media_archive_status = EnrichmentStatus.COMPLETE
     item.media_archive_error = ""
     item.media_archive_retry_count = 0
@@ -338,6 +341,9 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
             "archived_audio_path",
             "archived_audio_content_type",
             "archived_audio_size_bytes",
+            "archived_video_path",
+            "archived_video_content_type",
+            "archived_video_size_bytes",
             "media_archive_status",
             "media_archive_error",
             "media_archive_retry_count",

@@ -132,7 +132,31 @@ def test_detail_page_prefers_archived_audio_player(client) -> None:
     assert response.status_code == 200
     archived_audio_url = reverse("archive:item-archived-audio", kwargs={"pk": item.pk})
     assert archived_audio_url.encode() in response.content
-    assert b"Open archived audio" in response.content
+    assert b"Open local audio enclosure" in response.content
+
+
+@pytest.mark.django_db
+def test_detail_page_prefers_video_derived_local_audio_enclosure(client) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/video.mp4",
+        title="Archived documentary",
+        short_summary="Short summary",
+        media_url="https://cdn.example.com/video.mp4",
+        kind=ItemKind.VIDEO,
+        archived_audio_path="items/1/audio/extracted.mp3",
+        archived_audio_content_type="audio/mpeg",
+        archived_audio_size_bytes=8192,
+        archived_video_path="items/1/video/source.mp4",
+        archived_video_content_type="video/mp4",
+        archived_video_size_bytes=16384,
+    )
+
+    response = client.get(reverse("archive:item-detail", kwargs={"pk": item.pk}))
+
+    assert response.status_code == 200
+    archived_audio_url = reverse("archive:item-archived-audio", kwargs={"pk": item.pk})
+    assert archived_audio_url.encode() in response.content
+    assert b"Open local audio enclosure" in response.content
 
 
 @pytest.mark.django_db

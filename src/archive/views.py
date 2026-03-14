@@ -140,9 +140,9 @@ def _render_feed(
             "kind": item.get_kind_display(),
         }
         if include_enclosures:
-            entry["enclosure_url"] = request.build_absolute_uri(item.archived_audio_url)
-            entry["enclosure_type"] = item.archived_audio_content_type or "audio/mpeg"
-            entry["enclosure_length"] = item.archived_audio_size_bytes
+            entry["enclosure_url"] = request.build_absolute_uri(item.stable_audio_enclosure_url)
+            entry["enclosure_type"] = item.stable_audio_content_type
+            entry["enclosure_length"] = item.stable_audio_size_bytes
         feed_items.append(entry)
 
     return render(
@@ -225,7 +225,7 @@ def podcast_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
         canonical_view_name="archive:podcast-feed",
         paged_view_name="archive:podcast-feed-page",
         feed_title="Archive Podcast",
-        feed_description="Podcast-style archive feed for items with locally archived audio.",
+        feed_description="Podcast-style archive feed for items with stable local audio enclosures.",
         page_description="Archive podcast feed page {page}.",
         include_enclosures=True,
     )

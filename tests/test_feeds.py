@@ -197,11 +197,23 @@ def test_podcast_feed_includes_only_items_with_local_archived_audio_and_summary(
         archived_audio_content_type="audio/mpeg",
         archived_audio_size_bytes=4096,
     )
+    video_item = Item.objects.create(
+        original_url="https://example.com/video.mp4",
+        title="Archived video",
+        short_summary="Video summary",
+        kind="video",
+        archived_audio_path="items/2/audio/extracted.mp3",
+        archived_audio_content_type="audio/mpeg",
+        archived_audio_size_bytes=5120,
+        archived_video_path="items/2/video/source.mp4",
+        archived_video_content_type="video/mp4",
+        archived_video_size_bytes=8192,
+    )
     Item.objects.create(
         original_url="https://example.com/no-summary",
         title="Missing summary",
         kind="podcast_episode",
-        archived_audio_path="items/2/audio/source.mp3",
+        archived_audio_path="items/3/audio/source.mp3",
         archived_audio_content_type="audio/mpeg",
         archived_audio_size_bytes=4096,
     )
@@ -217,7 +229,7 @@ def test_podcast_feed_includes_only_items_with_local_archived_audio_and_summary(
         short_summary="Podcast summary",
         kind="podcast_episode",
         is_public=False,
-        archived_audio_path="items/4/audio/source.mp3",
+        archived_audio_path="items/5/audio/source.mp3",
         archived_audio_content_type="audio/mpeg",
         archived_audio_size_bytes=4096,
     )
@@ -227,8 +239,17 @@ def test_podcast_feed_includes_only_items_with_local_archived_audio_and_summary(
     assert response.status_code == 200
     channel = parse_channel(response.content)
     items = channel.findall("item")
-    assert [item.findtext("title") for item in items] == ["Archived episode"]
-    enclosure = items[0].find("enclosure")
+    assert [item.findtext("title") for item in items] == ["Archived video", "Archived episode"]
+    first_enclosure = items[0].find("enclosure")
+    assert first_enclosure is not None
+    video_audio_url = reverse("archive:item-archived-audio", kwargs={"pk": video_item.pk})
+    assert first_enclosure.attrib == {
+        "url": f"http://testserver{video_audio_url}",
+        "length": "5120",
+        "type": "audio/mpeg",
+    }
+    assert items[0].findtext("description") == "Video summary"
+    enclosure = items[1].find("enclosure")
     assert enclosure is not None
     archived_audio_url = reverse("archive:item-archived-audio", kwargs={"pk": archived_item.pk})
     assert enclosure.attrib == {
@@ -236,7 +257,7 @@ def test_podcast_feed_includes_only_items_with_local_archived_audio_and_summary(
         "length": "4096",
         "type": "audio/mpeg",
     }
-    assert items[0].findtext("description") == "Podcast summary"
+    assert items[1].findtext("description") == "Podcast summary"
 
 
 @pytest.mark.django_db

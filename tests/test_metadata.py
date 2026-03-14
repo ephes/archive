@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -22,6 +23,13 @@ from archive.services import (
     recover_processing_items,
 )
 from archive.summaries import GeneratedSummary
+
+
+class _MigrationApps:
+    def get_model(self, app_label: str, model_name: str):
+        assert app_label == "archive"
+        assert model_name == "Item"
+        return Item
 
 
 def stub_archive_audio(monkeypatch, size_bytes: int = 12345) -> None:
@@ -381,6 +389,66 @@ def test_enrich_item_media_archive_records_archived_audio(monkeypatch) -> None:
     assert item.archived_audio_path == f"items/{item.pk}/audio/source.mp3"
     assert item.archived_audio_content_type == "audio/mpeg"
     assert item.archived_audio_size_bytes == 4321
+
+
+@pytest.mark.django_db
+def test_enrich_item_media_archive_records_video_source_for_extracted_audio(monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/video.mp4",
+        title="Archived video",
+        kind=ItemKind.VIDEO,
+        media_url="https://cdn.example.com/video.mp4",
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        transcript_status=EnrichmentStatus.COMPLETE,
+        media_archive_status=EnrichmentStatus.PROCESSING,
+    )
+    monkeypatch.setattr(
+        "archive.services.archive_item_audio",
+        lambda item, timeout: ArchivedAudio(
+            object_name=f"items/{item.pk}/audio/extracted.mp3",
+            content_type="audio/mpeg",
+            size_bytes=7654,
+            source_object_name=f"items/{item.pk}/video/source.mp4",
+            source_content_type="video/mp4",
+            source_size_bytes=98765,
+        ),
+    )
+
+    assert enrich_item_metadata(item) is True
+
+    item.refresh_from_db()
+    assert item.media_archive_status == EnrichmentStatus.COMPLETE
+    assert item.archived_audio_path == f"items/{item.pk}/audio/extracted.mp3"
+    assert item.archived_audio_content_type == "audio/mpeg"
+    assert item.archived_audio_size_bytes == 7654
+    assert item.archived_video_path == f"items/{item.pk}/video/source.mp4"
+    assert item.archived_video_content_type == "video/mp4"
+    assert item.archived_video_size_bytes == 98765
+
+
+@pytest.mark.django_db
+def test_video_archive_migration_requeues_existing_querystring_urls() -> None:
+    migration = importlib.import_module(
+        "archive.migrations.0008_item_archived_video_content_type_and_more"
+    )
+    eligible = Item.objects.create(
+        original_url="https://cdn.example.com/video.mp4?token=abc",
+        media_archive_status=EnrichmentStatus.COMPLETE,
+    )
+    Item.objects.create(
+        original_url="https://cdn.example.com/audio.mp3?token=abc",
+        media_archive_status=EnrichmentStatus.COMPLETE,
+    )
+    Item.objects.create(
+        original_url="https://cdn.example.com/already-pending.mp4?token=abc",
+        media_archive_status=EnrichmentStatus.PENDING,
+    )
+
+    migration.queue_existing_archivable_video(_MigrationApps(), None)
+
+    eligible.refresh_from_db()
+    assert eligible.media_archive_status == EnrichmentStatus.PENDING
 
 
 @pytest.mark.django_db

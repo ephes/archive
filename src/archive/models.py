@@ -82,6 +82,9 @@ class Item(models.Model):
     archived_audio_path = models.CharField(max_length=500, blank=True)
     archived_audio_content_type = models.CharField(max_length=100, blank=True)
     archived_audio_size_bytes = models.PositiveBigIntegerField(default=0)
+    archived_video_path = models.CharField(max_length=500, blank=True)
+    archived_video_content_type = models.CharField(max_length=100, blank=True)
+    archived_video_size_bytes = models.PositiveBigIntegerField(default=0)
     article_audio_generated = models.BooleanField(default=False)
     article_audio_job_id = models.CharField(max_length=64, blank=True)
     article_audio_artifact_path = models.CharField(max_length=500, blank=True)
@@ -136,15 +139,39 @@ class Item(models.Model):
         return bool(self.archived_audio_path.strip())
 
     @property
+    def has_archived_video(self) -> bool:
+        return bool(self.archived_video_path.strip())
+
+    @property
     def archived_audio_url(self) -> str:
         if not self.has_archived_audio:
             return ""
         return reverse("archive:item-archived-audio", kwargs={"pk": self.pk})
 
     @property
+    def has_stable_audio_enclosure(self) -> bool:
+        return self.has_archived_audio
+
+    @property
+    def stable_audio_enclosure_url(self) -> str:
+        return self.archived_audio_url
+
+    @property
+    def stable_audio_content_type(self) -> str:
+        if not self.has_stable_audio_enclosure:
+            return ""
+        return self.archived_audio_content_type or "audio/mpeg"
+
+    @property
+    def stable_audio_size_bytes(self) -> int:
+        if not self.has_stable_audio_enclosure:
+            return 0
+        return self.archived_audio_size_bytes
+
+    @property
     def playback_audio_url(self) -> str:
-        if self.has_archived_audio:
-            return self.archived_audio_url
+        if self.has_stable_audio_enclosure:
+            return self.stable_audio_enclosure_url
         if self.has_generated_article_audio:
             return reverse("archive:item-article-audio", kwargs={"pk": self.pk})
         return self.audio_url
@@ -156,7 +183,7 @@ class Item(models.Model):
     @property
     def has_required_podcast_feed_metadata(self) -> bool:
         return bool(
-            self.title.strip() and self.short_summary.strip() and self.has_archived_audio
+            self.title.strip() and self.short_summary.strip() and self.has_stable_audio_enclosure
         )
 
     def save(self, *args, **kwargs) -> None:

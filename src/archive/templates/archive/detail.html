@@ -56,8 +56,8 @@
         <audio controls preload="none" src="{{ item.playback_audio_url }}">
             <a href="{{ item.playback_audio_url }}">Listen</a>
         </audio>
-        {% if item.has_archived_audio %}
-            <p><a href="{{ item.archived_audio_url }}">Open archived audio</a></p>
+        {% if item.has_stable_audio_enclosure %}
+            <p><a href="{{ item.stable_audio_enclosure_url }}">Open local audio enclosure</a></p>
         {% endif %}
     {% endif %}
 

@@ -9,7 +9,7 @@ Current shipped scope:
 - Milestone 3: background URL metadata extraction for title/source/author/publication time/media URL
 - Milestone 4: background short summary, long summary, and tag generation with operator-editable values
 - Milestone 5: background transcription for audio/video items with transcript-aware summary/tag refresh
-- Milestone 6 (first slice): background archival of eligible remote audio, stable local enclosure URLs, and a separate podcast-style RSS feed
+- Milestone 6: background archival of eligible remote audio/video, stable local audio enclosure URLs, and a separate podcast-style RSS feed
 
 Public endpoints:
 
@@ -17,7 +17,7 @@ Public endpoints:
 - `/items/<id>/` public item detail page
 - `/feeds/rss.xml` canonical general RSS feed
 - `/feeds/rss/page/<n>.xml` older feed pages when more than 50 eligible items exist
-- `/feeds/podcast.xml` podcast-style feed for items with stable archived audio enclosures
+- `/feeds/podcast.xml` podcast-style feed for items with stable local audio enclosures
 - `/feeds/podcast/page/<n>.xml` older podcast feed pages when more than 50 eligible items exist
 
 ## iOS Share Sheet Setup
@@ -152,6 +152,7 @@ Important values:
 - `ARCHIVE_ARTICLE_AUDIO_POLL_SECONDS` defaults to `30`
 - `ARCHIVE_ARTICLE_AUDIO_MAX_BYTES` defaults to `52428800` (50 MiB)
 - `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` defaults to `262144000` (250 MiB)
+- `ARCHIVE_MEDIA_EXTRACTION_FFMPEG_BIN` defaults to `ffmpeg`
 - `ARCHIVE_MEDIA_STORAGE_BACKEND` defaults to local filesystem storage; set to `storages.backends.s3.S3Storage` for MinIO/S3-compatible object storage
 - `ARCHIVE_MEDIA_STORAGE_LOCATION` defaults to `archive-media` under the project root for local filesystem storage
 - `ARCHIVE_MEDIA_STORAGE_BUCKET_NAME` MinIO/S3 bucket for archived media objects
@@ -171,7 +172,8 @@ just manage run_metadata_worker --once
 
 Optional worker flags for the Milestone 6 slice:
 
-- `--media-archive-timeout` controls the per-item remote audio archival timeout
+- `--media-archive-timeout` controls the per-item remote media download timeout and is also used for
+  video-to-audio extraction work
 
 Summary generation is asynchronous and does not block capture or immediate publication. Audio/video
 transcription is also asynchronous and writes transcript text back onto the item when a direct media source
@@ -181,10 +183,20 @@ also submit a Voxhelm batch `synthesize` job once a summary exists; Archive stor
 reference and exposes the finished audio through a public item-scoped proxy URL on the detail page. Podcast
 episodes with a direct remote audio source are also archived asynchronously into the configured archive-media
 storage backend and then served through a stable item-scoped Archive URL for playback and podcast enclosures.
-Failed media archival jobs now retry with the same bounded backoff pattern as summary generation
+Video items with a direct downloadable media URL (`.mp4`, `.m4v`, `.mov`, or `.webm`) are archived into the
+same storage backend, then processed with `ffmpeg` to produce a stable local MP3 enclosure under
+`/items/<id>/audio/`. Failed media archival jobs now retry with the same bounded backoff pattern as
+summary generation
 (5 minutes, 30 minutes, 2 hours) before remaining failed for operator review.
+YouTube/Vimeo page URLs are not handled by this slice; the current implementation only supports direct
+downloadable media files for video-derived local audio.
+
+Operator note:
+
+- the worker host must have `ffmpeg` installed for video-derived local audio extraction
 
 Migration note:
 
-- the Milestone 6 schema migration also re-queues existing eligible podcast/audio items by setting
-  `media_archive_status` back to `pending` when they have no archived local copy yet
+- the Milestone 6 schema migrations re-queue existing eligible podcast/audio items, and later eligible
+  direct-video items, by setting `media_archive_status` back to `pending` when they do not have a stable
+  local audio copy yet

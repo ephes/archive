@@ -1,5 +1,6 @@
 from django.forms import ModelForm, Textarea
 
+from archive.media_archival import can_archive_audio
 from archive.models import EnrichmentStatus, Item, ItemKind
 
 
@@ -41,7 +42,8 @@ class ItemForm(ModelForm):
             item.transcript_generated = False
             item.transcript_status = EnrichmentStatus.COMPLETE
             item.transcript_error = ""
-        if is_new or "kind" in self.changed_data:
+        if is_new or "kind" in self.changed_data or "audio_url" in self.changed_data:
+            _normalize_media_archive_status(item)
             _normalize_article_audio_status(item)
 
         if commit:
@@ -66,3 +68,24 @@ def _normalize_article_audio_status(item: Item) -> None:
     item.article_audio_status = EnrichmentStatus.COMPLETE
     item.article_audio_error = ""
     item.article_audio_poll_at = None
+
+
+def _normalize_media_archive_status(item: Item) -> None:
+    if item.has_archived_audio:
+        item.media_archive_status = EnrichmentStatus.COMPLETE
+        item.media_archive_error = ""
+        item.media_archive_retry_count = 0
+        item.media_archive_retry_at = None
+        return
+
+    if can_archive_audio(item):
+        item.media_archive_status = EnrichmentStatus.PENDING
+        item.media_archive_error = ""
+        item.media_archive_retry_count = 0
+        item.media_archive_retry_at = None
+        return
+
+    item.media_archive_status = EnrichmentStatus.COMPLETE
+    item.media_archive_error = ""
+    item.media_archive_retry_count = 0
+    item.media_archive_retry_at = None

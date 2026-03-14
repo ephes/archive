@@ -1,3 +1,6 @@
+import tempfile
+from pathlib import Path
+
 from config.settings.base import *  # noqa: F403
 
 DEBUG = True
@@ -13,6 +16,12 @@ MIDDLEWARE = [  # noqa: F405
 STORAGES = {
     "default": {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "archive_media": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+        "OPTIONS": {
+            "location": str(Path(tempfile.gettempdir()) / "archive-test-media"),
+        },
     },
     "staticfiles": {
         "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",

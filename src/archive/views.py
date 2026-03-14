@@ -9,7 +9,14 @@ from django.core.exceptions import ValidationError
 from django.core.paginator import EmptyPage, Paginator
 from django.core.validators import URLValidator
 from django.db.models.functions import Trim
-from django.http import Http404, HttpRequest, HttpResponse, HttpResponseBadRequest, JsonResponse
+from django.http import (
+    FileResponse,
+    Http404,
+    HttpRequest,
+    HttpResponse,
+    HttpResponseBadRequest,
+    JsonResponse,
+)
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -20,6 +27,7 @@ from django.views.generic.edit import CreateView
 
 from archive.article_audio import ArticleAudioGenerationError, download_generated_article_audio
 from archive.forms import ItemForm
+from archive.media_archival import MediaArchivalError, open_archived_audio
 from archive.models import Item
 from archive.services import infer_kind, prepare_item_for_enrichment, to_week_page, week_bounds
 
@@ -47,18 +55,112 @@ def _build_week_navigation(items) -> list:
     return week_pages
 
 
-def _feed_page_url(request: HttpRequest, page: int) -> str:
-    if page <= 1:
-        return request.build_absolute_uri(reverse("archive:rss-feed"))
-    return request.build_absolute_uri(reverse("archive:rss-feed-page", kwargs={"page": page}))
-
-
 def _public_feed_items():
     return (
         Item.objects.filter(is_public=True, published_at__isnull=False)
         .annotate(feed_title=Trim("title"))
         .exclude(feed_title="")
         .order_by("-published_at", "-id")
+    )
+
+
+def _public_podcast_feed_items():
+    return (
+        Item.objects.filter(
+            is_public=True,
+            published_at__isnull=False,
+            archived_audio_size_bytes__gt=0,
+        )
+        .annotate(feed_title=Trim("title"), feed_summary=Trim("short_summary"))
+        .exclude(feed_title="")
+        .exclude(feed_summary="")
+        .exclude(archived_audio_path="")
+        .order_by("-published_at", "-id")
+    )
+
+
+def _render_feed(
+    request: HttpRequest,
+    *,
+    page: int,
+    items_queryset,
+    canonical_view_name: str,
+    paged_view_name: str,
+    feed_title: str,
+    feed_description: str,
+    page_description: str,
+    include_enclosures: bool = False,
+) -> HttpResponse:
+    if page == 1 and request.path != reverse(canonical_view_name):
+        return redirect(canonical_view_name, permanent=True)
+
+    paginator = Paginator(items_queryset, FEED_PAGE_SIZE)
+
+    if paginator.count == 0:
+        if page != 1:
+            raise Http404("Unknown feed page")
+        page_items = []
+        newer_url = None
+        older_url = None
+    else:
+        try:
+            page_obj = paginator.page(page)
+        except EmptyPage as exc:
+            raise Http404("Unknown feed page") from exc
+        page_items = list(page_obj.object_list)
+        newer_url = (
+            request.build_absolute_uri(reverse(canonical_view_name))
+            if page_obj.has_previous() and page - 1 == 1
+            else (
+                request.build_absolute_uri(reverse(paged_view_name, kwargs={"page": page - 1}))
+                if page_obj.has_previous()
+                else None
+            )
+        )
+        older_url = (
+            request.build_absolute_uri(reverse(paged_view_name, kwargs={"page": page + 1}))
+            if page_obj.has_next()
+            else None
+        )
+
+    if page <= 1:
+        self_url = request.build_absolute_uri(reverse(canonical_view_name))
+    else:
+        self_url = request.build_absolute_uri(reverse(paged_view_name, kwargs={"page": page}))
+
+    feed_items = []
+    for item in page_items:
+        entry = {
+            "title": item.display_title,
+            "link": request.build_absolute_uri(item.get_absolute_url()),
+            "description": (
+                item.short_summary.strip() if include_enclosures else item.feed_description
+            ),
+            "pub_date": item.feed_published_at,
+            "kind": item.get_kind_display(),
+        }
+        if include_enclosures:
+            entry["enclosure_url"] = request.build_absolute_uri(item.archived_audio_url)
+            entry["enclosure_type"] = item.archived_audio_content_type or "audio/mpeg"
+            entry["enclosure_length"] = item.archived_audio_size_bytes
+        feed_items.append(entry)
+
+    return render(
+        request,
+        "archive/rss.xml",
+        {
+            "feed_title": feed_title if page == 1 else f"{feed_title} (page {page})",
+            "feed_description": (
+                feed_description if page == 1 else page_description.format(page=page)
+            ),
+            "site_url": request.build_absolute_uri(reverse("archive:overview")),
+            "self_url": self_url,
+            "previous_url": newer_url,
+            "next_url": older_url,
+            "last_build_date": page_items[0].feed_published_at if page_items else timezone.now(),
+            "feed_items": feed_items,
+        },
+        content_type="application/rss+xml; charset=utf-8",
     )
 
 
@@ -102,57 +204,52 @@ def overview(request: HttpRequest) -> HttpResponse:
 
 @require_GET
 def rss_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
-    if page == 1 and request.resolver_match and request.resolver_match.url_name == "rss-feed-page":
-        return redirect("archive:rss-feed", permanent=True)
-
-    public_items = _public_feed_items()
-    paginator = Paginator(public_items, FEED_PAGE_SIZE)
-
-    if paginator.count == 0:
-        if page != 1:
-            raise Http404("Unknown feed page")
-        page_items = []
-        newer_url = None
-        older_url = None
-    else:
-        try:
-            page_obj = paginator.page(page)
-        except EmptyPage as exc:
-            raise Http404("Unknown feed page") from exc
-        page_items = list(page_obj.object_list)
-        newer_url = _feed_page_url(request, page - 1) if page_obj.has_previous() else None
-        older_url = _feed_page_url(request, page + 1) if page_obj.has_next() else None
-
-    feed_items = [
-        {
-            "title": item.display_title,
-            "link": request.build_absolute_uri(item.get_absolute_url()),
-            "description": item.feed_description,
-            "pub_date": item.feed_published_at,
-            "kind": item.get_kind_display(),
-        }
-        for item in page_items
-    ]
-
-    return render(
+    return _render_feed(
         request,
-        "archive/rss.xml",
-        {
-            "feed_title": "Archive" if page == 1 else f"Archive (page {page})",
-            "feed_description": (
-                "Public archive feed for links, episodes, videos, and articles."
-                if page == 1
-                else f"Archive feed page {page}."
-            ),
-            "site_url": request.build_absolute_uri(reverse("archive:overview")),
-            "self_url": _feed_page_url(request, page),
-            "previous_url": newer_url,
-            "next_url": older_url,
-            "last_build_date": page_items[0].feed_published_at if page_items else timezone.now(),
-            "feed_items": feed_items,
-        },
-        content_type="application/rss+xml; charset=utf-8",
+        page=page,
+        items_queryset=_public_feed_items(),
+        canonical_view_name="archive:rss-feed",
+        paged_view_name="archive:rss-feed-page",
+        feed_title="Archive",
+        feed_description="Public archive feed for links, episodes, videos, and articles.",
+        page_description="Archive feed page {page}.",
     )
+
+
+@require_GET
+def podcast_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
+    return _render_feed(
+        request,
+        page=page,
+        items_queryset=_public_podcast_feed_items(),
+        canonical_view_name="archive:podcast-feed",
+        paged_view_name="archive:podcast-feed-page",
+        feed_title="Archive Podcast",
+        feed_description="Podcast-style archive feed for items with locally archived audio.",
+        page_description="Archive podcast feed page {page}.",
+        include_enclosures=True,
+    )
+
+
+@require_GET
+def item_archived_audio(request: HttpRequest, pk: int) -> HttpResponse:
+    item = get_object_or_404(Item, pk=pk, is_public=True)
+    if not item.has_archived_audio:
+        raise Http404("Archived audio is not available")
+
+    try:
+        audio_file = open_archived_audio(item)
+    except MediaArchivalError:
+        return HttpResponse("Archived audio is temporarily unavailable.", status=502)
+
+    response = FileResponse(
+        audio_file,
+        content_type=item.archived_audio_content_type or "audio/mpeg",
+    )
+    if item.archived_audio_size_bytes:
+        response["Content-Length"] = str(item.archived_audio_size_bytes)
+    response["Cache-Control"] = "public, max-age=3600"
+    return response
 
 
 @require_GET

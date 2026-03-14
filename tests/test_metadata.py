@@ -7,9 +7,11 @@ from django.urls import reverse
 from django.utils import timezone
 
 from archive.article_audio import ArticleAudioJobUpdate
+from archive.media_archival import ArchivedAudio
 from archive.metadata import MetadataExtractionError, extract_metadata_from_html
 from archive.models import EnrichmentStatus, Item, ItemKind
 from archive.services import (
+    MEDIA_ARCHIVE_RETRY_DELAYS,
     SUMMARY_RETRY_DELAYS,
     claim_pending_item,
     enrich_item_article_audio,
@@ -20,6 +22,17 @@ from archive.services import (
     recover_processing_items,
 )
 from archive.summaries import GeneratedSummary
+
+
+def stub_archive_audio(monkeypatch, size_bytes: int = 12345) -> None:
+    monkeypatch.setattr(
+        "archive.services.archive_item_audio",
+        lambda item, timeout: ArchivedAudio(
+            object_name=f"items/{item.pk}/audio/source.mp3",
+            content_type="audio/mpeg",
+            size_bytes=size_bytes,
+        ),
+    )
 
 
 @pytest.mark.django_db
@@ -64,6 +77,7 @@ def test_extract_metadata_from_html_prefers_structured_fields() -> None:
 def test_enrich_item_metadata_updates_missing_fields_without_overwriting_existing_ones(
     monkeypatch,
 ) -> None:
+    stub_archive_audio(monkeypatch)
     item = Item.objects.create(
         original_url="https://example.com/demo",
         title="Manual title",
@@ -122,6 +136,8 @@ def test_enrich_item_metadata_updates_missing_fields_without_overwriting_existin
     assert item.kind == ItemKind.PODCAST_EPISODE
     assert item.enrichment_status == EnrichmentStatus.COMPLETE
     assert item.enrichment_error == ""
+    assert item.media_archive_status == EnrichmentStatus.COMPLETE
+    assert item.archived_audio_path == f"items/{item.pk}/audio/source.mp3"
     assert item.transcript == "Transcript paragraph one.\n\nTranscript paragraph two."
     assert item.transcript_status == EnrichmentStatus.COMPLETE
     assert item.short_summary == "Short generated summary"
@@ -138,6 +154,7 @@ def test_api_items_are_public_immediately_and_join_feed_after_enrichment(
     api_url: str,
     monkeypatch,
 ) -> None:
+    stub_archive_audio(monkeypatch)
     settings.ARCHIVE_API_TOKEN = "test-token"
 
     response = client.post(
@@ -188,6 +205,8 @@ def test_api_items_are_public_immediately_and_join_feed_after_enrichment(
     assert item.title == "Extracted title"
     assert item.source == "Example Site"
     assert item.enrichment_status == EnrichmentStatus.COMPLETE
+    assert item.media_archive_status == EnrichmentStatus.COMPLETE
+    assert item.archived_audio_path == f"items/{item.pk}/audio/source.mp3"
     assert item.transcript == "Transcript from audio."
     assert item.transcript_status == EnrichmentStatus.COMPLETE
     assert item.summary_status == EnrichmentStatus.COMPLETE
@@ -325,6 +344,142 @@ def test_recover_processing_items_requeues_transcript_processing_items() -> None
 
 
 @pytest.mark.django_db
+def test_recover_processing_items_requeues_media_archive_processing_items() -> None:
+    stuck = Item.objects.create(
+        original_url="https://example.com/stuck-audio.mp3",
+        kind=ItemKind.PODCAST_EPISODE,
+        media_archive_status=EnrichmentStatus.PROCESSING,
+        media_archive_retry_count=1,
+        media_archive_retry_at=timezone.now() + timedelta(minutes=5),
+    )
+
+    assert recover_processing_items() == 1
+
+    stuck.refresh_from_db()
+    assert stuck.media_archive_status == EnrichmentStatus.PENDING
+    assert stuck.media_archive_retry_at is None
+
+
+@pytest.mark.django_db
+def test_enrich_item_media_archive_records_archived_audio(monkeypatch) -> None:
+    stub_archive_audio(monkeypatch, size_bytes=4321)
+    item = Item.objects.create(
+        original_url="https://example.com/episode.mp3",
+        title="Archived episode",
+        kind=ItemKind.PODCAST_EPISODE,
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        transcript_status=EnrichmentStatus.COMPLETE,
+        media_archive_status=EnrichmentStatus.PROCESSING,
+    )
+
+    assert enrich_item_metadata(item) is True
+
+    item.refresh_from_db()
+    assert item.media_archive_status == EnrichmentStatus.COMPLETE
+    assert item.media_archive_error == ""
+    assert item.archived_audio_path == f"items/{item.pk}/audio/source.mp3"
+    assert item.archived_audio_content_type == "audio/mpeg"
+    assert item.archived_audio_size_bytes == 4321
+
+
+@pytest.mark.django_db
+def test_enrich_item_media_archive_marks_failures(monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/episode.mp3",
+        title="Archived episode",
+        kind=ItemKind.PODCAST_EPISODE,
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        transcript_status=EnrichmentStatus.COMPLETE,
+        media_archive_status=EnrichmentStatus.PROCESSING,
+    )
+    monkeypatch.setattr(
+        "archive.services.archive_item_audio",
+        lambda item, timeout: (_ for _ in ()).throw(RuntimeError("archive boom")),
+    )
+
+    assert enrich_item_metadata(item) is False
+
+    item.refresh_from_db()
+    assert item.media_archive_status == EnrichmentStatus.FAILED
+    assert item.media_archive_error == "archive boom"
+    assert item.media_archive_retry_count == 1
+    assert item.media_archive_retry_at is not None
+
+
+@pytest.mark.django_db
+def test_failed_media_archive_is_not_retried_before_backoff_window() -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/retry-audio.mp3",
+        title="Retry later",
+        kind=ItemKind.PODCAST_EPISODE,
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        transcript_status=EnrichmentStatus.COMPLETE,
+        media_archive_status=EnrichmentStatus.FAILED,
+        media_archive_retry_count=1,
+        media_archive_retry_at=timezone.now() + timedelta(minutes=1),
+    )
+
+    assert claim_pending_item() is None
+
+    item.refresh_from_db()
+    assert item.media_archive_status == EnrichmentStatus.FAILED
+
+
+@pytest.mark.django_db
+def test_failed_media_archive_is_retried_after_backoff_window() -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/retry-audio-now.mp3",
+        title="Retry now",
+        kind=ItemKind.PODCAST_EPISODE,
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        transcript_status=EnrichmentStatus.COMPLETE,
+        media_archive_status=EnrichmentStatus.FAILED,
+        media_archive_retry_count=1,
+        media_archive_retry_at=timezone.now() - timedelta(seconds=1),
+        media_archive_error="temporary outage",
+    )
+
+    claimed = claim_pending_item()
+
+    assert claimed is not None
+    assert claimed.pk == item.pk
+    item.refresh_from_db()
+    assert item.media_archive_status == EnrichmentStatus.PROCESSING
+    assert item.media_archive_error == ""
+    assert item.media_archive_retry_at is None
+
+
+@pytest.mark.django_db
+def test_media_archive_failures_stop_retrying_after_retry_limit(monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/retry-limit-audio.mp3",
+        title="Retry limit",
+        kind=ItemKind.PODCAST_EPISODE,
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        transcript_status=EnrichmentStatus.COMPLETE,
+        media_archive_status=EnrichmentStatus.PROCESSING,
+        media_archive_retry_count=len(MEDIA_ARCHIVE_RETRY_DELAYS),
+    )
+    monkeypatch.setattr(
+        "archive.services.archive_item_audio",
+        lambda item, timeout: (_ for _ in ()).throw(RuntimeError("still broken")),
+    )
+
+    assert enrich_item_metadata(item) is False
+
+    item.refresh_from_db()
+    assert item.media_archive_status == EnrichmentStatus.FAILED
+    assert item.media_archive_retry_count == len(MEDIA_ARCHIVE_RETRY_DELAYS) + 1
+    assert item.media_archive_retry_at is None
+    assert claim_pending_item() is None
+
+
+@pytest.mark.django_db
 def test_enrich_pending_items_claims_oldest_pending_item(monkeypatch) -> None:
     older = Item.objects.create(
         original_url="https://example.com/older",
@@ -421,6 +576,7 @@ def test_enrich_pending_items_runs_summary_backfill_without_refetching_metadata(
 
 @pytest.mark.django_db
 def test_enrich_item_metadata_keeps_manual_generated_values(monkeypatch) -> None:
+    stub_archive_audio(monkeypatch)
     item = Item.objects.create(
         original_url="https://example.com/manual-summary",
         title="Manual summary item",
@@ -465,6 +621,7 @@ def test_enrich_item_metadata_keeps_manual_generated_values(monkeypatch) -> None
     assert item.short_summary == "Manual short summary"
     assert item.long_summary == "Generated long summary should fill only the missing field."
     assert item.tags == "manual"
+    assert item.archived_audio_path == f"items/{item.pk}/audio/source.mp3"
     assert item.summary_status == EnrichmentStatus.COMPLETE
     assert item.transcript == "Generated transcript"
 

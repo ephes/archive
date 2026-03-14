@@ -11,6 +11,7 @@ from django.db.models import Case, F, Q, Value, When
 from django.utils import timezone
 
 from archive.article_audio import can_generate_article_audio, generate_item_article_audio
+from archive.media_archival import archive_item_audio, can_archive_audio
 from archive.metadata import AUDIO_SUFFIXES, extract_metadata_from_url
 from archive.models import EnrichmentStatus, Item, ItemKind
 from archive.summaries import generate_item_summaries
@@ -23,6 +24,7 @@ SUMMARY_RETRY_DELAYS = (
     timedelta(minutes=30),
     timedelta(hours=2),
 )
+MEDIA_ARCHIVE_RETRY_DELAYS = SUMMARY_RETRY_DELAYS
 TRANSCRIBABLE_ITEM_KINDS = (ItemKind.PODCAST_EPISODE, ItemKind.VIDEO)
 
 
@@ -104,6 +106,22 @@ def prepare_item_for_enrichment(item: Item) -> Item:
         item.transcript_status = EnrichmentStatus.PENDING
         item.transcript_error = ""
 
+    if item.has_archived_audio:
+        item.media_archive_status = EnrichmentStatus.COMPLETE
+        item.media_archive_error = ""
+        item.media_archive_retry_count = 0
+        item.media_archive_retry_at = None
+    elif _supports_media_archive(item):
+        item.media_archive_status = EnrichmentStatus.PENDING
+        item.media_archive_error = ""
+        item.media_archive_retry_count = 0
+        item.media_archive_retry_at = None
+    else:
+        item.media_archive_status = EnrichmentStatus.COMPLETE
+        item.media_archive_error = ""
+        item.media_archive_retry_count = 0
+        item.media_archive_retry_at = None
+
     if item.has_generated_article_audio:
         item.article_audio_status = EnrichmentStatus.COMPLETE
         item.article_audio_error = ""
@@ -124,16 +142,21 @@ def enrich_item_metadata(
     item: Item,
     timeout: int = 15,
     summary_timeout: int = 60,
+    media_archive_timeout: int = 300,
     transcription_timeout: int = 300,
     article_audio_timeout: int = 30,
 ) -> bool:
     metadata_success = True
+    media_archive_success = True
     transcript_success = True
     summary_success = True
     article_audio_success = True
 
     if item.enrichment_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
         metadata_success = _enrich_item_metadata_fields(item=item, timeout=timeout)
+
+    if item.media_archive_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
+        media_archive_success = enrich_item_media_archive(item=item, timeout=media_archive_timeout)
 
     if item.transcript_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
         transcript_success = enrich_item_transcript(item=item, timeout=transcription_timeout)
@@ -144,7 +167,13 @@ def enrich_item_metadata(
     if item.article_audio_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
         article_audio_success = enrich_item_article_audio(item=item, timeout=article_audio_timeout)
 
-    return metadata_success and transcript_success and summary_success and article_audio_success
+    return (
+        metadata_success
+        and media_archive_success
+        and transcript_success
+        and summary_success
+        and article_audio_success
+    )
 
 
 def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
@@ -248,6 +277,76 @@ def enrich_item_transcript(item: Item, timeout: int = 300) -> bool:
     return True
 
 
+def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
+    if item.has_archived_audio:
+        if (
+            item.media_archive_status != EnrichmentStatus.COMPLETE
+            or item.media_archive_error
+            or item.media_archive_retry_count
+            or item.media_archive_retry_at is not None
+        ):
+            item.media_archive_status = EnrichmentStatus.COMPLETE
+            item.media_archive_error = ""
+            item.media_archive_retry_count = 0
+            item.media_archive_retry_at = None
+            item.save(
+                update_fields=[
+                    "media_archive_status",
+                    "media_archive_error",
+                    "media_archive_retry_count",
+                    "media_archive_retry_at",
+                ]
+            )
+        return True
+
+    if not _supports_media_archive(item):
+        if (
+            item.media_archive_status != EnrichmentStatus.COMPLETE
+            or item.media_archive_error
+            or item.media_archive_retry_count
+            or item.media_archive_retry_at is not None
+        ):
+            item.media_archive_status = EnrichmentStatus.COMPLETE
+            item.media_archive_error = ""
+            item.media_archive_retry_count = 0
+            item.media_archive_retry_at = None
+            item.save(
+                update_fields=[
+                    "media_archive_status",
+                    "media_archive_error",
+                    "media_archive_retry_count",
+                    "media_archive_retry_at",
+                ]
+            )
+        return True
+
+    try:
+        archived_audio = archive_item_audio(item=item, timeout=timeout)
+    except Exception as exc:
+        logger.exception("Audio archival failed for item %s", item.pk)
+        return _mark_media_archive_failure(item, str(exc))
+
+    item.archived_audio_path = archived_audio.object_name
+    item.archived_audio_content_type = archived_audio.content_type
+    item.archived_audio_size_bytes = archived_audio.size_bytes
+    item.media_archive_status = EnrichmentStatus.COMPLETE
+    item.media_archive_error = ""
+    item.media_archive_retry_count = 0
+    item.media_archive_retry_at = None
+    item.save(
+        update_fields=[
+            "archived_audio_path",
+            "archived_audio_content_type",
+            "archived_audio_size_bytes",
+            "media_archive_status",
+            "media_archive_error",
+            "media_archive_retry_count",
+            "media_archive_retry_at",
+        ]
+    )
+    return True
+
+
 def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
     if item.has_generated_article_audio:
         if (
@@ -342,6 +441,7 @@ def recover_processing_items() -> int:
         Q(enrichment_status=EnrichmentStatus.PROCESSING)
         | Q(summary_status=EnrichmentStatus.PROCESSING)
         | Q(transcript_status=EnrichmentStatus.PROCESSING)
+        | Q(media_archive_status=EnrichmentStatus.PROCESSING)
         | Q(article_audio_status=EnrichmentStatus.PROCESSING)
     ).update(
         enrichment_status=Case(
@@ -365,6 +465,13 @@ def recover_processing_items() -> int:
             ),
             default=F("transcript_status"),
         ),
+        media_archive_status=Case(
+            When(
+                media_archive_status=EnrichmentStatus.PROCESSING,
+                then=Value(EnrichmentStatus.PENDING),
+            ),
+            default=F("media_archive_status"),
+        ),
         article_audio_status=Case(
             When(
                 article_audio_status=EnrichmentStatus.PROCESSING,
@@ -375,6 +482,10 @@ def recover_processing_items() -> int:
         summary_retry_at=Case(
             When(summary_status=EnrichmentStatus.PROCESSING, then=Value(None)),
             default=F("summary_retry_at"),
+        ),
+        media_archive_retry_at=Case(
+            When(media_archive_status=EnrichmentStatus.PROCESSING, then=Value(None)),
+            default=F("media_archive_retry_at"),
         ),
         article_audio_poll_at=Case(
             When(article_audio_status=EnrichmentStatus.PROCESSING, then=Value(None)),
@@ -390,6 +501,7 @@ def claim_pending_item() -> Item | None:
             Item.objects.select_for_update()
             .filter(
                 Q(enrichment_status=EnrichmentStatus.PENDING)
+                | _claimable_media_archive_query(now)
                 | _claimable_transcript_query()
                 | _claimable_summary_query(now)
                 | _claimable_article_audio_query(now)
@@ -410,6 +522,13 @@ def claim_pending_item() -> Item | None:
             item.summary_error = ""
             item.summary_retry_at = None
             update_fields.extend(["summary_status", "summary_error", "summary_retry_at"])
+        if _media_archive_should_start(item, now):
+            item.media_archive_status = EnrichmentStatus.PROCESSING
+            item.media_archive_error = ""
+            item.media_archive_retry_at = None
+            update_fields.extend(
+                ["media_archive_status", "media_archive_error", "media_archive_retry_at"]
+            )
         if _transcript_should_start(item):
             item.transcript_status = EnrichmentStatus.PROCESSING
             item.transcript_error = ""
@@ -428,6 +547,7 @@ def enrich_pending_items(
     limit: int = 1,
     timeout: int = 15,
     summary_timeout: int = 60,
+    media_archive_timeout: int = 300,
     transcription_timeout: int = 300,
     article_audio_timeout: int = 30,
 ) -> int:
@@ -440,6 +560,7 @@ def enrich_pending_items(
             item=item,
             timeout=timeout,
             summary_timeout=summary_timeout,
+            media_archive_timeout=media_archive_timeout,
             transcription_timeout=transcription_timeout,
             article_audio_timeout=article_audio_timeout,
         )
@@ -512,6 +633,7 @@ def _enrich_item_metadata_fields(item: Item, timeout: int = 15) -> bool:
 
     item.enrichment_status = EnrichmentStatus.COMPLETE
     item.enrichment_error = ""
+    _refresh_media_archive_state(item, update_fields)
     _refresh_article_audio_state(item, update_fields)
     update_fields.extend(["enrichment_status", "enrichment_error"])
     item.save(update_fields=sorted(set(update_fields)))
@@ -559,6 +681,27 @@ def _mark_transcript_failure(item: Item, error_message: str) -> bool:
     return False
 
 
+def _mark_media_archive_failure(item: Item, error_message: str) -> bool:
+    item.media_archive_error = error_message
+    item.media_archive_retry_count += 1
+    if item.has_archived_audio:
+        item.media_archive_status = EnrichmentStatus.COMPLETE
+        item.media_archive_retry_count = 0
+        item.media_archive_retry_at = None
+    else:
+        item.media_archive_status = EnrichmentStatus.FAILED
+        item.media_archive_retry_at = _next_media_archive_retry_at(item.media_archive_retry_count)
+    item.save(
+        update_fields=[
+            "media_archive_status",
+            "media_archive_error",
+            "media_archive_retry_count",
+            "media_archive_retry_at",
+        ]
+    )
+    return False
+
+
 def _mark_article_audio_failure(item: Item, error_message: str) -> bool:
     item.article_audio_error = error_message
     item.article_audio_status = EnrichmentStatus.FAILED
@@ -579,6 +722,12 @@ def _next_summary_retry_at(retry_count: int) -> datetime | None:
     if retry_count > len(SUMMARY_RETRY_DELAYS):
         return None
     return timezone.now() + SUMMARY_RETRY_DELAYS[retry_count - 1]
+
+
+def _next_media_archive_retry_at(retry_count: int) -> datetime | None:
+    if retry_count > len(MEDIA_ARCHIVE_RETRY_DELAYS):
+        return None
+    return timezone.now() + MEDIA_ARCHIVE_RETRY_DELAYS[retry_count - 1]
 
 
 def _claimable_summary_query(now: datetime) -> Q:
@@ -604,8 +753,28 @@ def _claimable_transcript_query() -> Q:
     return Q(transcript_status=EnrichmentStatus.PENDING) & transcribable_query
 
 
+def _claimable_media_archive_query(now: datetime) -> Q:
+    return Q(media_archive_status=EnrichmentStatus.PENDING) | (
+        Q(media_archive_status=EnrichmentStatus.FAILED)
+        & Q(media_archive_retry_count__lte=len(MEDIA_ARCHIVE_RETRY_DELAYS))
+        & (Q(media_archive_retry_at__isnull=True) | Q(media_archive_retry_at__lte=now))
+    )
+
+
 def _transcript_should_start(item: Item) -> bool:
     return item.transcript_status == EnrichmentStatus.PENDING and can_transcribe_item(item)
+
+
+def _media_archive_should_start(item: Item, now: datetime) -> bool:
+    if item.media_archive_status == EnrichmentStatus.PENDING:
+        return _supports_media_archive(item)
+    if item.media_archive_status != EnrichmentStatus.FAILED:
+        return False
+    if item.media_archive_retry_count > len(MEDIA_ARCHIVE_RETRY_DELAYS):
+        return False
+    if item.media_archive_retry_at is not None and item.media_archive_retry_at > now:
+        return False
+    return _supports_media_archive(item)
 
 
 def _claimable_article_audio_query(now: datetime) -> Q:
@@ -642,6 +811,10 @@ def _summary_should_refresh_from_transcript(item: Item) -> bool:
 
 def _supports_article_audio(item: Item) -> bool:
     return item.kind == ItemKind.ARTICLE
+
+
+def _supports_media_archive(item: Item) -> bool:
+    return can_archive_audio(item)
 
 
 def _article_audio_source_ready(item: Item) -> bool:
@@ -683,6 +856,54 @@ def _refresh_article_audio_state(item: Item, update_fields: list[str]) -> None:
     if item.article_audio_poll_at is not None:
         item.article_audio_poll_at = None
         update_fields.append("article_audio_poll_at")
+
+
+def _refresh_media_archive_state(item: Item, update_fields: list[str]) -> None:
+    if item.has_archived_audio:
+        if item.media_archive_status != EnrichmentStatus.COMPLETE:
+            item.media_archive_status = EnrichmentStatus.COMPLETE
+            update_fields.append("media_archive_status")
+        if item.media_archive_error:
+            item.media_archive_error = ""
+            update_fields.append("media_archive_error")
+        if item.media_archive_retry_count:
+            item.media_archive_retry_count = 0
+            update_fields.append("media_archive_retry_count")
+        if item.media_archive_retry_at is not None:
+            item.media_archive_retry_at = None
+            update_fields.append("media_archive_retry_at")
+        return
+
+    if _supports_media_archive(item):
+        if item.media_archive_status == EnrichmentStatus.COMPLETE:
+            item.media_archive_status = EnrichmentStatus.PENDING
+            update_fields.append("media_archive_status")
+        if item.media_archive_error:
+            item.media_archive_error = ""
+            update_fields.append("media_archive_error")
+        if item.media_archive_status == EnrichmentStatus.FAILED:
+            item.media_archive_status = EnrichmentStatus.PENDING
+            update_fields.append("media_archive_status")
+        if item.media_archive_retry_count:
+            item.media_archive_retry_count = 0
+            update_fields.append("media_archive_retry_count")
+        if item.media_archive_retry_at is not None:
+            item.media_archive_retry_at = None
+            update_fields.append("media_archive_retry_at")
+        return
+
+    if item.media_archive_status != EnrichmentStatus.COMPLETE:
+        item.media_archive_status = EnrichmentStatus.COMPLETE
+        update_fields.append("media_archive_status")
+    if item.media_archive_error:
+        item.media_archive_error = ""
+        update_fields.append("media_archive_error")
+    if item.media_archive_retry_count:
+        item.media_archive_retry_count = 0
+        update_fields.append("media_archive_retry_count")
+    if item.media_archive_retry_at is not None:
+        item.media_archive_retry_at = None
+        update_fields.append("media_archive_retry_at")
 
 
 def _infer_kind_from_metadata(item: Item, kind_hint: str) -> str:

@@ -18,6 +18,7 @@
         <pubDate>{{ entry.pub_date|date:"r" }}</pubDate>
         <description>{{ entry.description }}</description>
         <category>{{ entry.kind }}</category>
+        {% if entry.enclosure_url %}<enclosure url="{{ entry.enclosure_url }}" length="{{ entry.enclosure_length }}" type="{{ entry.enclosure_type }}" />{% endif %}
     </item>
     {% endfor %}
 </channel>

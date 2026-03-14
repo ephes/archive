@@ -9,7 +9,10 @@ from archive.services import claim_pending_item, enrich_item_metadata, recover_p
 
 
 class Command(BaseCommand):
-    help = "Process pending Archive metadata, transcript, summary, tag, and article-audio jobs."
+    help = (
+        "Process pending Archive metadata, media-archival, transcript, summary, tag, "
+        "and article-audio jobs."
+    )
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -51,6 +54,12 @@ class Command(BaseCommand):
             default=300,
             help="Per-request timeout in seconds for media download and transcription.",
         )
+        parser.add_argument(
+            "--media-archive-timeout",
+            type=int,
+            default=300,
+            help="Per-request timeout in seconds for remote audio archival.",
+        )
 
     def _request_shutdown(self, signum, _frame) -> None:
         self.stderr.write(f"Received signal {signum}; shutting down after current item.")
@@ -78,6 +87,7 @@ class Command(BaseCommand):
                     item=item,
                     timeout=options["timeout"],
                     summary_timeout=options["summary_timeout"],
+                    media_archive_timeout=options["media_archive_timeout"],
                     transcription_timeout=options["transcription_timeout"],
                 )
                 item.refresh_from_db(
@@ -86,6 +96,8 @@ class Command(BaseCommand):
                         "enrichment_error",
                         "transcript_status",
                         "transcript_error",
+                        "media_archive_status",
+                        "media_archive_error",
                         "summary_status",
                         "summary_error",
                         "article_audio_status",
@@ -100,6 +112,8 @@ class Command(BaseCommand):
                         "Background enrichment did not fully succeed for item "
                         f"{item.pk}; metadata_status={item.enrichment_status}; "
                         f"metadata_error={item.enrichment_error}; "
+                        f"media_archive_status={item.media_archive_status}; "
+                        f"media_archive_error={item.media_archive_error}; "
                         f"transcript_status={item.transcript_status}; "
                         f"transcript_error={item.transcript_error}; "
                         f"summary_status={item.summary_status}; "

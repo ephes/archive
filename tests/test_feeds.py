@@ -184,3 +184,109 @@ def test_public_pages_expose_rss_autodiscovery(client) -> None:
         in response.content
     )
     assert b'href="/feeds/rss.xml"' in response.content
+
+
+@pytest.mark.django_db
+def test_podcast_feed_includes_only_items_with_local_archived_audio_and_summary(client) -> None:
+    archived_item = Item.objects.create(
+        original_url="https://example.com/episode-1",
+        title="Archived episode",
+        short_summary="Podcast summary",
+        kind="podcast_episode",
+        archived_audio_path="items/1/audio/source.mp3",
+        archived_audio_content_type="audio/mpeg",
+        archived_audio_size_bytes=4096,
+    )
+    Item.objects.create(
+        original_url="https://example.com/no-summary",
+        title="Missing summary",
+        kind="podcast_episode",
+        archived_audio_path="items/2/audio/source.mp3",
+        archived_audio_content_type="audio/mpeg",
+        archived_audio_size_bytes=4096,
+    )
+    Item.objects.create(
+        original_url="https://example.com/no-audio",
+        title="Missing audio",
+        short_summary="Looks eligible otherwise",
+        kind="podcast_episode",
+    )
+    Item.objects.create(
+        original_url="https://example.com/private",
+        title="Private archived episode",
+        short_summary="Podcast summary",
+        kind="podcast_episode",
+        is_public=False,
+        archived_audio_path="items/4/audio/source.mp3",
+        archived_audio_content_type="audio/mpeg",
+        archived_audio_size_bytes=4096,
+    )
+
+    response = client.get(reverse("archive:podcast-feed"))
+
+    assert response.status_code == 200
+    channel = parse_channel(response.content)
+    items = channel.findall("item")
+    assert [item.findtext("title") for item in items] == ["Archived episode"]
+    enclosure = items[0].find("enclosure")
+    assert enclosure is not None
+    archived_audio_url = reverse("archive:item-archived-audio", kwargs={"pk": archived_item.pk})
+    assert enclosure.attrib == {
+        "url": f"http://testserver{archived_audio_url}",
+        "length": "4096",
+        "type": "audio/mpeg",
+    }
+    assert items[0].findtext("description") == "Podcast summary"
+
+
+@pytest.mark.django_db
+def test_podcast_feed_archive_uses_fixed_size_item_windows(client) -> None:
+    now = timezone.now()
+    for index in range(55):
+        Item.objects.create(
+            original_url=f"https://example.com/podcast/{index}",
+            title=f"Podcast {index}",
+            short_summary=f"Summary {index}",
+            kind="podcast_episode",
+            shared_at=now - timedelta(minutes=index),
+            archived_audio_path=f"items/{index}/audio/source.mp3",
+            archived_audio_content_type="audio/mpeg",
+            archived_audio_size_bytes=1024 + index,
+        )
+
+    response = client.get(reverse("archive:podcast-feed"))
+    archive_response = client.get(reverse("archive:podcast-feed-page", kwargs={"page": 2}))
+
+    assert response.status_code == 200
+    assert archive_response.status_code == 200
+
+    channel = parse_channel(response.content)
+    archive_channel = parse_channel(archive_response.content)
+    main_items = channel.findall("item")
+    archive_items = archive_channel.findall("item")
+
+    assert len(main_items) == 50
+    assert len(archive_items) == 5
+    assert main_items[0].findtext("title") == "Podcast 0"
+    assert archive_items[0].findtext("title") == "Podcast 50"
+
+    main_links = {
+        (link.attrib["rel"], link.attrib["href"]) for link in channel.findall("atom:link", ATOM_NS)
+    }
+    archive_links = {
+        (link.attrib["rel"], link.attrib["href"])
+        for link in archive_channel.findall("atom:link", ATOM_NS)
+    }
+
+    assert ("self", "http://testserver/feeds/podcast.xml") in main_links
+    assert ("next", "http://testserver/feeds/podcast/page/2.xml") in main_links
+    assert ("self", "http://testserver/feeds/podcast/page/2.xml") in archive_links
+    assert ("previous", "http://testserver/feeds/podcast.xml") in archive_links
+
+
+@pytest.mark.django_db
+def test_podcast_feed_page_1_redirects_to_canonical_feed_url(client) -> None:
+    response = client.get(reverse("archive:podcast-feed-page", kwargs={"page": 1}))
+
+    assert response.status_code == 301
+    assert response["Location"] == reverse("archive:podcast-feed")

@@ -41,6 +41,11 @@ class Item(models.Model):
         choices=EnrichmentStatus.choices,
         default=EnrichmentStatus.PENDING,
     )
+    media_archive_status = models.CharField(
+        max_length=16,
+        choices=EnrichmentStatus.choices,
+        default=EnrichmentStatus.COMPLETE,
+    )
     article_audio_status = models.CharField(
         max_length=16,
         choices=EnrichmentStatus.choices,
@@ -64,13 +69,19 @@ class Item(models.Model):
     enrichment_error = models.TextField(blank=True)
     summary_error = models.TextField(blank=True)
     transcript_error = models.TextField(blank=True)
+    media_archive_error = models.TextField(blank=True)
     article_audio_error = models.TextField(blank=True)
     summary_retry_count = models.PositiveSmallIntegerField(default=0)
     summary_retry_at = models.DateTimeField(blank=True, null=True)
+    media_archive_retry_count = models.PositiveSmallIntegerField(default=0)
+    media_archive_retry_at = models.DateTimeField(blank=True, null=True)
     short_summary_generated = models.BooleanField(default=False)
     long_summary_generated = models.BooleanField(default=False)
     tags_generated = models.BooleanField(default=False)
     transcript_generated = models.BooleanField(default=False)
+    archived_audio_path = models.CharField(max_length=500, blank=True)
+    archived_audio_content_type = models.CharField(max_length=100, blank=True)
+    archived_audio_size_bytes = models.PositiveBigIntegerField(default=0)
     article_audio_generated = models.BooleanField(default=False)
     article_audio_job_id = models.CharField(max_length=64, blank=True)
     article_audio_artifact_path = models.CharField(max_length=500, blank=True)
@@ -121,7 +132,19 @@ class Item(models.Model):
         return bool(self.article_audio_artifact_path.strip())
 
     @property
+    def has_archived_audio(self) -> bool:
+        return bool(self.archived_audio_path.strip())
+
+    @property
+    def archived_audio_url(self) -> str:
+        if not self.has_archived_audio:
+            return ""
+        return reverse("archive:item-archived-audio", kwargs={"pk": self.pk})
+
+    @property
     def playback_audio_url(self) -> str:
+        if self.has_archived_audio:
+            return self.archived_audio_url
         if self.has_generated_article_audio:
             return reverse("archive:item-article-audio", kwargs={"pk": self.pk})
         return self.audio_url
@@ -129,6 +152,12 @@ class Item(models.Model):
     @property
     def has_playable_audio(self) -> bool:
         return bool(self.playback_audio_url)
+
+    @property
+    def has_required_podcast_feed_metadata(self) -> bool:
+        return bool(
+            self.title.strip() and self.short_summary.strip() and self.has_archived_audio
+        )
 
     def save(self, *args, **kwargs) -> None:
         if self.is_public and self.published_at is None:

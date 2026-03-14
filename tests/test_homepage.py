@@ -1,3 +1,4 @@
+import io
 from datetime import timedelta
 
 import pytest
@@ -111,6 +112,50 @@ def test_detail_page_shows_generated_article_audio_player(client) -> None:
     assert response.status_code == 200
     article_audio_url = reverse("archive:item-article-audio", kwargs={"pk": item.pk})
     assert article_audio_url.encode() in response.content
+
+
+@pytest.mark.django_db
+def test_detail_page_prefers_archived_audio_player(client) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/episode",
+        title="Archived radio feature",
+        short_summary="Short summary",
+        audio_url="https://cdn.example.com/audio.mp3",
+        kind=ItemKind.PODCAST_EPISODE,
+        archived_audio_path="items/1/audio/source.mp3",
+        archived_audio_content_type="audio/mpeg",
+        archived_audio_size_bytes=2048,
+    )
+
+    response = client.get(reverse("archive:item-detail", kwargs={"pk": item.pk}))
+
+    assert response.status_code == 200
+    archived_audio_url = reverse("archive:item-archived-audio", kwargs={"pk": item.pk})
+    assert archived_audio_url.encode() in response.content
+    assert b"Open archived audio" in response.content
+
+
+@pytest.mark.django_db
+def test_item_archived_audio_proxy_returns_archived_audio(client, monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/episode",
+        title="Archived episode",
+        kind=ItemKind.PODCAST_EPISODE,
+        archived_audio_path="items/1/audio/source.mp3",
+        archived_audio_content_type="audio/mpeg",
+        archived_audio_size_bytes=9,
+    )
+    monkeypatch.setattr(
+        "archive.views.open_archived_audio",
+        lambda item: io.BytesIO(b"ID3-audio"),
+    )
+
+    response = client.get(reverse("archive:item-archived-audio", kwargs={"pk": item.pk}))
+
+    assert response.status_code == 200
+    assert response["Content-Type"] == "audio/mpeg"
+    assert response["Content-Length"] == "9"
+    assert b"".join(response.streaming_content) == b"ID3-audio"
 
 
 @pytest.mark.django_db

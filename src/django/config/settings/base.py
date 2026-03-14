@@ -77,7 +77,7 @@ USE_TZ = True
 
 STATIC_URL = "/static/"
 STATIC_ROOT = Path(os.getenv("DJANGO_STATIC_ROOT", str(PROJECT_ROOT / "staticfiles")))
-STORAGES = {
+STORAGES: dict[str, dict[str, object]] = {
     "default": {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
     },
@@ -123,6 +123,57 @@ ARCHIVE_ARTICLE_AUDIO_POLL_SECONDS = int(
 ARCHIVE_ARTICLE_AUDIO_MAX_BYTES = int(
     os.getenv("ARCHIVE_ARTICLE_AUDIO_MAX_BYTES", str(50 * 1024 * 1024))
 )
+ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES = int(
+    os.getenv("ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES", str(250 * 1024 * 1024))
+)
+ARCHIVE_MEDIA_STORAGE_BACKEND = os.getenv(
+    "ARCHIVE_MEDIA_STORAGE_BACKEND",
+    "django.core.files.storage.FileSystemStorage",
+)
+ARCHIVE_MEDIA_STORAGE_LOCATION = os.getenv(
+    "ARCHIVE_MEDIA_STORAGE_LOCATION",
+    str(PROJECT_ROOT / "archive-media"),
+)
+ARCHIVE_MEDIA_STORAGE_BASE_URL = os.getenv("ARCHIVE_MEDIA_STORAGE_BASE_URL", "")
+ARCHIVE_MEDIA_STORAGE_BUCKET_NAME = os.getenv("ARCHIVE_MEDIA_STORAGE_BUCKET_NAME", "")
+ARCHIVE_MEDIA_STORAGE_ENDPOINT_URL = os.getenv("ARCHIVE_MEDIA_STORAGE_ENDPOINT_URL", "")
+ARCHIVE_MEDIA_STORAGE_REGION_NAME = os.getenv("ARCHIVE_MEDIA_STORAGE_REGION_NAME", "")
+ARCHIVE_MEDIA_STORAGE_ACCESS_KEY_ID = os.getenv("ARCHIVE_MEDIA_STORAGE_ACCESS_KEY_ID", "")
+ARCHIVE_MEDIA_STORAGE_SECRET_ACCESS_KEY = os.getenv(
+    "ARCHIVE_MEDIA_STORAGE_SECRET_ACCESS_KEY",
+    "",
+)
+ARCHIVE_MEDIA_STORAGE_ADDRESSING_STYLE = os.getenv(
+    "ARCHIVE_MEDIA_STORAGE_ADDRESSING_STYLE",
+    "path",
+)
+
+archive_media_storage: dict[str, object] = {
+    "BACKEND": ARCHIVE_MEDIA_STORAGE_BACKEND,
+    "OPTIONS": {},
+}
+archive_media_options = archive_media_storage["OPTIONS"]
+if not isinstance(archive_media_options, dict):
+    raise RuntimeError("Archive media storage options must be a dictionary")
+if ARCHIVE_MEDIA_STORAGE_BACKEND == "django.core.files.storage.FileSystemStorage":
+    archive_media_options["location"] = ARCHIVE_MEDIA_STORAGE_LOCATION
+    if ARCHIVE_MEDIA_STORAGE_BASE_URL:
+        archive_media_options["base_url"] = ARCHIVE_MEDIA_STORAGE_BASE_URL
+elif ARCHIVE_MEDIA_STORAGE_BACKEND == "storages.backends.s3.S3Storage":
+    archive_media_options.update(
+        {
+            "bucket_name": ARCHIVE_MEDIA_STORAGE_BUCKET_NAME,
+            "endpoint_url": ARCHIVE_MEDIA_STORAGE_ENDPOINT_URL or None,
+            "region_name": ARCHIVE_MEDIA_STORAGE_REGION_NAME or None,
+            "access_key": ARCHIVE_MEDIA_STORAGE_ACCESS_KEY_ID or None,
+            "secret_key": ARCHIVE_MEDIA_STORAGE_SECRET_ACCESS_KEY or None,
+            "default_acl": "private",
+            "file_overwrite": True,
+            "querystring_auth": True,
+            "addressing_style": ARCHIVE_MEDIA_STORAGE_ADDRESSING_STYLE,
+        }
+    )
+STORAGES["archive_media"] = archive_media_storage
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

@@ -9,6 +9,7 @@ dependencies = [
     "django-storages[s3]>=1.14.6",
     "gunicorn>=23.0.0",
     "whitenoise>=6.11.0",
+    "yt-dlp>=2026.3.13",
 ]
 
 [build-system]

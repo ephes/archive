@@ -428,6 +428,21 @@ def test_enrich_item_media_archive_records_video_source_for_extracted_audio(monk
 
 
 @pytest.mark.django_db
+def test_prepare_item_for_enrichment_marks_supported_youtube_page_for_media_archive() -> None:
+    item = Item(
+        original_url="https://www.youtube.com/watch?v=demo123",
+        kind=ItemKind.VIDEO,
+    )
+
+    prepare_item_for_enrichment(item)
+
+    assert item.media_archive_status == EnrichmentStatus.PENDING
+    assert item.media_archive_error == ""
+    assert item.media_archive_retry_count == 0
+    assert item.media_archive_retry_at is None
+
+
+@pytest.mark.django_db
 def test_video_archive_migration_requeues_existing_querystring_urls() -> None:
     migration = importlib.import_module(
         "archive.migrations.0008_item_archived_video_content_type_and_more"

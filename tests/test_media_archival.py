@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from django.core.files.base import ContentFile
 from django.core.files.storage import storages
 
-from archive.media_archival import MediaArchivalError, archive_item_audio, can_archive_audio
+from archive.media_archival import (
+    MediaArchivalError,
+    _looks_like_supported_video_page_url,
+    archive_item_audio,
+    can_archive_audio,
+)
 from archive.models import Item, ItemKind
 
 
@@ -62,6 +69,32 @@ class _TrackingSpool:
         self.closed = True
 
 
+class _FakeYoutubeDL:
+    instances: list[_FakeYoutubeDL] = []
+    payload = b"youtube-page-video"
+    suffix = ".mp4"
+    error: Exception | None = None
+
+    def __init__(self, options: dict[str, object]) -> None:
+        self.options = options
+        type(self).instances.append(self)
+
+    def __enter__(self) -> _FakeYoutubeDL:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def extract_info(self, source_url: str, download: bool):
+        assert download is True
+        if self.error is not None:
+            raise self.error
+        output_template = str(self.options["outtmpl"])
+        output_path = Path(output_template.replace("%(ext)s", self.suffix.lstrip(".")))
+        output_path.write_bytes(self.payload)
+        return {"webpage_url": source_url}
+
+
 def _fake_ffmpeg_run(command, check, capture_output, text, timeout) -> None:
     output_path = command[-1]
     with open(output_path, "wb") as output_file:
@@ -87,6 +120,56 @@ def test_can_archive_audio_accepts_direct_video_media_url() -> None:
     )
 
     assert can_archive_audio(item) is True
+
+
+@pytest.mark.django_db
+def test_can_archive_audio_accepts_supported_youtube_page_url() -> None:
+    item = Item(
+        original_url="https://www.youtube.com/watch?v=demo123",
+        kind=ItemKind.VIDEO,
+    )
+
+    assert can_archive_audio(item) is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.youtube.com/watch?v=demo123",
+        "https://m.youtube.com/watch?v=demo123",
+        "http://www.youtube.com/watch?v=demo123",
+        "https://www.youtube.com/shorts/demo123",
+        "https://www.youtube.com/live/demo123",
+        "https://www.youtube.com/embed/demo123",
+        "https://youtu.be/demo123",
+    ],
+)
+def test_supported_video_page_url_matcher_accepts_documented_youtube_shapes(url: str) -> None:
+    assert _looks_like_supported_video_page_url(url) is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.youtube.com/@archive/videos",
+        "https://youtu.be/",
+        "https://www.youtube.com/watch",
+        "https://www.youtube.com/watch/",
+        "https://www.youtube.com/",
+    ],
+)
+def test_supported_video_page_url_matcher_rejects_non_video_youtube_pages(url: str) -> None:
+    assert _looks_like_supported_video_page_url(url) is False
+
+
+@pytest.mark.django_db
+def test_can_archive_audio_rejects_non_video_youtube_pages() -> None:
+    item = Item(
+        original_url="https://www.youtube.com/@archive/videos",
+        kind=ItemKind.VIDEO,
+    )
+
+    assert can_archive_audio(item) is False
 
 
 @pytest.mark.django_db
@@ -215,6 +298,56 @@ def test_archive_item_audio_prefers_video_path_for_webm_video_urls(monkeypatch) 
 
     assert archived_audio.object_name == f"items/{item.pk}/audio/extracted.mp3"
     assert archived_audio.source_object_name == f"items/{item.pk}/video/source.webm"
+
+
+@pytest.mark.django_db
+def test_archive_item_audio_downloads_supported_youtube_page_before_extracting_audio(
+    monkeypatch,
+) -> None:
+    item = Item.objects.create(
+        original_url="https://www.youtube.com/watch?v=demo123",
+        kind=ItemKind.VIDEO,
+    )
+    _delete_storage_objects(
+        f"items/{item.pk}/video/source.mp4",
+        f"items/{item.pk}/audio/extracted.mp3",
+    )
+    _FakeYoutubeDL.instances.clear()
+    _FakeYoutubeDL.payload = b"youtube-page-video"
+    _FakeYoutubeDL.suffix = ".mp4"
+    _FakeYoutubeDL.error = None
+    monkeypatch.setattr(
+        "archive.media_archival.yt_dlp",
+        SimpleNamespace(YoutubeDL=_FakeYoutubeDL),
+    )
+    monkeypatch.setattr("archive.media_archival.subprocess.run", _fake_ffmpeg_run)
+
+    archived_audio = archive_item_audio(item=item)
+
+    assert archived_audio.object_name == f"items/{item.pk}/audio/extracted.mp3"
+    assert archived_audio.source_object_name == f"items/{item.pk}/video/source.mp4"
+    assert archived_audio.source_content_type == "video/mp4"
+    assert archived_audio.source_size_bytes == len(b"youtube-page-video")
+    assert _FakeYoutubeDL.instances[0].options["format"] == "best[ext=mp4]/best[ext=webm]/best"
+    assert storages["archive_media"].exists(archived_audio.object_name) is True
+    assert storages["archive_media"].exists(archived_audio.source_object_name) is True
+
+
+@pytest.mark.django_db
+def test_archive_item_audio_reports_supported_youtube_page_download_failures(monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://youtu.be/demo123",
+        kind=ItemKind.VIDEO,
+    )
+    _FakeYoutubeDL.instances.clear()
+    _FakeYoutubeDL.error = RuntimeError("resolver exploded")
+    monkeypatch.setattr(
+        "archive.media_archival.yt_dlp",
+        SimpleNamespace(YoutubeDL=_FakeYoutubeDL),
+    )
+
+    with pytest.raises(MediaArchivalError, match="Video page download failed: resolver exploded"):
+        archive_item_audio(item=item)
 
 
 @pytest.mark.django_db

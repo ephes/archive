@@ -9,7 +9,7 @@ Current shipped scope:
 - Milestone 3: background URL metadata extraction for title/source/author/publication time/media URL
 - Milestone 4: background short summary, long summary, and tag generation with operator-editable values
 - Milestone 5: background transcription for audio/video items with transcript-aware summary/tag refresh
-- Milestone 6: background archival of eligible remote audio/video, stable local audio enclosure URLs, and a separate podcast-style RSS feed
+- Milestone 6: background archival of eligible remote audio/video, including YouTube page URLs, stable local audio enclosure URLs, and a separate podcast-style RSS feed
 
 Public endpoints:
 
@@ -185,15 +185,20 @@ episodes with a direct remote audio source are also archived asynchronously into
 storage backend and then served through a stable item-scoped Archive URL for playback and podcast enclosures.
 Video items with a direct downloadable media URL (`.mp4`, `.m4v`, `.mov`, or `.webm`) are archived into the
 same storage backend, then processed with `ffmpeg` to produce a stable local MP3 enclosure under
-`/items/<id>/audio/`. Failed media archival jobs now retry with the same bounded backoff pattern as
-summary generation
-(5 minutes, 30 minutes, 2 hours) before remaining failed for operator review.
-YouTube/Vimeo page URLs are not handled by this slice; the current implementation only supports direct
-downloadable media files for video-derived local audio.
+`/items/<id>/audio/`. YouTube page URLs (`youtube.com/watch`, `youtube.com/shorts`, `youtube.com/live`,
+`youtube.com/embed`, and `youtu.be/<id>`) are also supported for this path via a bundled `yt-dlp`
+downloader. Vimeo and other non-direct video pages are still unsupported. Failed media archival jobs now
+retry with the same bounded backoff pattern as summary generation (5 minutes, 30 minutes, 2 hours) before
+remaining failed for operator review.
 
 Operator note:
 
 - the worker host must have `ffmpeg` installed for video-derived local audio extraction
+- `yt-dlp` changes frequently to keep up with YouTube; if page downloads start failing after a period of
+  stability, refresh the app dependency set with a newer `yt-dlp` release and redeploy
+- the worker's `--media-archive-timeout` still guards network stalls and other blocking work, but it is
+  not a strict wall-clock cap on a steady `yt-dlp` download; `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` remains the
+  hard size limit for accepted source media
 
 Migration note:
 

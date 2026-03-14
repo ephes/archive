@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import SpooledTemporaryFile, TemporaryDirectory
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
 from django.conf import settings
@@ -16,10 +16,17 @@ from django.core.files.storage import storages
 from archive.metadata import REQUEST_HEADERS
 from archive.models import Item, ItemKind
 
+try:
+    import yt_dlp
+except ImportError:  # pragma: no cover - exercised via runtime error handling.
+    yt_dlp = None
+
 CHUNK_SIZE = 1024 * 1024
 DEFAULT_AUDIO_CONTENT_TYPE = "audio/mpeg"
 DEFAULT_EXTRACTED_AUDIO_SUFFIX = ".mp3"
 AMBIGUOUS_AUDIO_SUFFIXES = {".webm"}
+YOUTUBE_PAGE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
+YTDLP_PROGRESSIVE_VIDEO_FORMAT = "best[ext=mp4]/best[ext=webm]/best"
 AUDIO_CONTENT_TYPE_SUFFIXES = {
     "audio/aac": ".aac",
     "audio/flac": ".flac",
@@ -142,19 +149,10 @@ def _archive_direct_audio(item: Item, source_url: str, timeout: int) -> Archived
 
 
 def _archive_video_audio(item: Item, source_url: str, timeout: int) -> ArchivedAudio:
-    request = Request(
-        source_url,
-        headers={
-            **REQUEST_HEADERS,
-            "Accept": "video/*;q=1.0,application/octet-stream;q=0.8,*/*;q=0.1",
-        },
-    )
-
     try:
         with TemporaryDirectory(prefix="archive-media-") as temp_dir:
             temp_dir_path = Path(temp_dir)
             source_path, source_content_type, source_size_bytes = _download_video_source(
-                request=request,
                 source_url=source_url,
                 temp_dir=temp_dir_path,
                 timeout=timeout,
@@ -211,11 +209,38 @@ def _archive_video_audio(item: Item, source_url: str, timeout: int) -> ArchivedA
 
 def _download_video_source(
     *,
-    request: Request,
     source_url: str,
     temp_dir: Path,
     timeout: int,
 ) -> tuple[Path, str, int]:
+    if _looks_like_direct_video_url(source_url):
+        return _download_direct_video_source(
+            source_url=source_url,
+            temp_dir=temp_dir,
+            timeout=timeout,
+        )
+    if _looks_like_supported_video_page_url(source_url):
+        return _download_supported_video_page_source(
+            source_url=source_url,
+            temp_dir=temp_dir,
+            timeout=timeout,
+        )
+    raise MediaArchivalError("Item does not have a supported downloadable video source yet")
+
+
+def _download_direct_video_source(
+    *,
+    source_url: str,
+    temp_dir: Path,
+    timeout: int,
+) -> tuple[Path, str, int]:
+    request = Request(
+        source_url,
+        headers={
+            **REQUEST_HEADERS,
+            "Accept": "video/*;q=1.0,application/octet-stream;q=0.8,*/*;q=0.1",
+        },
+    )
     with urlopen(request, timeout=timeout) as response:
         final_url = response.geturl() or source_url
         content_type = (response.headers.get_content_type() or "").lower()
@@ -242,6 +267,66 @@ def _download_video_source(
                 source_file.write(chunk)
 
     return source_path, normalized_content_type, total_bytes
+
+
+def _download_supported_video_page_source(
+    *,
+    source_url: str,
+    temp_dir: Path,
+    timeout: int,
+) -> tuple[Path, str, int]:
+    if yt_dlp is None:
+        raise MediaArchivalError(
+            "Video page download requires yt-dlp; run uv sync or deploy the updated app"
+        )
+
+    output_template = str(temp_dir / "source.%(ext)s")
+    options = {
+        "format": YTDLP_PROGRESSIVE_VIDEO_FORMAT,
+        "max_filesize": settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES,
+        "noplaylist": True,
+        "nopart": True,
+        "no_warnings": True,
+        "outtmpl": output_template,
+        "quiet": True,
+        "restrictfilenames": True,
+        "socket_timeout": timeout,
+    }
+    try:
+        with yt_dlp.YoutubeDL(options) as downloader:
+            downloader.extract_info(source_url, download=True)
+    except Exception as exc:
+        detail = str(exc).strip() or exc.__class__.__name__
+        raise MediaArchivalError(f"Video page download failed: {detail}") from exc
+
+    source_path = _find_downloaded_video_path(temp_dir)
+    if source_path is None:
+        raise MediaArchivalError("Video page download did not produce a supported media file")
+
+    size_bytes = source_path.stat().st_size
+    if size_bytes <= 0:
+        raise MediaArchivalError("Video page download produced an empty media file")
+    if size_bytes > settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES:
+        raise MediaArchivalError(
+            "Video source exceeded the configured "
+            f"{settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES}-byte archive limit"
+        )
+
+    suffix = _detect_video_suffix(url=str(source_path), content_type="")
+    if not suffix:
+        raise MediaArchivalError("Video page download produced an unsupported media file")
+    return source_path, _content_type_for_video_suffix(suffix), size_bytes
+
+
+def _find_downloaded_video_path(temp_dir: Path) -> Path | None:
+    candidates = sorted(
+        path
+        for path in temp_dir.iterdir()
+        if path.is_file()
+        and path.name.startswith("source.")
+        and _looks_like_direct_video_url(path.name)
+    )
+    return candidates[0] if candidates else None
 
 
 def _extract_audio_with_ffmpeg(*, source_path: Path, output_path: Path, timeout: int) -> None:
@@ -341,7 +426,9 @@ def _select_video_archive_source_url(item: Item) -> str | None:
         if not candidate or candidate in seen:
             continue
         seen.add(candidate)
-        if _looks_like_direct_video_url(candidate):
+        if _looks_like_direct_video_url(candidate) or _looks_like_supported_video_page_url(
+            candidate
+        ):
             return candidate
     return None
 
@@ -357,6 +444,20 @@ def _looks_like_ambiguous_audio_url(url: str) -> bool:
 
 def _looks_like_direct_video_url(url: str) -> bool:
     return bool(_detect_video_suffix(url=url, content_type=""))
+
+
+def _looks_like_supported_video_page_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    if parsed.scheme not in {"http", "https"} or host not in YOUTUBE_PAGE_HOSTS:
+        return False
+    if _looks_like_direct_video_url(url):
+        return False
+    if host == "youtu.be":
+        return bool(parsed.path.strip("/"))
+    if parsed.path == "/watch":
+        return bool(parse_qs(parsed.query).get("v"))
+    return parsed.path.startswith(("/embed/", "/live/", "/shorts/"))
 
 
 def _detect_audio_suffix(url: str, content_type: str) -> str:

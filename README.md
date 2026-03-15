@@ -144,6 +144,7 @@ Important values:
 - `ARCHIVE_TRANSCRIPTION_API_KEY` defaults to `ARCHIVE_SUMMARY_API_KEY`
 - `ARCHIVE_TRANSCRIPTION_API_BASE` defaults to `ARCHIVE_SUMMARY_API_BASE`
 - `ARCHIVE_TRANSCRIPTION_MODEL` defaults to `gpt-4o-mini-transcribe`
+- `ARCHIVE_TRANSCRIPTION_POLL_SECONDS` defaults to `30`
 - `ARCHIVE_ARTICLE_AUDIO_API_KEY` defaults to `ARCHIVE_TRANSCRIPTION_API_KEY`
 - `ARCHIVE_ARTICLE_AUDIO_API_BASE` defaults to `ARCHIVE_TRANSCRIPTION_API_BASE`
 - `ARCHIVE_ARTICLE_AUDIO_MODEL` defaults to `tts-1`
@@ -178,7 +179,9 @@ Optional worker flags for the Milestone 6 slice:
 Summary generation is asynchronous and does not block capture or immediate publication. Audio/video
 transcription is also asynchronous and writes transcript text back onto the item when a transcribable media
 source is available, preferring archived local audio first, then archived local video, and falling back to
-direct remote media URLs within the API size limit. Failed summary jobs retry automatically with bounded backoff
+direct remote media URLs within the sync API size limit. Oversized archived local audio now stages into
+Voxhelm's batch upload path (`POST /v1/uploads` plus `POST /v1/jobs` with `input.kind=upload`) instead of
+trying to chunk/transcode inside Archive. Failed summary jobs retry automatically with bounded backoff
 (5 minutes, 30 minutes, 2 hours) before remaining in a failed state for operator review. Article items can
 also submit a Voxhelm batch `synthesize` job once a summary exists; Archive stores the private artifact
 reference and exposes the finished audio through a public item-scoped proxy URL on the detail page. Podcast
@@ -188,13 +191,17 @@ Video items with a direct downloadable media URL (`.mp4`, `.m4v`, `.mov`, or `.w
 same storage backend, then processed with `ffmpeg` to produce a stable local MP3 enclosure under
 `/items/<id>/audio/`. YouTube page URLs (`youtube.com/watch`, `youtube.com/shorts`, `youtube.com/live`,
 `youtube.com/embed`, and `youtu.be/<id>`) are also supported for this path via a bundled `yt-dlp`
-downloader. Vimeo and other non-direct video pages are still unsupported. Failed media archival jobs now
+downloader. Vimeo and other non-direct video pages are still unsupported. Oversized archived uploaded video
+transcription is still deferred because Voxhelm's staged batch input currently supports audio only. Failed
+media archival jobs now
 retry with the same bounded backoff pattern as summary generation (5 minutes, 30 minutes, 2 hours) before
 remaining failed for operator review.
 
 Operator note:
 
 - the worker host must have `ffmpeg` installed for video-derived local audio extraction
+- the transcription API base should point at Voxhelm's `/v1` root if you want oversized archived local audio
+  to use the staged batch upload path
 - `yt-dlp` changes frequently to keep up with YouTube; if page downloads start failing after a period of
   stability, refresh the app dependency set with a newer `yt-dlp` release and redeploy
 - the worker's `--media-archive-timeout` still guards network stalls and other blocking work, but it is

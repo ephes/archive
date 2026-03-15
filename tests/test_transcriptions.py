@@ -223,7 +223,9 @@ def test_generate_item_transcript_does_not_fallback_to_remote_when_archived_audi
 
 
 @pytest.mark.django_db
-def test_generate_item_transcript_rejects_oversized_archived_media(monkeypatch, settings) -> None:
+def test_generate_item_transcript_stages_oversized_archived_audio_for_batch_job(
+    monkeypatch, settings
+) -> None:
     item = Item.objects.create(
         original_url="https://example.com/episode",
         audio_url="https://cdn.example.com/episode.mp3",
@@ -233,14 +235,133 @@ def test_generate_item_transcript_rejects_oversized_archived_media(monkeypatch, 
         archived_audio_size_bytes=MAX_TRANSCRIPTION_BYTES + 1,
     )
     settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
+    settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
+    _delete_archived_object(item.archived_audio_path)
+    storages["archive_media"].save(
+        item.archived_audio_path,
+        ContentFile(b"oversized-archived-audio"),
+    )
+    monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
+
+    def fake_urlopen(request, timeout):
+        assert request.full_url != "https://cdn.example.com/episode.mp3"
+        if request.full_url == "https://voxhelm.example.test/v1/uploads":
+            request_body = (
+                request.data if isinstance(request.data, bytes) else b"".join(request.data)
+            )
+            assert b'name="file"' in request_body
+            assert b"oversized-archived-audio" in request_body
+            return _FakeResponse(
+                json.dumps({"id": "upload-123"}).encode("utf-8"),
+                content_type="application/json",
+                url=request.full_url,
+            )
+        if request.full_url == "https://voxhelm.example.test/v1/jobs":
+            payload = json.loads(request.data.decode("utf-8"))
+            assert payload["input"] == {"kind": "upload", "upload_id": "upload-123"}
+            assert payload["output"]["formats"] == ["text", "json"]
+            assert payload["task_ref"].startswith(f"archive-item-{item.pk}-transcript-")
+            assert payload["task_ref"] != f"archive-item-{item.pk}-transcript-v1"
+            return _FakeResponse(
+                json.dumps({"id": "job-123", "state": "queued"}).encode("utf-8"),
+                content_type="application/json",
+                url=request.full_url,
+            )
+        assert request.full_url == "https://voxhelm.example.test/v1/jobs/job-123"
+        return _FakeResponse(
+            json.dumps(
+                {
+                    "id": "job-123",
+                    "state": "succeeded",
+                    "result": {"text": " Batch staged transcript "},
+                }
+            ).encode("utf-8"),
+            content_type="application/json",
+            url=request.full_url,
+        )
+
+    monkeypatch.setattr("archive.transcriptions.urlopen", fake_urlopen)
+
+    assert generate_item_transcript(item=item) == "Batch staged transcript"
+
+
+@pytest.mark.django_db
+def test_generate_item_transcript_reports_failed_batch_job_for_oversized_archived_audio(
+    monkeypatch, settings
+) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/episode",
+        audio_url="https://cdn.example.com/episode.mp3",
+        kind=ItemKind.PODCAST_EPISODE,
+        archived_audio_path="items/1/audio/source.mp3",
+        archived_audio_content_type="audio/mpeg",
+        archived_audio_size_bytes=MAX_TRANSCRIPTION_BYTES + 1,
+    )
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
+    settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
+    _delete_archived_object(item.archived_audio_path)
+    storages["archive_media"].save(
+        item.archived_audio_path,
+        ContentFile(b"oversized-archived-audio"),
+    )
+    monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
+
+    def fake_urlopen(request, timeout):
+        assert request.full_url != "https://cdn.example.com/episode.mp3"
+        if request.full_url == "https://voxhelm.example.test/v1/uploads":
+            return _FakeResponse(
+                json.dumps({"id": "upload-123"}).encode("utf-8"),
+                content_type="application/json",
+                url=request.full_url,
+            )
+        if request.full_url == "https://voxhelm.example.test/v1/jobs":
+            return _FakeResponse(
+                json.dumps({"id": "job-123", "state": "queued"}).encode("utf-8"),
+                content_type="application/json",
+                url=request.full_url,
+            )
+        assert request.full_url == "https://voxhelm.example.test/v1/jobs/job-123"
+        return _FakeResponse(
+            json.dumps(
+                {
+                    "id": "job-123",
+                    "state": "failed",
+                    "error": {"message": "batch boom"},
+                }
+            ).encode("utf-8"),
+            content_type="application/json",
+            url=request.full_url,
+        )
+
+    monkeypatch.setattr("archive.transcriptions.urlopen", fake_urlopen)
+
+    with pytest.raises(TranscriptionGenerationError, match="batch boom"):
+        generate_item_transcript(item=item)
+
+
+@pytest.mark.django_db
+def test_generate_item_transcript_rejects_oversized_archived_video_until_voxhelm_supports_it(
+    monkeypatch, settings
+) -> None:
+    item = Item.objects.create(
+        original_url="https://www.youtube.com/watch?v=demo123",
+        kind=ItemKind.VIDEO,
+        archived_video_path="items/1/video/source.mp4",
+        archived_video_content_type="video/mp4",
+        archived_video_size_bytes=MAX_TRANSCRIPTION_BYTES + 1,
+    )
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
     monkeypatch.setattr(
         "archive.transcriptions.urlopen",
         lambda request, timeout: (_ for _ in ()).throw(
-            AssertionError("remote fallback should not run when archived audio exists")
+            AssertionError("remote or batch fallback should not run for oversized archived video")
         ),
     )
 
-    with pytest.raises(TranscriptionGenerationError, match="Archived media exceeded 25 MiB"):
+    with pytest.raises(
+        TranscriptionGenerationError,
+        match="uploaded video transcription is not supported yet",
+    ):
         generate_item_transcript(item=item)
 
 

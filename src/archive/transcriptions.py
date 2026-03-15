@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
 import re
 import uuid
 from contextlib import closing
 from dataclasses import dataclass
+from time import monotonic, sleep
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 from urllib.request import Request, urlopen
 
 from django.conf import settings
@@ -46,6 +48,10 @@ class TranscriptionGenerationError(RuntimeError):
     pass
 
 
+class _ArchivedAudioRequiresBatchUpload(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class DownloadedMedia:
     filename: str
@@ -61,6 +67,22 @@ class TranscriptionSource:
     size_bytes: int = 0
 
 
+@dataclass(frozen=True)
+class BatchTranscriptionJobUpdate:
+    job_id: str
+    state: str
+    transcript: str = ""
+    error_message: str = ""
+
+    @property
+    def is_complete(self) -> bool:
+        return self.state == "succeeded" and bool(self.transcript)
+
+    @property
+    def is_pending(self) -> bool:
+        return self.state in {"queued", "running"}
+
+
 def can_transcribe_item(item: Item) -> bool:
     return _select_transcription_source(item) is not None
 
@@ -74,9 +96,26 @@ def generate_item_transcript(item: Item, timeout: int = 300) -> str:
     if source is None:
         raise TranscriptionGenerationError("Item does not have a transcribable media source yet")
 
-    media = _load_transcription_media(item=item, source=source, timeout=timeout)
     prompt = _build_transcription_prompt(item=item)
-    raw_transcript = _request_transcription(media=media, prompt=prompt, timeout=timeout)
+    if source.kind == "archived_audio" and source.size_bytes > MAX_TRANSCRIPTION_BYTES:
+        raw_transcript = _request_staged_archived_audio_transcription(
+            item=item,
+            source=source,
+            timeout=timeout,
+        )
+    elif source.kind == "archived_video" and source.size_bytes > MAX_TRANSCRIPTION_BYTES:
+        raise _oversized_archived_video_not_supported()
+    else:
+        try:
+            media = _load_transcription_media(item=item, source=source, timeout=timeout)
+        except _ArchivedAudioRequiresBatchUpload:
+            raw_transcript = _request_staged_archived_audio_transcription(
+                item=item,
+                source=source,
+                timeout=timeout,
+            )
+        else:
+            raw_transcript = _request_transcription(media=media, prompt=prompt, timeout=timeout)
     transcript = _normalize_transcript(raw_transcript)
     if not transcript:
         raise TranscriptionGenerationError("Transcription response was empty")
@@ -192,7 +231,9 @@ def _read_archived_media(item: Item, source: TranscriptionSource) -> DownloadedM
         )
 
     if source.size_bytes > MAX_TRANSCRIPTION_BYTES:
-        raise TranscriptionGenerationError("Archived media exceeded 25 MiB transcription limit")
+        if source.kind == "archived_audio":
+            raise _ArchivedAudioRequiresBatchUpload
+        raise _oversized_archived_video_not_supported()
 
     try:
         with closing(opener(item)) as media_file:
@@ -203,7 +244,9 @@ def _read_archived_media(item: Item, source: TranscriptionSource) -> DownloadedM
         raise TranscriptionGenerationError(f"Archived {source_label} read failed: {exc}") from exc
 
     if len(payload) > MAX_TRANSCRIPTION_BYTES:
-        raise TranscriptionGenerationError("Archived media exceeded 25 MiB transcription limit")
+        if source.kind == "archived_audio":
+            raise _ArchivedAudioRequiresBatchUpload
+        raise _oversized_archived_video_not_supported()
 
     guessed_content_type = content_type or SUPPORTED_SUFFIXES[suffix]
     if guessed_content_type == "application/octet-stream":
@@ -213,6 +256,265 @@ def _read_archived_media(item: Item, source: TranscriptionSource) -> DownloadedM
         filename=f"transcription-input{suffix}",
         content_type=guessed_content_type,
         payload=payload,
+    )
+
+
+def _request_staged_archived_audio_transcription(
+    *,
+    item: Item,
+    source: TranscriptionSource,
+    timeout: int,
+) -> str:
+    upload_id = _stage_archived_audio_upload(item=item, source=source, timeout=timeout)
+    update = _submit_batch_transcription_job(
+        item=item,
+        source=source,
+        upload_id=upload_id,
+        timeout=timeout,
+    )
+    completed = _wait_for_batch_transcription_job(update=update, timeout=timeout)
+    return completed.transcript
+
+
+def _stage_archived_audio_upload(
+    *,
+    item: Item,
+    source: TranscriptionSource,
+    timeout: int,
+) -> str:
+    suffix = _detect_suffix(url=source.location, content_type=source.content_type.lower())
+    if not suffix:
+        raise TranscriptionGenerationError(
+            "Unsupported archived audio type for transcription: "
+            f"{source.content_type or source.location or 'unknown'}"
+        )
+
+    filename = _transcription_source_filename(source=source, default_suffix=suffix)
+    content_type = source.content_type.lower() or SUPPORTED_SUFFIXES[suffix]
+    boundary = f"archive-{uuid.uuid4().hex}"
+    request = Request(
+        _api_url("uploads"),
+        data=_iter_file_multipart_formdata(
+            boundary=boundary,
+            field_name="file",
+            filename=filename,
+            content_type=content_type,
+            file_opener=lambda: open_archived_audio(item),
+        ),
+        headers={
+            "Authorization": f"Bearer {settings.ARCHIVE_TRANSCRIPTION_API_KEY}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            **_multipart_content_length_header(
+                boundary=boundary,
+                field_name="file",
+                filename=filename,
+                content_type=content_type,
+                payload_size=source.size_bytes,
+            ),
+        },
+        method="POST",
+    )
+    payload = _request_json(
+        request=request,
+        timeout=timeout,
+        error_prefix="Archived audio staging failed",
+    )
+    upload_id = str(payload.get("id", "")).strip()
+    if not upload_id:
+        raise TranscriptionGenerationError("Archived audio staging response was incomplete")
+    return upload_id
+
+
+def _submit_batch_transcription_job(
+    *,
+    item: Item,
+    source: TranscriptionSource,
+    upload_id: str,
+    timeout: int,
+) -> BatchTranscriptionJobUpdate:
+    request_body = json.dumps(
+        {
+            "job_type": "transcribe",
+            "priority": "normal",
+            "lane": "batch",
+            "backend": "auto",
+            "model": settings.ARCHIVE_TRANSCRIPTION_MODEL,
+            "input": {"kind": "upload", "upload_id": upload_id},
+            "output": {"formats": ["text", "json"]},
+            "context": {"producer": "archive", "item_id": item.pk},
+            "task_ref": _transcription_job_task_ref(item=item, source=source),
+        }
+    ).encode("utf-8")
+    request = Request(
+        _api_url("jobs"),
+        data=request_body,
+        headers={
+            "Authorization": f"Bearer {settings.ARCHIVE_TRANSCRIPTION_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    payload = _request_json(
+        request=request,
+        timeout=timeout,
+        error_prefix="Batch transcription job submission failed",
+    )
+    return _parse_batch_transcription_job_update(payload)
+
+
+def _wait_for_batch_transcription_job(
+    *,
+    update: BatchTranscriptionJobUpdate,
+    timeout: int,
+) -> BatchTranscriptionJobUpdate:
+    if update.is_complete:
+        return update
+    if not update.is_pending:
+        raise TranscriptionGenerationError(update.error_message or "Batch transcription job failed")
+
+    deadline = monotonic() + timeout
+    current = update
+    while current.is_pending:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise TranscriptionGenerationError(
+                f"Timed out waiting for batch transcription job {current.job_id}"
+            )
+        sleep(min(settings.ARCHIVE_TRANSCRIPTION_POLL_SECONDS, remaining))
+        current = _poll_batch_transcription_job(
+            job_id=current.job_id,
+            timeout=max(1, int(deadline - monotonic())),
+        )
+
+    if current.is_complete:
+        return current
+    raise TranscriptionGenerationError(current.error_message or "Batch transcription job failed")
+
+
+def _poll_batch_transcription_job(job_id: str, timeout: int) -> BatchTranscriptionJobUpdate:
+    request = Request(
+        _api_url(f"jobs/{job_id}"),
+        headers={"Authorization": f"Bearer {settings.ARCHIVE_TRANSCRIPTION_API_KEY}"},
+    )
+    payload = _request_json(
+        request=request,
+        timeout=timeout,
+        error_prefix="Batch transcription job status request failed",
+    )
+    return _parse_batch_transcription_job_update(payload)
+
+
+def _parse_batch_transcription_job_update(
+    payload: dict[str, object],
+) -> BatchTranscriptionJobUpdate:
+    job_id = str(payload.get("id", "")).strip()
+    state = str(payload.get("state", "")).strip().lower()
+    if not job_id or not state:
+        raise TranscriptionGenerationError("Batch transcription job response was incomplete")
+
+    if state == "succeeded":
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise TranscriptionGenerationError("Batch transcription job result was missing")
+        transcript = str(result.get("text", "")).strip()
+        if not transcript:
+            raise TranscriptionGenerationError(
+                "Batch transcription job did not return transcript text"
+            )
+        return BatchTranscriptionJobUpdate(job_id=job_id, state=state, transcript=transcript)
+
+    if state == "failed":
+        error = payload.get("error")
+        if isinstance(error, dict):
+            error_message = str(error.get("message", "")).strip()
+        else:
+            error_message = ""
+        return BatchTranscriptionJobUpdate(
+            job_id=job_id,
+            state=state,
+            error_message=error_message or "Batch transcription job failed",
+        )
+
+    return BatchTranscriptionJobUpdate(job_id=job_id, state=state)
+
+
+def _iter_file_multipart_formdata(
+    *,
+    boundary: str,
+    field_name: str,
+    filename: str,
+    content_type: str,
+    file_opener,
+):
+    prefix = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode()
+    suffix = f"\r\n--{boundary}--\r\n".encode()
+
+    def body():
+        yield prefix
+        try:
+            with closing(file_opener()) as file_handle:
+                while True:
+                    chunk = file_handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+        except MediaArchivalError as exc:
+            raise TranscriptionGenerationError(str(exc)) from exc
+        except OSError as exc:
+            raise TranscriptionGenerationError(f"Archived audio read failed: {exc}") from exc
+        yield suffix
+
+    return body()
+
+
+def _multipart_content_length_header(
+    *,
+    boundary: str,
+    field_name: str,
+    filename: str,
+    content_type: str,
+    payload_size: int,
+) -> dict[str, str]:
+    if payload_size <= 0:
+        return {}
+    prefix = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode()
+    suffix = f"\r\n--{boundary}--\r\n".encode()
+    return {"Content-Length": str(len(prefix) + payload_size + len(suffix))}
+
+
+def _transcription_source_filename(*, source: TranscriptionSource, default_suffix: str) -> str:
+    location = source.location.strip()
+    parsed_path = urlparse(location).path
+    filename = parsed_path.rsplit("/", 1)[-1] if parsed_path else location.rsplit("/", 1)[-1]
+    return filename or f"transcription-input{default_suffix}"
+
+
+def _transcription_job_task_ref(*, item: Item, source: TranscriptionSource) -> str:
+    source_fingerprint = hashlib.sha256(
+        "|".join(
+            (
+                source.kind,
+                source.location.strip(),
+                source.content_type.strip(),
+                str(source.size_bytes),
+            )
+        ).encode()
+    ).hexdigest()[:16]
+    return f"archive-item-{item.pk}-transcript-{source_fingerprint}"
+
+
+def _oversized_archived_video_not_supported() -> TranscriptionGenerationError:
+    return TranscriptionGenerationError(
+        "Archived video exceeded 25 MiB sync transcription limit, and Voxhelm batch "
+        "uploaded video transcription is not supported yet"
     )
 
 
@@ -246,7 +548,6 @@ def _build_transcription_prompt(item: Item) -> str:
 
 
 def _request_transcription(media: DownloadedMedia, prompt: str, timeout: int) -> str:
-    base_url = settings.ARCHIVE_TRANSCRIPTION_API_BASE.rstrip("/")
     fields = {
         "model": settings.ARCHIVE_TRANSCRIPTION_MODEL,
     }
@@ -255,7 +556,7 @@ def _request_transcription(media: DownloadedMedia, prompt: str, timeout: int) ->
 
     boundary, request_body = _encode_multipart_formdata(fields=fields, media=media)
     request = Request(
-        f"{base_url}/audio/transcriptions",
+        _api_url("audio/transcriptions"),
         data=request_body,
         headers={
             "Authorization": f"Bearer {settings.ARCHIVE_TRANSCRIPTION_API_KEY}",
@@ -322,6 +623,38 @@ def _encode_multipart_formdata(fields: dict[str, str], media: DownloadedMedia) -
         ]
     )
     return boundary, b"".join(body)
+
+
+def _request_json(request: Request, timeout: int, error_prefix: str) -> dict[str, object]:
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        message = exc.read().decode("utf-8", errors="replace")
+        raise TranscriptionGenerationError(f"{error_prefix}: HTTP {exc.code}: {message}") from exc
+    except URLError as exc:
+        raise TranscriptionGenerationError(f"{error_prefix}: {exc.reason}") from exc
+    except OSError as exc:
+        raise TranscriptionGenerationError(f"{error_prefix}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise TranscriptionGenerationError(f"{error_prefix}: invalid JSON response") from exc
+
+    if not isinstance(payload, dict):
+        raise TranscriptionGenerationError(f"{error_prefix}: response was not an object")
+    return payload
+
+
+def _api_url(path: str) -> str:
+    base_url = settings.ARCHIVE_TRANSCRIPTION_API_BASE.rstrip("/")
+    normalized_path = path.strip()
+    if normalized_path.startswith(("https://", "http://")):
+        return normalized_path
+    if normalized_path.startswith("/"):
+        parsed = urlsplit(base_url)
+        if not parsed.scheme or not parsed.netloc:
+            raise TranscriptionGenerationError("Transcription API base must be an absolute URL")
+        return f"{parsed.scheme}://{parsed.netloc}{normalized_path}"
+    return f"{base_url}/{normalized_path.lstrip('/')}"
 
 
 def _normalize_transcript(value: str) -> str:

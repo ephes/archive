@@ -247,12 +247,24 @@ Current automatic policy:
 Operator workflow in Django admin:
 
 - inspect `kind`, `classification_rule`, and `classification_evidence`
+- inspect the stored classification engine version, selected media, podcast-feed diagnostic, and whether the
+  stored decision looks stale relative to the current engine
 - override podcast feed policy with `auto`, `include`, or `exclude`
 - manually override `kind` when automatic classification is wrong
 - use `Reprocess selected items` to re-queue one or more items for a fresh enrichment pass
 
 The reprocess action is intentionally per-item or small-batch in this slice. It does not trigger any implicit
 bulk historical replay.
+
+Historical replay workflow:
+
+- use `just manage reclassify_items --item-id <id>` for a dry-run replay of one or more items
+- use selectors such as `--host <host>`, `--rule <rule>`, `--empty-rule`, `--empty-evidence`, or
+  `--stale-only` to narrow a historical replay pass
+- add `--apply` to persist `kind`, `classification_rule`, `classification_evidence`, and the stored engine
+  version for the selected items
+- replay apply mode does not queue metadata, media archival, transcript, summary, or article-audio work;
+  explicit reprocessing remains a separate operator step
 
 Migration note:
 

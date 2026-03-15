@@ -14,6 +14,7 @@ from archive.models import Item, ItemKind, PodcastFeedPolicy
 VIDEO_HOSTS = {"youtube.com", "www.youtube.com", "youtu.be", "vimeo.com", "www.vimeo.com"}
 YOUTUBE_PAGE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
 OVERRIDE_CLASSIFICATION_RULES = {"explicit_kind", "operator_override"}
+CURRENT_CLASSIFICATION_ENGINE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -196,6 +197,34 @@ def resolve_media_sources_for_item(item: Item) -> tuple[str | None, str | None]:
         select_audio_archive_source_url_from_candidates(candidates),
         select_video_archive_source_url_from_candidates(candidates),
     )
+
+
+def selected_media_from_evidence(evidence: dict[str, Any] | None) -> dict[str, str]:
+    if not isinstance(evidence, dict):
+        return {"audio": "", "video": ""}
+
+    raw_selected = evidence.get("selected_media")
+    if not isinstance(raw_selected, dict):
+        return {"audio": "", "video": ""}
+
+    return {
+        "audio": str(raw_selected.get("audio", "")).strip(),
+        "video": str(raw_selected.get("video", "")).strip(),
+    }
+
+
+def classification_is_stale(item: Item) -> bool:
+    return item.classification_engine_version < CURRENT_CLASSIFICATION_ENGINE_VERSION
+
+
+def normalized_classification_evidence(evidence: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(evidence, dict):
+        return {}
+    return {
+        key: value
+        for key, value in evidence.items()
+        if key != "classified_at"
+    }
 
 
 def select_audio_archive_source_url_from_candidates(
@@ -402,9 +431,7 @@ def _build_evidence(
         raw_signals = existing_evidence.get("metadata_signals")
         if isinstance(raw_signals, dict):
             metadata_signals = dict(raw_signals)
-
-    return {
-        "classified_at": timezone.now().isoformat(),
+    evidence = {
         "source_adapter": matched_adapter,
         "original_url": original_url,
         "audio_url": audio_url,
@@ -417,3 +444,26 @@ def _build_evidence(
             "video": selected_video or "",
         },
     }
+    evidence["classified_at"] = _classified_at_value(
+        evidence=evidence,
+        existing_evidence=existing_evidence,
+    )
+    return evidence
+
+
+def _classified_at_value(
+    *,
+    evidence: dict[str, Any],
+    existing_evidence: dict[str, Any] | None,
+) -> str:
+    if not isinstance(existing_evidence, dict):
+        return timezone.now().isoformat()
+
+    existing_classified_at = existing_evidence.get("classified_at")
+    if (
+        isinstance(existing_classified_at, str)
+        and normalized_classification_evidence(existing_evidence) == evidence
+    ):
+        return existing_classified_at
+
+    return timezone.now().isoformat()

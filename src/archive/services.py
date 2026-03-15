@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from archive.article_audio import can_generate_article_audio, generate_item_article_audio
 from archive.classification import (
+    CURRENT_CLASSIFICATION_ENGINE_VERSION,
     ClassificationDecision,
     MediaCandidate,
     classify_item,
@@ -655,7 +656,7 @@ def _enrich_item_metadata_fields(item: Item, timeout: int = 15) -> bool:
             }
         },
     )
-    _apply_classification_decision(item=item, decision=decision, update_fields=update_fields)
+    set_item_classification(item=item, decision=decision, update_fields=update_fields)
 
     item.enrichment_status = EnrichmentStatus.COMPLETE
     item.enrichment_error = ""
@@ -867,7 +868,7 @@ def request_item_reprocess(item: Item) -> Item:
         existing_rule=item.classification_rule,
         existing_evidence=item.classification_evidence,
     )
-    _apply_classification_decision(item=item, decision=decision, update_fields=update_fields)
+    set_item_classification(item=item, decision=decision, update_fields=update_fields)
     prepare_item_for_enrichment(item)
     update_fields.extend(
         [
@@ -994,3 +995,21 @@ def _apply_classification_decision(
     if decision.evidence != item.classification_evidence:
         item.classification_evidence = decision.evidence
         update_fields.append("classification_evidence")
+    if item.classification_engine_version != CURRENT_CLASSIFICATION_ENGINE_VERSION:
+        item.classification_engine_version = CURRENT_CLASSIFICATION_ENGINE_VERSION
+        update_fields.append("classification_engine_version")
+
+
+def set_item_classification(
+    *,
+    item: Item,
+    decision: ClassificationDecision,
+    update_fields: list[str] | None = None,
+) -> list[str]:
+    pending_fields = update_fields if update_fields is not None else []
+    _apply_classification_decision(
+        item=item,
+        decision=decision,
+        update_fields=pending_fields,
+    )
+    return pending_fields

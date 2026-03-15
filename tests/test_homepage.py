@@ -7,6 +7,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from archive.article_audio import DownloadedArticleAudio
+from archive.classification import CURRENT_CLASSIFICATION_ENGINE_VERSION
 from archive.forms import ItemForm
 from archive.models import EnrichmentStatus, Item, ItemKind, PodcastFeedPolicy
 from archive.services import infer_kind
@@ -459,6 +460,34 @@ def test_admin_reprocess_action_resets_item_for_worker(client, editor_user) -> N
     assert item.enrichment_status == EnrichmentStatus.PENDING
     assert item.media_archive_status == EnrichmentStatus.PENDING
     assert item.media_archive_error == ""
+
+
+@pytest.mark.django_db
+def test_admin_change_view_shows_classification_diagnostics(client, editor_user) -> None:
+    client.force_login(editor_user)
+    item = Item.objects.create(
+        original_url="https://example.com/episode",
+        title="Diagnostic item",
+        short_summary="Summary",
+        kind=ItemKind.PODCAST_EPISODE,
+        classification_rule="audio_url_signal",
+        classification_engine_version=CURRENT_CLASSIFICATION_ENGINE_VERSION - 1,
+        classification_evidence={
+            "selected_media": {
+                "audio": "https://cdn.example.com/audio.mp3",
+                "video": "",
+            }
+        },
+    )
+
+    response = client.get(reverse("admin:archive_item_change", args=[item.pk]))
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert "Classification engine" in content
+    assert "stored v1, current v2" in content
+    assert "audio=https://cdn.example.com/audio.mp3; video=none" in content
+    assert "Podcast feed diagnostic" in content
 
 
 @pytest.mark.parametrize(

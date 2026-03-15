@@ -31,7 +31,12 @@ from archive.classification import classify_item, podcast_feed_decision_for_item
 from archive.forms import ItemForm
 from archive.media_archival import MediaArchivalError, open_archived_audio
 from archive.models import Item
-from archive.services import prepare_item_for_enrichment, to_week_page, week_bounds
+from archive.services import (
+    prepare_item_for_enrichment,
+    set_item_classification,
+    to_week_page,
+    week_bounds,
+)
 
 url_validator = URLValidator()
 FEED_PAGE_SIZE = 50
@@ -298,9 +303,7 @@ class ItemCreateView(CreateView):
             audio_url=item.audio_url,
             media_url=item.media_url,
         )
-        item.kind = decision.kind
-        item.classification_rule = decision.rule
-        item.classification_evidence = decision.evidence
+        set_item_classification(item=item, decision=decision)
         prepare_item_for_enrichment(item)
         item.save()
         return redirect(item.get_absolute_url())
@@ -365,9 +368,7 @@ def api_create_item(request: HttpRequest) -> JsonResponse:
         audio_url=audio_url,
         media_url=media_url,
     )
-    item.kind = decision.kind
-    item.classification_rule = decision.rule
-    item.classification_evidence = decision.evidence
+    set_item_classification(item=item, decision=decision)
     prepare_item_for_enrichment(item)
     item.save()
     return JsonResponse(

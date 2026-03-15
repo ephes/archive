@@ -1,5 +1,6 @@
 from django.forms import ModelForm, Textarea
 
+from archive.classification import CURRENT_CLASSIFICATION_ENGINE_VERSION
 from archive.media_archival import can_archive_audio
 from archive.models import EnrichmentStatus, Item, ItemKind
 
@@ -46,6 +47,7 @@ class ItemForm(ModelForm):
             item.transcript_error = ""
         if "kind" in self.changed_data:
             item.classification_rule = "operator_override"
+            item.classification_engine_version = CURRENT_CLASSIFICATION_ENGINE_VERSION
             item.classification_evidence = {
                 **item.classification_evidence,
                 "operator_override": {

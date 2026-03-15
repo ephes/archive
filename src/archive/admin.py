@@ -2,7 +2,12 @@ import json
 
 from django.contrib import admin
 
-from archive.classification import podcast_feed_decision_for_item
+from archive.classification import (
+    CURRENT_CLASSIFICATION_ENGINE_VERSION,
+    classification_is_stale,
+    podcast_feed_decision_for_item,
+    selected_media_from_evidence,
+)
 from archive.forms import ItemForm
 from archive.models import Item
 from archive.services import request_item_reprocess
@@ -16,6 +21,7 @@ class ItemAdmin(admin.ModelAdmin):
         "display_title",
         "kind",
         "classification_rule",
+        "classification_engine_status",
         "podcast_feed_policy",
         "podcast_feed_status",
         "is_public",
@@ -29,6 +35,8 @@ class ItemAdmin(admin.ModelAdmin):
     )
     list_filter = (
         "kind",
+        "classification_rule",
+        "podcast_feed_policy",
         "is_public",
         "enrichment_status",
         "summary_status",
@@ -50,7 +58,9 @@ class ItemAdmin(admin.ModelAdmin):
     readonly_fields = (
         "shared_at",
         "published_at",
+        "classification_engine_status",
         "classification_rule",
+        "selected_media_diagnostic",
         "classification_evidence_pretty",
         "podcast_feed_diagnostic",
         "enrichment_error",
@@ -68,6 +78,22 @@ class ItemAdmin(admin.ModelAdmin):
     def podcast_feed_status(self, obj: Item) -> str:
         decision = podcast_feed_decision_for_item(obj)
         return "eligible" if decision.eligible else decision.reason
+
+    @admin.display(description="Classification engine")
+    def classification_engine_status(self, obj: Item) -> str:
+        freshness = "stale" if classification_is_stale(obj) else "current"
+        return (
+            f"{freshness} "
+            f"(stored v{obj.classification_engine_version}, "
+            f"current v{CURRENT_CLASSIFICATION_ENGINE_VERSION})"
+        )
+
+    @admin.display(description="Selected media")
+    def selected_media_diagnostic(self, obj: Item) -> str:
+        selected_media = selected_media_from_evidence(obj.classification_evidence)
+        audio = selected_media["audio"] or "none"
+        video = selected_media["video"] or "none"
+        return f"audio={audio}; video={video}"
 
     @admin.display(description="Classification evidence")
     def classification_evidence_pretty(self, obj: Item) -> str:

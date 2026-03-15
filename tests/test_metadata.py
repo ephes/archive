@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import importlib
 from datetime import UTC, datetime, timedelta
+from io import StringIO
 from types import SimpleNamespace
 
 import pytest
 from django.core.files.base import ContentFile
 from django.core.files.storage import storages
+from django.core.management import call_command
 from django.urls import reverse
 from django.utils import timezone
 
 from archive.article_audio import ArticleAudioJobUpdate
+from archive.classification import CURRENT_CLASSIFICATION_ENGINE_VERSION, classify_item
 from archive.media_archival import ArchivedAudio
 from archive.metadata import MetadataExtractionError, extract_metadata_from_html
 from archive.models import EnrichmentStatus, Item, ItemKind
@@ -385,6 +388,186 @@ def test_request_item_reprocess_preserves_operator_override_and_resets_media_arc
     assert item.media_archive_status == EnrichmentStatus.PENDING
     assert item.media_archive_error == ""
     assert item.media_archive_retry_count == 0
+
+
+@pytest.mark.django_db
+def test_reclassify_items_dry_run_reports_changed_and_unchanged_items() -> None:
+    changed_item = Item.objects.create(
+        original_url="https://castro.fm/episode/ubOf93",
+        kind=ItemKind.LINK,
+        classification_rule="default_link",
+        classification_engine_version=1,
+        classification_evidence={},
+    )
+    unchanged_decision = classify_item(original_url="https://example.com/article")
+    unchanged_item = Item.objects.create(
+        original_url="https://example.com/article",
+        kind=unchanged_decision.kind,
+        classification_rule=unchanged_decision.rule,
+        classification_engine_version=CURRENT_CLASSIFICATION_ENGINE_VERSION,
+        classification_evidence=unchanged_decision.evidence,
+    )
+
+    stdout = StringIO()
+    call_command(
+        "reclassify_items",
+        "--item-id",
+        str(changed_item.pk),
+        "--item-id",
+        str(unchanged_item.pk),
+        stdout=stdout,
+    )
+
+    output = stdout.getvalue()
+    changed_item.refresh_from_db()
+    unchanged_item.refresh_from_db()
+
+    assert "Dry-run mode: no items will be updated" in output
+    assert f"WOULD UPDATE item {changed_item.pk}" in output
+    assert "kind: link -> podcast_episode" in output
+    assert "rule: default_link -> adapter_castro_episode" in output
+    assert "engine_version: 1 -> 2" in output
+    assert f"UNCHANGED item {unchanged_item.pk}" in output
+    assert changed_item.kind == ItemKind.LINK
+    assert changed_item.classification_engine_version == 1
+
+
+@pytest.mark.django_db
+def test_reclassify_items_host_filter_limits_replay_scope() -> None:
+    matched_item = Item.objects.create(
+        original_url="https://castro.fm/episode/ubOf93",
+        kind=ItemKind.LINK,
+        classification_rule="default_link",
+        classification_engine_version=1,
+        classification_evidence={},
+    )
+    other_item = Item.objects.create(
+        original_url="https://example.com/story",
+        audio_url="https://cdn.example.com/story.mp3",
+        kind=ItemKind.LINK,
+        classification_rule="default_link",
+        classification_engine_version=1,
+        classification_evidence={},
+    )
+
+    stdout = StringIO()
+    call_command(
+        "reclassify_items",
+        "--host",
+        "castro.fm",
+        "--limit",
+        "1",
+        stdout=stdout,
+    )
+
+    output = stdout.getvalue()
+
+    assert f"WOULD UPDATE item {matched_item.pk}" in output
+    assert f"item {other_item.pk}: {other_item.original_url}" not in output
+    assert "Summary: inspected=1 changed=1 unchanged=0 mode=dry-run" in output
+
+
+@pytest.mark.django_db
+def test_reclassify_items_apply_updates_classification_without_requeueing_downstream_work() -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/story",
+        audio_url="https://cdn.example.com/story.mp3",
+        kind=ItemKind.LINK,
+        classification_rule="default_link",
+        classification_engine_version=1,
+        classification_evidence={},
+        media_archive_status=EnrichmentStatus.FAILED,
+        media_archive_error="download failed",
+    )
+
+    stdout = StringIO()
+    call_command(
+        "reclassify_items",
+        "--item-id",
+        str(item.pk),
+        "--apply",
+        stdout=stdout,
+    )
+
+    output = stdout.getvalue()
+    item.refresh_from_db()
+
+    assert "Apply mode: updating classification fields only." in output
+    assert f"UPDATED item {item.pk}" in output
+    assert item.kind == ItemKind.PODCAST_EPISODE
+    assert item.classification_rule == "audio_url_signal"
+    assert item.classification_engine_version == CURRENT_CLASSIFICATION_ENGINE_VERSION
+    assert item.classification_evidence["selected_media"]["audio"] == (
+        "https://cdn.example.com/story.mp3"
+    )
+    assert item.media_archive_status == EnrichmentStatus.FAILED
+    assert item.media_archive_error == "download failed"
+
+
+@pytest.mark.django_db
+def test_reclassify_items_preserves_operator_override_in_apply_mode() -> None:
+    item = Item.objects.create(
+        original_url="https://castro.fm/episode/ubOf93",
+        kind=ItemKind.ARTICLE,
+        classification_rule="operator_override",
+        classification_engine_version=1,
+        classification_evidence={"operator_override": {"kind": ItemKind.ARTICLE}},
+        article_audio_status=EnrichmentStatus.COMPLETE,
+    )
+
+    call_command(
+        "reclassify_items",
+        "--item-id",
+        str(item.pk),
+        "--apply",
+        stdout=StringIO(),
+    )
+
+    item.refresh_from_db()
+    assert item.kind == ItemKind.ARTICLE
+    assert item.classification_rule == "operator_override"
+    assert item.classification_engine_version == CURRENT_CLASSIFICATION_ENGINE_VERSION
+    assert item.article_audio_status == EnrichmentStatus.COMPLETE
+
+
+@pytest.mark.django_db
+def test_reclassify_items_dry_run_does_not_touch_downstream_statuses() -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/story",
+        audio_url="https://cdn.example.com/story.mp3",
+        kind=ItemKind.LINK,
+        classification_rule="default_link",
+        classification_engine_version=1,
+        classification_evidence={},
+        media_archive_status=EnrichmentStatus.FAILED,
+        media_archive_error="download failed",
+        summary_status=EnrichmentStatus.FAILED,
+        summary_error="summary failed",
+        transcript_status=EnrichmentStatus.FAILED,
+        transcript_error="transcript failed",
+        article_audio_status=EnrichmentStatus.FAILED,
+        article_audio_error="article audio failed",
+    )
+
+    call_command(
+        "reclassify_items",
+        "--item-id",
+        str(item.pk),
+        stdout=StringIO(),
+    )
+
+    item.refresh_from_db()
+    assert item.kind == ItemKind.LINK
+    assert item.classification_rule == "default_link"
+    assert item.classification_engine_version == 1
+    assert item.media_archive_status == EnrichmentStatus.FAILED
+    assert item.media_archive_error == "download failed"
+    assert item.summary_status == EnrichmentStatus.FAILED
+    assert item.summary_error == "summary failed"
+    assert item.transcript_status == EnrichmentStatus.FAILED
+    assert item.transcript_error == "transcript failed"
+    assert item.article_audio_status == EnrichmentStatus.FAILED
+    assert item.article_audio_error == "article audio failed"
 
 
 @pytest.mark.django_db

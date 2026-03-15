@@ -32,6 +32,7 @@ class Item(models.Model):
         choices=ItemKind.choices,
         default=ItemKind.LINK,
     )
+    classification_engine_version = models.PositiveSmallIntegerField(default=1)
     classification_rule = models.CharField(max_length=64, blank=True)
     classification_evidence = models.JSONField(default=dict, blank=True)
     podcast_feed_policy = models.CharField(

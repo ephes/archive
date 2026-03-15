@@ -18,6 +18,8 @@ class ItemForm(ModelForm):
             "kind",
             "source",
             "audio_url",
+            "media_url",
+            "podcast_feed_policy",
             "is_public",
         )
         widgets = {
@@ -42,6 +44,14 @@ class ItemForm(ModelForm):
             item.transcript_generated = False
             item.transcript_status = EnrichmentStatus.COMPLETE
             item.transcript_error = ""
+        if "kind" in self.changed_data:
+            item.classification_rule = "operator_override"
+            item.classification_evidence = {
+                **item.classification_evidence,
+                "operator_override": {
+                    "kind": item.kind,
+                },
+            }
         if is_new or "kind" in self.changed_data or "audio_url" in self.changed_data:
             _normalize_media_archive_status(item)
             _normalize_article_audio_status(item)

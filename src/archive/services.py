@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from urllib.parse import urlparse
 
 from django.conf import settings
 from django.db import transaction
@@ -11,14 +10,21 @@ from django.db.models import Case, F, Q, Value, When
 from django.utils import timezone
 
 from archive.article_audio import can_generate_article_audio, generate_item_article_audio
+from archive.classification import (
+    ClassificationDecision,
+    MediaCandidate,
+    classify_item,
+)
+from archive.classification import (
+    infer_kind as classify_infer_kind,
+)
 from archive.media_archival import archive_item_audio, can_archive_audio
-from archive.metadata import AUDIO_SUFFIXES, extract_metadata_from_url
+from archive.metadata import extract_metadata_from_url
 from archive.models import EnrichmentStatus, Item, ItemKind
 from archive.summaries import generate_item_summaries
 from archive.transcriptions import can_transcribe_item, generate_item_transcript
 
 logger = logging.getLogger(__name__)
-VIDEO_HOSTS = {"youtube.com", "www.youtube.com", "youtu.be", "vimeo.com", "www.vimeo.com"}
 SUMMARY_RETRY_DELAYS = (
     timedelta(minutes=5),
     timedelta(minutes=30),
@@ -29,20 +35,7 @@ TRANSCRIBABLE_ITEM_KINDS = (ItemKind.PODCAST_EPISODE, ItemKind.VIDEO)
 
 
 def infer_kind(url: str, explicit_kind: str = "", audio_url: str = "") -> str:
-    if explicit_kind in ItemKind.values:
-        return explicit_kind
-    if audio_url:
-        return "podcast_episode"
-
-    parsed = urlparse(url)
-    host = parsed.netloc.lower()
-    path = parsed.path.lower()
-
-    if host in VIDEO_HOSTS:
-        return "video"
-    if path.endswith(AUDIO_SUFFIXES):
-        return "podcast_episode"
-    return "link"
+    return classify_infer_kind(url=url, explicit_kind=explicit_kind, audio_url=audio_url)
 
 
 @dataclass(frozen=True)
@@ -632,10 +625,37 @@ def _enrich_item_metadata_fields(item: Item, timeout: int = 15) -> bool:
         item.audio_url = metadata.audio_url
         update_fields.append("audio_url")
 
-    inferred_kind = _infer_kind_from_metadata(item, metadata.kind_hint)
-    if inferred_kind != item.kind:
-        item.kind = inferred_kind
-        update_fields.append("kind")
+    decision = classify_item(
+        original_url=item.original_url,
+        current_kind=item.kind,
+        audio_url=item.audio_url,
+        media_url=item.media_url,
+        kind_hint=metadata.kind_hint,
+        metadata_candidates=tuple(
+            MediaCandidate(
+                url=candidate.url,
+                candidate_type=candidate.candidate_type,
+                detection_source=candidate.detection_source,
+            )
+            for candidate in metadata.media_candidates
+        ),
+        existing_rule=item.classification_rule,
+        existing_evidence={
+            **item.classification_evidence,
+            "metadata_signals": {
+                "html_media_candidates": [
+                    {
+                        "url": candidate.url,
+                        "candidate_type": candidate.candidate_type,
+                        "detection_source": candidate.detection_source,
+                    }
+                    for candidate in metadata.media_candidates
+                ],
+                "kind_hint": metadata.kind_hint,
+            }
+        },
+    )
+    _apply_classification_decision(item=item, decision=decision, update_fields=update_fields)
 
     item.enrichment_status = EnrichmentStatus.COMPLETE
     item.enrichment_error = ""
@@ -837,6 +857,47 @@ def _next_article_audio_poll_at() -> datetime:
     return timezone.now() + timedelta(seconds=settings.ARCHIVE_ARTICLE_AUDIO_POLL_SECONDS)
 
 
+def request_item_reprocess(item: Item) -> Item:
+    update_fields: list[str] = []
+    decision = classify_item(
+        original_url=item.original_url,
+        current_kind=item.kind,
+        audio_url=item.audio_url,
+        media_url=item.media_url,
+        existing_rule=item.classification_rule,
+        existing_evidence=item.classification_evidence,
+    )
+    _apply_classification_decision(item=item, decision=decision, update_fields=update_fields)
+    prepare_item_for_enrichment(item)
+    update_fields.extend(
+        [
+            "enrichment_status",
+            "enrichment_error",
+            "summary_status",
+            "summary_error",
+            "summary_retry_count",
+            "summary_retry_at",
+            "transcript_status",
+            "transcript_error",
+            "transcript_generated",
+            "media_archive_status",
+            "media_archive_error",
+            "media_archive_retry_count",
+            "media_archive_retry_at",
+            "article_audio_status",
+            "article_audio_error",
+            "article_audio_generated",
+            "article_audio_poll_at",
+        ]
+    )
+    # Reprocess should always force a fresh metadata pass, even when the current
+    # row already looks enrichment-complete.
+    item.enrichment_status = EnrichmentStatus.PENDING
+    item.enrichment_error = ""
+    item.save(update_fields=sorted(set(update_fields)))
+    return item
+
+
 def _refresh_article_audio_state(item: Item, update_fields: list[str]) -> None:
     if item.has_generated_article_audio:
         if item.article_audio_status != EnrichmentStatus.COMPLETE:
@@ -918,23 +979,18 @@ def _refresh_media_archive_state(item: Item, update_fields: list[str]) -> None:
         update_fields.append("media_archive_retry_at")
 
 
-def _infer_kind_from_metadata(item: Item, kind_hint: str) -> str:
-    known_item_kinds = {
-        ItemKind.PODCAST_EPISODE,
-        ItemKind.VIDEO,
-        ItemKind.ARTICLE,
-        ItemKind.SOCIAL_POST,
-        ItemKind.LINK,
-    }
-
-    if item.kind != ItemKind.LINK:
-        return item.kind
-    if item.audio_url:
-        return str(ItemKind.PODCAST_EPISODE)
-    if kind_hint in {str(choice) for choice in known_item_kinds}:
-        return kind_hint
-    if item.media_url and item.media_url != item.original_url:
-        media_kind = infer_kind(url=item.media_url, explicit_kind="", audio_url=item.audio_url)
-        if media_kind != ItemKind.LINK:
-            return media_kind
-    return infer_kind(url=item.original_url, explicit_kind="", audio_url=item.audio_url)
+def _apply_classification_decision(
+    *,
+    item: Item,
+    decision: ClassificationDecision,
+    update_fields: list[str],
+) -> None:
+    if decision.kind != item.kind:
+        item.kind = decision.kind
+        update_fields.append("kind")
+    if decision.rule != item.classification_rule:
+        item.classification_rule = decision.rule
+        update_fields.append("classification_rule")
+    if decision.evidence != item.classification_evidence:
+        item.classification_evidence = decision.evidence
+        update_fields.append("classification_evidence")

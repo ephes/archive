@@ -5,7 +5,7 @@ import pytest
 from django.urls import reverse
 from django.utils import timezone
 
-from archive.models import Item
+from archive.models import Item, ItemKind, PodcastFeedPolicy
 
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
@@ -258,6 +258,143 @@ def test_podcast_feed_includes_only_items_with_local_archived_audio_and_summary(
         "type": "audio/mpeg",
     }
     assert items[1].findtext("description") == "Podcast summary"
+
+
+@pytest.mark.django_db
+def test_podcast_feed_includes_substantial_generated_article_audio(client) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/essay",
+        title="Long-form essay",
+        short_summary="A strong summary for podcast readers.",
+        long_summary=(
+            "This essay argues for a careful migration strategy with concrete tradeoffs. "
+            "It explains the background, the operational constraints, and the practical "
+            "steps in a connected narrative. The structure is coherent, the topic stays "
+            "focused, and the listener gets enough substance to justify a feed slot."
+        ),
+        kind=ItemKind.ARTICLE,
+        article_audio_status="complete",
+        article_audio_generated=True,
+        article_audio_artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+    )
+
+    response = client.get(reverse("archive:podcast-feed"))
+
+    assert response.status_code == 200
+    channel = parse_channel(response.content)
+    items = channel.findall("item")
+    assert [entry.findtext("title") for entry in items] == ["Long-form essay"]
+    enclosure = items[0].find("enclosure")
+    assert enclosure is not None
+    assert enclosure.attrib == {
+        "url": f"http://testserver{reverse('archive:item-article-audio', kwargs={'pk': item.pk})}",
+        "length": "0",
+        "type": "audio/mpeg",
+    }
+
+
+@pytest.mark.django_db
+def test_podcast_feed_prefers_archived_audio_over_generated_article_audio(client) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/article-with-source-audio",
+        title="Article with source audio",
+        short_summary="Podcast summary",
+        long_summary=(
+            "This article has enough substance for generated audio, but source-derived "
+            "audio should still win when both artifacts exist."
+        ),
+        kind=ItemKind.ARTICLE,
+        archived_audio_path="items/1/audio/source.mp3",
+        archived_audio_content_type="audio/mpeg",
+        archived_audio_size_bytes=8192,
+        article_audio_status="complete",
+        article_audio_generated=True,
+        article_audio_artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+    )
+
+    response = client.get(reverse("archive:podcast-feed"))
+
+    assert response.status_code == 200
+    channel = parse_channel(response.content)
+    enclosure = channel.find("item/enclosure")
+    assert enclosure is not None
+    assert enclosure.attrib["url"] == (
+        f"http://testserver{reverse('archive:item-archived-audio', kwargs={'pk': item.pk})}"
+    )
+
+
+@pytest.mark.django_db
+def test_podcast_feed_excludes_short_or_mixed_topic_generated_article_audio_by_default(
+    client,
+) -> None:
+    Item.objects.create(
+        original_url="https://example.com/brief",
+        title="Brief note",
+        short_summary="A brief summary.",
+        long_summary="Short and not substantial enough.",
+        kind=ItemKind.ARTICLE,
+        article_audio_status="complete",
+        article_audio_generated=True,
+        article_audio_artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+    )
+    Item.objects.create(
+        original_url="https://example.com/link-dump",
+        title="Weekend links",
+        short_summary="A roundup worth skimming but not worth a feed slot.",
+        long_summary=(
+            "- https://example.com/one\n"
+            "- https://example.com/two\n"
+            "- https://example.com/three\n"
+            "Many unrelated topics appear next to each other without a coherent narrative."
+        ),
+        kind=ItemKind.ARTICLE,
+        article_audio_status="complete",
+        article_audio_generated=True,
+        article_audio_artifact_path="/v1/jobs/job-456/artifacts/speech.mp3",
+    )
+
+    response = client.get(reverse("archive:podcast-feed"))
+
+    assert response.status_code == 200
+    channel = parse_channel(response.content)
+    assert channel.findall("item") == []
+
+
+@pytest.mark.django_db
+def test_podcast_feed_policy_overrides_auto_behavior(client) -> None:
+    Item.objects.create(
+        original_url="https://example.com/excluded",
+        title="Excluded source audio",
+        short_summary="Would normally be eligible.",
+        kind=ItemKind.PODCAST_EPISODE,
+        podcast_feed_policy=PodcastFeedPolicy.EXCLUDE,
+        archived_audio_path="items/1/audio/source.mp3",
+        archived_audio_content_type="audio/mpeg",
+        archived_audio_size_bytes=4096,
+    )
+    included_item = Item.objects.create(
+        original_url="https://example.com/included-article",
+        title="Included article audio",
+        short_summary="Operator forced this into the feed.",
+        long_summary="Short body.",
+        kind=ItemKind.ARTICLE,
+        podcast_feed_policy=PodcastFeedPolicy.INCLUDE,
+        article_audio_status="complete",
+        article_audio_generated=True,
+        article_audio_artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+    )
+
+    response = client.get(reverse("archive:podcast-feed"))
+
+    assert response.status_code == 200
+    channel = parse_channel(response.content)
+    items = channel.findall("item")
+    assert [entry.findtext("title") for entry in items] == ["Included article audio"]
+    enclosure = items[0].find("enclosure")
+    assert enclosure is not None
+    assert enclosure.attrib["url"] == (
+        f"http://testserver{reverse('archive:item-article-audio', kwargs={'pk': included_item.pk})}"
+    )
 
 
 @pytest.mark.django_db

@@ -24,6 +24,7 @@ from archive.services import (
     enrich_pending_items,
     prepare_item_for_enrichment,
     recover_processing_items,
+    request_item_reprocess,
 )
 from archive.summaries import GeneratedSummary
 
@@ -88,6 +89,108 @@ def test_extract_metadata_from_html_prefers_structured_fields() -> None:
         56,
         tzinfo=UTC,
     )
+
+
+@pytest.mark.django_db
+def test_extract_metadata_from_html_detects_audio_source_elements() -> None:
+    metadata = extract_metadata_from_html(
+        html="""
+        <html>
+          <body>
+            <audio controls>
+              <source src="/media/audio.mp3" type="audio/mpeg">
+            </audio>
+          </body>
+        </html>
+        """,
+        base_url="https://example.com/articles/demo",
+    )
+
+    assert metadata.audio_url == "https://example.com/media/audio.mp3"
+    assert metadata.media_candidates == (
+        metadata.media_candidates[0],
+    )
+    assert metadata.media_candidates[0].url == "https://example.com/media/audio.mp3"
+    assert metadata.media_candidates[0].candidate_type == "audio"
+    assert metadata.media_candidates[0].detection_source == "html_audio"
+
+
+@pytest.mark.django_db
+def test_extract_metadata_from_html_detects_video_source_elements() -> None:
+    metadata = extract_metadata_from_html(
+        html="""
+        <html>
+          <body>
+            <video controls>
+              <source src="https://cdn.example.com/talk.mp4" type="video/mp4">
+            </video>
+          </body>
+        </html>
+        """,
+        base_url="https://example.com/talks/demo",
+    )
+
+    assert metadata.media_url == "https://cdn.example.com/talk.mp4"
+    assert metadata.media_candidates[0].url == "https://cdn.example.com/talk.mp4"
+    assert metadata.media_candidates[0].candidate_type == "video"
+    assert metadata.media_candidates[0].detection_source == "html_video"
+
+
+@pytest.mark.django_db
+def test_enrich_item_metadata_classifies_castro_episode_and_archives_html_audio(
+    monkeypatch,
+) -> None:
+    stub_archive_audio(monkeypatch)
+    item = Item.objects.create(
+        original_url="https://castro.fm/episode/ubOf93",
+        kind=ItemKind.LINK,
+    )
+
+    def fake_extract(url: str, timeout: int):
+        assert url == item.original_url
+        return extract_metadata_from_html(
+            html="""
+            <html>
+              <head>
+                <meta property="og:title" content="Castro Episode">
+                <meta property="og:description" content="Episode description">
+              </head>
+              <body>
+                <audio preload="true">
+                  <source
+                    src="https://cdn.example.com/castro-episode.mp3"
+                    type="audio/mpeg">
+                </audio>
+              </body>
+            </html>
+            """,
+            base_url=url,
+        )
+
+    monkeypatch.setattr("archive.services.extract_metadata_from_url", fake_extract)
+    monkeypatch.setattr(
+        "archive.services.generate_item_summaries",
+        lambda item, timeout: GeneratedSummary(
+            short_summary="Short generated summary",
+            long_summary="Long generated summary with enough detail to be useful later.",
+            tags=("podcast", "castro", "episode"),
+        ),
+    )
+    monkeypatch.setattr(
+        "archive.services.generate_item_transcript",
+        lambda item, timeout: "Transcript from Castro audio.",
+    )
+
+    assert enrich_item_metadata(item) is True
+
+    item.refresh_from_db()
+    assert item.kind == ItemKind.PODCAST_EPISODE
+    assert item.audio_url == "https://cdn.example.com/castro-episode.mp3"
+    assert item.classification_rule == "adapter_castro_episode"
+    assert item.classification_evidence["selected_media"]["audio"] == (
+        "https://cdn.example.com/castro-episode.mp3"
+    )
+    assert item.archived_audio_path == f"items/{item.pk}/audio/source.mp3"
 
 
 @pytest.mark.django_db
@@ -253,6 +356,35 @@ def test_enrich_item_metadata_marks_failures(monkeypatch) -> None:
     item.refresh_from_db()
     assert item.enrichment_status == EnrichmentStatus.FAILED
     assert item.enrichment_error == "boom"
+
+
+@pytest.mark.django_db
+def test_request_item_reprocess_preserves_operator_override_and_resets_media_archive() -> None:
+    item = Item.objects.create(
+        original_url="https://castro.fm/episode/ubOf93",
+        kind=ItemKind.ARTICLE,
+        classification_rule="operator_override",
+        classification_evidence={"operator_override": {"kind": ItemKind.ARTICLE}},
+        audio_url="https://cdn.example.com/source.mp3",
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        media_archive_status=EnrichmentStatus.FAILED,
+        media_archive_error="download failed",
+        media_archive_retry_count=2,
+        summary_status=EnrichmentStatus.COMPLETE,
+        short_summary="Summary",
+        long_summary="Longer summary.",
+    )
+
+    request_item_reprocess(item)
+
+    item.refresh_from_db()
+    assert item.kind == ItemKind.ARTICLE
+    assert item.classification_rule == "operator_override"
+    assert item.enrichment_status == EnrichmentStatus.PENDING
+    assert item.enrichment_error == ""
+    assert item.media_archive_status == EnrichmentStatus.PENDING
+    assert item.media_archive_error == ""
+    assert item.media_archive_retry_count == 0
 
 
 @pytest.mark.django_db

@@ -13,6 +13,12 @@ class ItemKind(models.TextChoices):
     LINK = "link", "Link"
 
 
+class PodcastFeedPolicy(models.TextChoices):
+    AUTO = "auto", "Automatic"
+    INCLUDE = "include", "Include"
+    EXCLUDE = "exclude", "Exclude"
+
+
 class EnrichmentStatus(models.TextChoices):
     PENDING = "pending", "Pending"
     PROCESSING = "processing", "Processing"
@@ -25,6 +31,13 @@ class Item(models.Model):
         max_length=32,
         choices=ItemKind.choices,
         default=ItemKind.LINK,
+    )
+    classification_rule = models.CharField(max_length=64, blank=True)
+    classification_evidence = models.JSONField(default=dict, blank=True)
+    podcast_feed_policy = models.CharField(
+        max_length=16,
+        choices=PodcastFeedPolicy.choices,
+        default=PodcastFeedPolicy.AUTO,
     )
     enrichment_status = models.CharField(
         max_length=16,

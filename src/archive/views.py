@@ -8,6 +8,7 @@ from django.contrib.auth.views import LoginView, LogoutView
 from django.core.exceptions import ValidationError
 from django.core.paginator import EmptyPage, Paginator
 from django.core.validators import URLValidator
+from django.db.models import Q
 from django.db.models.functions import Trim
 from django.http import (
     FileResponse,
@@ -26,10 +27,11 @@ from django.views.decorators.http import require_GET, require_http_methods
 from django.views.generic.edit import CreateView
 
 from archive.article_audio import ArticleAudioGenerationError, download_generated_article_audio
+from archive.classification import classify_item, podcast_feed_decision_for_item
 from archive.forms import ItemForm
 from archive.media_archival import MediaArchivalError, open_archived_audio
 from archive.models import Item
-from archive.services import infer_kind, prepare_item_for_enrichment, to_week_page, week_bounds
+from archive.services import prepare_item_for_enrichment, to_week_page, week_bounds
 
 url_validator = URLValidator()
 FEED_PAGE_SIZE = 50
@@ -65,18 +67,24 @@ def _public_feed_items():
 
 
 def _public_podcast_feed_items():
-    return (
+    candidates = (
         Item.objects.filter(
             is_public=True,
             published_at__isnull=False,
-            archived_audio_size_bytes__gt=0,
         )
+        .filter(Q(archived_audio_path__gt="") | Q(article_audio_artifact_path__gt=""))
         .annotate(feed_title=Trim("title"), feed_summary=Trim("short_summary"))
         .exclude(feed_title="")
         .exclude(feed_summary="")
-        .exclude(archived_audio_path="")
         .order_by("-published_at", "-id")
     )
+    # Feed policy currently depends on per-item application logic, so this first
+    # slice filters in Python after a bounded candidate query.
+    return [
+        item
+        for item in candidates
+        if podcast_feed_decision_for_item(item).eligible
+    ]
 
 
 def _render_feed(
@@ -140,9 +148,7 @@ def _render_feed(
             "kind": item.get_kind_display(),
         }
         if include_enclosures:
-            entry["enclosure_url"] = request.build_absolute_uri(item.stable_audio_enclosure_url)
-            entry["enclosure_type"] = item.stable_audio_content_type
-            entry["enclosure_length"] = item.stable_audio_size_bytes
+            entry.update(_podcast_enclosure_attributes(request, item))
         feed_items.append(entry)
 
     return render(
@@ -286,11 +292,15 @@ class ItemCreateView(CreateView):
 
     def form_valid(self, form):
         item = form.save(commit=False)
-        item.kind = infer_kind(
-            url=item.original_url,
+        decision = classify_item(
+            original_url=item.original_url,
             explicit_kind=item.kind,
             audio_url=item.audio_url,
+            media_url=item.media_url,
         )
+        item.kind = decision.kind
+        item.classification_rule = decision.rule
+        item.classification_evidence = decision.evidence
         prepare_item_for_enrichment(item)
         item.save()
         return redirect(item.get_absolute_url())
@@ -348,8 +358,16 @@ def api_create_item(request: HttpRequest) -> JsonResponse:
         source=source,
         author=author,
         original_published_at=original_published_at,
-        kind=infer_kind(url=url, explicit_kind=explicit_kind, audio_url=audio_url),
     )
+    decision = classify_item(
+        original_url=url,
+        explicit_kind=explicit_kind,
+        audio_url=audio_url,
+        media_url=media_url,
+    )
+    item.kind = decision.kind
+    item.classification_rule = decision.rule
+    item.classification_evidence = decision.evidence
     prepare_item_for_enrichment(item)
     item.save()
     return JsonResponse(
@@ -359,3 +377,20 @@ def api_create_item(request: HttpRequest) -> JsonResponse:
         },
         status=201,
     )
+
+
+def _podcast_enclosure_attributes(request: HttpRequest, item: Item) -> dict[str, str | int]:
+    decision = podcast_feed_decision_for_item(item)
+    if decision.enclosure_source == "generated_article_audio":
+        return {
+            "enclosure_url": request.build_absolute_uri(
+                reverse("archive:item-article-audio", kwargs={"pk": item.pk})
+            ),
+            "enclosure_type": "audio/mpeg",
+            "enclosure_length": 0,
+        }
+    return {
+        "enclosure_url": request.build_absolute_uri(item.stable_audio_enclosure_url),
+        "enclosure_type": item.stable_audio_content_type,
+        "enclosure_length": item.stable_audio_size_bytes,
+    }

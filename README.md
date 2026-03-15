@@ -207,6 +207,52 @@ Operator note:
 - the worker's `--media-archive-timeout` still guards network stalls and other blocking work, but it is
   not a strict wall-clock cap on a steady `yt-dlp` download; `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` remains the
   hard size limit for accepted source media
+- Django admin now exposes the winning classification rule, stored classification evidence, an operator-set
+  podcast feed policy (`auto`, `include`, `exclude`), and a `Reprocess selected items` action that re-queues
+  per-item enrichment without any bulk historical replay by default
+
+## Classification And Feed Policy
+
+Archive now uses a small shared deterministic classification and media-resolution module inside the existing
+ingest and enrichment lifecycle.
+
+Current first-slice behavior:
+
+- source-specific adapters run first for strong URL semantics
+- `https://castro.fm/episode/...` classifies as `podcast_episode`
+- supported YouTube page URLs classify as `video`
+- generic metadata extraction still parses OG, Twitter, JSON-LD, and HTML title fields
+- generic page-media extraction now also parses HTML `<audio>` / `<source>` and `<video>` / `<source>`
+- the winning semantic classification is still stored in `Item.kind`
+- Archive also stores `classification_rule` and `classification_evidence` for admin/debugging
+
+Media-resolution policy in this slice:
+
+- direct audio candidates are preferred for archival when available
+- otherwise supported video candidates are used and Archive extracts a stable local MP3 enclosure
+- Castro episode pages rely on generic HTML audio discovery unless a future Castro-specific extractor becomes
+  necessary
+
+Podcast feed policy is separate from `kind`.
+
+Current automatic policy:
+
+- source-derived archived audio is podcast-feed eligible when the item is public, published, titled, and has
+  a non-blank short summary
+- generated article audio may also be podcast-feed eligible, but only for article items whose summary content
+  looks substantial and coherent rather than like a short note or mixed-topic link dump
+- if both source-derived archived audio and generated article audio exist, the source-derived archived audio
+  wins for the feed enclosure
+
+Operator workflow in Django admin:
+
+- inspect `kind`, `classification_rule`, and `classification_evidence`
+- override podcast feed policy with `auto`, `include`, or `exclude`
+- manually override `kind` when automatic classification is wrong
+- use `Reprocess selected items` to re-queue one or more items for a fresh enrichment pass
+
+The reprocess action is intentionally per-item or small-batch in this slice. It does not trigger any implicit
+bulk historical replay.
 
 Migration note:
 

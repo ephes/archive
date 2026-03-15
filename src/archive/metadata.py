@@ -34,6 +34,14 @@ class ExtractedMetadata:
     media_url: str = ""
     audio_url: str = ""
     kind_hint: str = ""
+    media_candidates: tuple[ExtractedMediaCandidate, ...] = ()
+
+
+@dataclass(frozen=True)
+class ExtractedMediaCandidate:
+    url: str
+    candidate_type: str
+    detection_source: str
 
 
 class _MetadataHTMLParser(HTMLParser):
@@ -42,9 +50,11 @@ class _MetadataHTMLParser(HTMLParser):
         self.title_parts: list[str] = []
         self.meta: dict[str, str] = {}
         self.jsonld_blobs: list[str] = []
+        self.media_candidates: list[ExtractedMediaCandidate] = []
         self._in_title = False
         self._in_jsonld = False
         self._jsonld_parts: list[str] = []
+        self._media_context_stack: list[str] = []
 
     def handle_starttag(self, tag: str, attrs) -> None:
         tag = tag.lower()
@@ -67,6 +77,28 @@ class _MetadataHTMLParser(HTMLParser):
                     self.meta[key] = content
             return
 
+        if tag in {"audio", "video"}:
+            self._media_context_stack.append(tag)
+            src = (attr_map.get("src") or "").strip()
+            if src:
+                self._add_media_candidate(
+                    url=src,
+                    candidate_type="audio" if tag == "audio" else "video",
+                    detection_source=f"html_{tag}",
+                )
+            return
+
+        if tag == "source":
+            parent_tag = self._media_context_stack[-1] if self._media_context_stack else ""
+            src = (attr_map.get("src") or "").strip()
+            if src and parent_tag in {"audio", "video"}:
+                self._add_media_candidate(
+                    url=src,
+                    candidate_type="audio" if parent_tag == "audio" else "video",
+                    detection_source=f"html_{parent_tag}",
+                )
+            return
+
         if tag == "script":
             script_type = (attr_map.get("type") or "").strip().lower()
             if "ld+json" in script_type:
@@ -77,6 +109,12 @@ class _MetadataHTMLParser(HTMLParser):
         tag = tag.lower()
         if tag == "title":
             self._in_title = False
+            return
+        if tag in {"audio", "video"} and self._media_context_stack:
+            for index in range(len(self._media_context_stack) - 1, -1, -1):
+                if self._media_context_stack[index] == tag:
+                    del self._media_context_stack[index]
+                    break
             return
         if tag == "script" and self._in_jsonld:
             blob = "".join(self._jsonld_parts).strip()
@@ -90,6 +128,15 @@ class _MetadataHTMLParser(HTMLParser):
             self.title_parts.append(data)
         if self._in_jsonld:
             self._jsonld_parts.append(data)
+
+    def _add_media_candidate(self, *, url: str, candidate_type: str, detection_source: str) -> None:
+        candidate = ExtractedMediaCandidate(
+            url=url,
+            candidate_type=candidate_type,
+            detection_source=detection_source,
+        )
+        if candidate not in self.media_candidates:
+            self.media_candidates.append(candidate)
 
 
 def extract_metadata_from_url(url: str, timeout: int = 15) -> ExtractedMetadata:
@@ -161,16 +208,46 @@ def extract_metadata_from_html(html: str, base_url: str) -> ExtractedMetadata:
             meta.get("og:video"),
             meta.get("og:video:url"),
             jsonld_metadata.media_url,
+            next(
+                (
+                    candidate.url
+                    for candidate in parser.media_candidates
+                    if candidate.candidate_type == "video"
+                ),
+                "",
+            ),
         ),
         base_url=base_url,
     )
-    audio_url = jsonld_metadata.audio_url
+    audio_url = _normalize_url(
+        _first_nonempty(
+            jsonld_metadata.audio_url,
+            next(
+                (
+                    candidate.url
+                    for candidate in parser.media_candidates
+                    if candidate.candidate_type == "audio"
+                ),
+                "",
+            ),
+        ),
+        base_url=base_url,
+    )
     if not audio_url and media_url and _looks_like_audio(media_url):
         audio_url = media_url
 
     kind_hint = _first_nonempty(
         _kind_hint_from_og_type(meta.get("og:type", "")),
         jsonld_metadata.kind_hint,
+    )
+    media_candidates = tuple(
+        ExtractedMediaCandidate(
+            url=_normalize_url(candidate.url, base_url=base_url),
+            candidate_type=candidate.candidate_type,
+            detection_source=candidate.detection_source,
+        )
+        for candidate in parser.media_candidates
+        if _normalize_url(candidate.url, base_url=base_url)
     )
 
     return ExtractedMetadata(
@@ -181,6 +258,7 @@ def extract_metadata_from_html(html: str, base_url: str) -> ExtractedMetadata:
         media_url=media_url,
         audio_url=_normalize_url(audio_url, base_url=base_url),
         kind_hint=kind_hint,
+        media_candidates=media_candidates,
     )
 
 

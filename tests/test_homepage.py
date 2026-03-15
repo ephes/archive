@@ -8,7 +8,7 @@ from django.utils import timezone
 
 from archive.article_audio import DownloadedArticleAudio
 from archive.forms import ItemForm
-from archive.models import EnrichmentStatus, Item, ItemKind
+from archive.models import EnrichmentStatus, Item, ItemKind, PodcastFeedPolicy
 from archive.services import infer_kind
 
 
@@ -327,6 +327,7 @@ def test_editor_form_requires_login_and_creates_item(client, editor_user) -> Non
             "kind": ItemKind.LINK,
             "source": "Safari",
             "audio_url": "",
+            "podcast_feed_policy": PodcastFeedPolicy.AUTO,
             "is_public": "on",
         },
     )
@@ -351,6 +352,7 @@ def test_editor_form_exposes_generated_fields_for_manual_edits(client, editor_us
     assert b'name="long_summary"' in response.content
     assert b'name="transcript"' in response.content
     assert b'name="tags"' in response.content
+    assert b'name="media_url"' in response.content
 
 
 @pytest.mark.django_db
@@ -367,6 +369,7 @@ def test_item_form_marks_new_non_article_items_article_audio_complete() -> None:
             "kind": ItemKind.LINK,
             "source": "",
             "audio_url": "",
+            "podcast_feed_policy": PodcastFeedPolicy.AUTO,
             "is_public": True,
         }
     )
@@ -391,6 +394,7 @@ def test_item_form_marks_new_article_items_article_audio_pending() -> None:
             "kind": ItemKind.ARTICLE,
             "source": "",
             "audio_url": "",
+            "podcast_feed_policy": PodcastFeedPolicy.AUTO,
             "is_public": True,
         }
     )
@@ -430,6 +434,33 @@ def test_admin_changelist_is_available_for_staff(client, editor_user) -> None:
     assert response.status_code == 200
 
 
+@pytest.mark.django_db
+def test_admin_reprocess_action_resets_item_for_worker(client, editor_user) -> None:
+    client.force_login(editor_user)
+    item = Item.objects.create(
+        original_url="https://castro.fm/episode/ubOf93",
+        kind=ItemKind.PODCAST_EPISODE,
+        audio_url="https://cdn.example.com/audio.mp3",
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        media_archive_status=EnrichmentStatus.FAILED,
+        media_archive_error="failed",
+    )
+
+    response = client.post(
+        reverse("admin:archive_item_changelist"),
+        data={
+            "action": "reprocess_selected_items",
+            "_selected_action": [str(item.pk)],
+        },
+    )
+
+    assert response.status_code == 302
+    item.refresh_from_db()
+    assert item.enrichment_status == EnrichmentStatus.PENDING
+    assert item.media_archive_status == EnrichmentStatus.PENDING
+    assert item.media_archive_error == ""
+
+
 @pytest.mark.parametrize(
     ("url", "explicit_kind", "audio_url", "expected"),
     [
@@ -440,6 +471,7 @@ def test_admin_changelist_is_available_for_staff(client, editor_user) -> None:
             "https://cdn.example.com/audio.mp3",
             ItemKind.PODCAST_EPISODE,
         ),
+        ("https://castro.fm/episode/ubOf93", "", "", ItemKind.PODCAST_EPISODE),
         ("https://youtu.be/demo", "", "", ItemKind.VIDEO),
         ("https://example.com/audio.mp3", "", "", ItemKind.PODCAST_EPISODE),
         ("https://example.com/article", "", "", ItemKind.LINK),

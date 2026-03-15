@@ -13,8 +13,9 @@ from django.conf import settings
 from django.core.files.base import File
 from django.core.files.storage import storages
 
+from archive.classification import resolve_media_sources_for_item
 from archive.metadata import REQUEST_HEADERS
-from archive.models import Item, ItemKind
+from archive.models import Item
 
 try:
     import yt_dlp
@@ -404,42 +405,13 @@ def _delete_stored_object(object_name: str) -> None:
 
 
 def _select_audio_archive_source_url(item: Item) -> str | None:
-    explicit_audio_url = item.audio_url.strip()
-    if explicit_audio_url:
-        if _looks_like_audio_url(explicit_audio_url) or _looks_like_ambiguous_audio_url(
-            explicit_audio_url
-        ):
-            return explicit_audio_url
-
-    candidates = [item.media_url.strip(), item.original_url.strip()]
-    seen: set[str] = set()
-    for candidate in candidates:
-        if not candidate or candidate in seen:
-            continue
-        seen.add(candidate)
-        if _looks_like_audio_url(candidate):
-            return candidate
-
-    if item.kind == ItemKind.PODCAST_EPISODE and item.audio_url.strip():
-        return item.audio_url.strip()
-    return None
+    audio_source_url, _ = resolve_media_sources_for_item(item)
+    return audio_source_url
 
 
 def _select_video_archive_source_url(item: Item) -> str | None:
-    candidates = [
-        item.media_url.strip(),
-        item.original_url.strip(),
-    ]
-    seen: set[str] = set()
-    for candidate in candidates:
-        if not candidate or candidate in seen:
-            continue
-        seen.add(candidate)
-        if _looks_like_direct_video_url(candidate) or _looks_like_supported_video_page_url(
-            candidate
-        ):
-            return candidate
-    return None
+    _, video_source_url = resolve_media_sources_for_item(item)
+    return video_source_url
 
 
 def _looks_like_audio_url(url: str) -> bool:

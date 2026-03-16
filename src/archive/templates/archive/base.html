@@ -238,9 +238,15 @@
             </div>
             <div class="header-actions">
                 <nav>
-                    <a href="{% url 'archive:rss-feed' %}">RSS</a>
-                    ·
-                    <a href="{% url 'archive:podcast-feed' %}">Podcast feed</a>
+                    <button
+                        type="button"
+                        class="copy-button"
+                        data-copy-path="{% url 'archive:rss-feed' %}"
+                        data-default-label="Copy RSS URL"
+                        data-success-label="Copied"
+                    >
+                        Copy RSS URL
+                    </button>
                     ·
                     <button
                         type="button"
@@ -289,7 +295,7 @@
                         button.textContent = defaultLabel;
                     }, 1500);
                 } catch {
-                    window.prompt("Copy podcast URL:", podcastUrl);
+                    window.prompt(`${defaultLabel}:`, podcastUrl);
                 }
             });
         }

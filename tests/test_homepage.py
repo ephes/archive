@@ -47,11 +47,13 @@ def test_homepage_prefers_short_summary_over_notes(client, home_url: str) -> Non
 
 
 @pytest.mark.django_db
-def test_homepage_exposes_podcast_feed_link_and_copy_control(client, home_url: str) -> None:
+def test_homepage_exposes_feed_copy_controls(client, home_url: str) -> None:
     response = client.get(home_url)
 
     assert response.status_code == 200
+    assert reverse("archive:rss-feed").encode() in response.content
     assert reverse("archive:podcast-feed").encode() in response.content
+    assert b"Copy RSS URL" in response.content
     assert b"Copy podcast URL" in response.content
 
 

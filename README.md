@@ -207,9 +207,10 @@ Operator note:
 - the worker's `--media-archive-timeout` still guards network stalls and other blocking work, but it is
   not a strict wall-clock cap on a steady `yt-dlp` download; `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` remains the
   hard size limit for accepted source media
-- Django admin now exposes the winning classification rule, stored classification evidence, an operator-set
-  podcast feed policy (`auto`, `include`, `exclude`), and a `Reprocess selected items` action that re-queues
-  per-item enrichment without any bulk historical replay by default
+- Django admin now exposes the winning classification rule, stored classification evidence, a downstream-state
+  normalization diagnostic, an operator-set podcast feed policy (`auto`, `include`, `exclude`), and a
+  `Reprocess selected items` action that re-queues per-item enrichment without any bulk historical replay by
+  default
 
 ## Classification And Feed Policy
 
@@ -249,6 +250,7 @@ Operator workflow in Django admin:
 - inspect `kind`, `classification_rule`, and `classification_evidence`
 - inspect the stored classification engine version, selected media, podcast-feed diagnostic, and whether the
   stored decision looks stale relative to the current engine
+- inspect the downstream-state diagnostic before using replay normalization
 - override podcast feed policy with `auto`, `include`, or `exclude`
 - manually override `kind` when automatic classification is wrong
 - use `Reprocess selected items` to re-queue one or more items for a fresh enrichment pass
@@ -263,8 +265,14 @@ Historical replay workflow:
   `--stale-only` to narrow a historical replay pass
 - add `--apply` to persist `kind`, `classification_rule`, `classification_evidence`, and the stored engine
   version for the selected items
+- add `--normalize-downstream` to preview or explicitly apply cheap downstream status cleanup after replay;
+  this clears stale unsupported/materialized transcript, media-archive, and article-audio state without
+  queuing new worker work
 - replay apply mode does not queue metadata, media archival, transcript, summary, or article-audio work;
   explicit reprocessing remains a separate operator step
+- if an item becomes newly eligible for archival/transcript/article-audio after replay, use explicit
+  reprocessing to let the normal lifecycle queue that work; normalization intentionally does not set new
+  pending states on its own
 
 Migration note:
 

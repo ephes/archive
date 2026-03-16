@@ -12,7 +12,11 @@ from archive.classification import (
     selected_media_from_evidence,
 )
 from archive.models import Item
-from archive.services import set_item_classification
+from archive.services import (
+    describe_item_downstream_normalization,
+    normalize_item_downstream_state,
+    set_item_classification,
+)
 
 
 class Command(BaseCommand):
@@ -76,6 +80,15 @@ class Command(BaseCommand):
                 "Does not queue metadata, archival, transcript, summary, or article-audio work."
             ),
         )
+        parser.add_argument(
+            "--normalize-downstream",
+            action="store_true",
+            help=(
+                "Also preview or apply explicit downstream status cleanup for the selected items. "
+                "This only clears stale unsupported/materialized transcript, media-archive, and "
+                "article-audio state; it does not queue newly eligible work."
+            ),
+        )
 
     def handle(self, *args, **options) -> None:
         selectors_used = any(
@@ -97,15 +110,7 @@ class Command(BaseCommand):
             self.stdout.write(f"No items matched ({mode}).")
             return
 
-        if options["apply"]:
-            self.stdout.write(
-                "Apply mode: updating classification fields only. "
-                "No downstream jobs will be queued."
-            )
-        else:
-            self.stdout.write(
-                "Dry-run mode: no items will be updated and no downstream jobs will be queued."
-            )
+        self.stdout.write(self._mode_banner(options))
 
         changed = 0
         unchanged = 0
@@ -118,7 +123,11 @@ class Command(BaseCommand):
                 existing_rule=item.classification_rule,
                 existing_evidence=item.classification_evidence,
             )
-            change_descriptions = self._change_descriptions(item=item, decision=decision)
+            change_descriptions = self._change_descriptions(
+                item=item,
+                decision=decision,
+                normalize_downstream=options["normalize_downstream"],
+            )
 
             if change_descriptions:
                 changed += 1
@@ -128,7 +137,10 @@ class Command(BaseCommand):
                     self.stdout.write(f"  - {description}")
                 if options["apply"]:
                     update_fields = set_item_classification(item=item, decision=decision)
-                    item.save(update_fields=sorted(set(update_fields)))
+                    if options["normalize_downstream"]:
+                        normalize_item_downstream_state(item=item, update_fields=update_fields)
+                    if update_fields:
+                        item.save(update_fields=sorted(set(update_fields)))
             else:
                 unchanged += 1
                 self.stdout.write(f"UNCHANGED item {item.pk}: {item.original_url}")
@@ -169,7 +181,31 @@ class Command(BaseCommand):
                 break
         return items
 
-    def _change_descriptions(self, *, item: Item, decision) -> list[str]:
+    def _mode_banner(self, options: dict[str, Any]) -> str:
+        if options["apply"] and options["normalize_downstream"]:
+            return (
+                "Apply mode: updating classification fields plus explicit downstream "
+                "normalization only. No downstream jobs will be queued."
+            )
+        if options["apply"]:
+            return (
+                "Apply mode: updating classification fields only. "
+                "No downstream jobs will be queued."
+            )
+        if options["normalize_downstream"]:
+            return (
+                "Dry-run mode: no items will be updated. Downstream normalization is "
+                "previewed only and no downstream jobs will be queued."
+            )
+        return "Dry-run mode: no items will be updated and no downstream jobs will be queued."
+
+    def _change_descriptions(
+        self,
+        *,
+        item: Item,
+        decision,
+        normalize_downstream: bool,
+    ) -> list[str]:
         descriptions: list[str] = []
 
         if item.kind != decision.kind:
@@ -203,4 +239,15 @@ class Command(BaseCommand):
                 f"{CURRENT_CLASSIFICATION_ENGINE_VERSION}"
             )
 
+        if normalize_downstream:
+            preview_item = self._preview_item_with_decision(item=item, decision=decision)
+            descriptions.extend(describe_item_downstream_normalization(preview_item))
+
         return descriptions
+
+    def _preview_item_with_decision(self, *, item: Item, decision) -> Item:
+        preview = Item()
+        for field in item._meta.concrete_fields:
+            setattr(preview, field.attname, getattr(item, field.attname))
+        set_item_classification(item=preview, decision=decision, update_fields=[])
+        return preview

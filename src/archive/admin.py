@@ -10,7 +10,7 @@ from archive.classification import (
 )
 from archive.forms import ItemForm
 from archive.models import Item
-from archive.services import request_item_reprocess
+from archive.services import describe_item_downstream_normalization, request_item_reprocess
 
 
 @admin.register(Item)
@@ -63,6 +63,7 @@ class ItemAdmin(admin.ModelAdmin):
         "selected_media_diagnostic",
         "classification_evidence_pretty",
         "podcast_feed_diagnostic",
+        "downstream_state_diagnostic",
         "enrichment_error",
         "summary_error",
         "transcript_error",
@@ -103,6 +104,11 @@ class ItemAdmin(admin.ModelAdmin):
     def podcast_feed_diagnostic(self, obj: Item) -> str:
         decision = podcast_feed_decision_for_item(obj)
         return f"{decision.reason} ({decision.enclosure_source or 'no enclosure'})"
+
+    @admin.display(description="Downstream state")
+    def downstream_state_diagnostic(self, obj: Item) -> str:
+        changes = describe_item_downstream_normalization(obj)
+        return "clean" if not changes else "\n".join(changes)
 
     @admin.action(description="Reprocess selected items")
     def reprocess_selected_items(self, request, queryset) -> None:

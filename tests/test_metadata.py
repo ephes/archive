@@ -531,6 +531,194 @@ def test_reclassify_items_preserves_operator_override_in_apply_mode() -> None:
 
 
 @pytest.mark.django_db
+def test_reclassify_items_normalize_downstream_dry_run_reports_stale_status_cleanup() -> None:
+    poll_at = timezone.now() + timedelta(minutes=5)
+    retry_at = timezone.now() + timedelta(minutes=10)
+    item = Item.objects.create(
+        original_url="https://example.com/story",
+        kind=ItemKind.ARTICLE,
+        classification_rule="metadata_kind_hint",
+        classification_engine_version=1,
+        classification_evidence={},
+        transcript_status=EnrichmentStatus.FAILED,
+        transcript_error="transcript failed",
+        media_archive_status=EnrichmentStatus.FAILED,
+        media_archive_error="download failed",
+        media_archive_retry_count=2,
+        media_archive_retry_at=retry_at,
+        article_audio_status=EnrichmentStatus.FAILED,
+        article_audio_error="tts failed",
+        article_audio_poll_at=poll_at,
+    )
+
+    stdout = StringIO()
+    call_command(
+        "reclassify_items",
+        "--item-id",
+        str(item.pk),
+        "--normalize-downstream",
+        stdout=stdout,
+    )
+
+    output = stdout.getvalue()
+    item.refresh_from_db()
+
+    assert "Downstream normalization is previewed only" in output
+    assert f"WOULD UPDATE item {item.pk}" in output
+    assert "kind: article -> link" in output
+    assert "transcript: status: failed -> complete" in output
+    assert "media_archive: status: failed -> complete" in output
+    assert "article_audio: status: failed -> complete" in output
+    assert item.kind == ItemKind.ARTICLE
+    assert item.media_archive_status == EnrichmentStatus.FAILED
+    assert item.article_audio_status == EnrichmentStatus.FAILED
+    assert item.transcript_status == EnrichmentStatus.FAILED
+
+
+@pytest.mark.django_db
+def test_reclassify_items_apply_with_normalize_downstream_cleans_unsupported_statuses() -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/story",
+        kind=ItemKind.ARTICLE,
+        classification_rule="metadata_kind_hint",
+        classification_engine_version=1,
+        classification_evidence={},
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        transcript_status=EnrichmentStatus.FAILED,
+        transcript_error="transcript failed",
+        media_archive_status=EnrichmentStatus.FAILED,
+        media_archive_error="download failed",
+        media_archive_retry_count=2,
+        media_archive_retry_at=timezone.now() + timedelta(minutes=10),
+        article_audio_status=EnrichmentStatus.FAILED,
+        article_audio_error="tts failed",
+        article_audio_poll_at=timezone.now() + timedelta(minutes=5),
+    )
+
+    stdout = StringIO()
+    call_command(
+        "reclassify_items",
+        "--item-id",
+        str(item.pk),
+        "--apply",
+        "--normalize-downstream",
+        stdout=stdout,
+    )
+
+    output = stdout.getvalue()
+    item.refresh_from_db()
+
+    assert (
+        "Apply mode: updating classification fields plus explicit downstream normalization only."
+        in output
+    )
+    assert item.kind == ItemKind.LINK
+    assert item.classification_rule == "default_link"
+    assert item.classification_engine_version == CURRENT_CLASSIFICATION_ENGINE_VERSION
+    assert item.transcript_status == EnrichmentStatus.COMPLETE
+    assert item.transcript_error == ""
+    assert item.media_archive_status == EnrichmentStatus.COMPLETE
+    assert item.media_archive_error == ""
+    assert item.media_archive_retry_count == 0
+    assert item.media_archive_retry_at is None
+    assert item.article_audio_status == EnrichmentStatus.COMPLETE
+    assert item.article_audio_error == ""
+    assert item.article_audio_poll_at is None
+    assert item.enrichment_status == EnrichmentStatus.COMPLETE
+    assert item.summary_status == EnrichmentStatus.COMPLETE
+    assert claim_pending_item() is None
+
+
+@pytest.mark.django_db
+def test_reclassify_items_normalize_downstream_does_not_queue_newly_eligible_work() -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/story",
+        audio_url="https://cdn.example.com/story.mp3",
+        kind=ItemKind.LINK,
+        classification_rule="default_link",
+        classification_engine_version=1,
+        classification_evidence={},
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        transcript_status=EnrichmentStatus.COMPLETE,
+        media_archive_status=EnrichmentStatus.COMPLETE,
+        article_audio_status=EnrichmentStatus.COMPLETE,
+    )
+
+    call_command(
+        "reclassify_items",
+        "--item-id",
+        str(item.pk),
+        "--apply",
+        "--normalize-downstream",
+        stdout=StringIO(),
+    )
+
+    item.refresh_from_db()
+    assert item.kind == ItemKind.PODCAST_EPISODE
+    assert item.media_archive_status == EnrichmentStatus.COMPLETE
+    assert item.transcript_status == EnrichmentStatus.COMPLETE
+    assert item.article_audio_status == EnrichmentStatus.COMPLETE
+    assert claim_pending_item() is None
+
+
+@pytest.mark.django_db
+def test_reclassify_items_apply_with_normalize_downstream_cleans_materialized_statuses() -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/story",
+        kind=ItemKind.LINK,
+        classification_rule="default_link",
+        classification_engine_version=CURRENT_CLASSIFICATION_ENGINE_VERSION,
+        classification_evidence={},
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        transcript="Existing transcript text.",
+        transcript_status=EnrichmentStatus.FAILED,
+        transcript_error="transcript failed",
+        archived_audio_path="items/1/audio/source.mp3",
+        archived_audio_content_type="audio/mpeg",
+        archived_audio_size_bytes=12345,
+        media_archive_status=EnrichmentStatus.FAILED,
+        media_archive_error="download failed",
+        media_archive_retry_count=2,
+        media_archive_retry_at=timezone.now() + timedelta(minutes=10),
+        article_audio_generated=True,
+        article_audio_artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+        article_audio_status=EnrichmentStatus.FAILED,
+        article_audio_error="tts failed",
+        article_audio_poll_at=timezone.now() + timedelta(minutes=5),
+    )
+
+    stdout = StringIO()
+    call_command(
+        "reclassify_items",
+        "--item-id",
+        str(item.pk),
+        "--apply",
+        "--normalize-downstream",
+        stdout=stdout,
+    )
+
+    output = stdout.getvalue()
+    item.refresh_from_db()
+
+    assert "transcript already exists" in output
+    assert "archived audio already exists" in output
+    assert "generated article audio already exists" in output
+    assert item.transcript_status == EnrichmentStatus.COMPLETE
+    assert item.transcript_error == ""
+    assert item.media_archive_status == EnrichmentStatus.COMPLETE
+    assert item.media_archive_error == ""
+    assert item.media_archive_retry_count == 0
+    assert item.media_archive_retry_at is None
+    assert item.article_audio_status == EnrichmentStatus.COMPLETE
+    assert item.article_audio_error == ""
+    assert item.article_audio_poll_at is None
+    assert claim_pending_item() is None
+
+
+@pytest.mark.django_db
 def test_reclassify_items_dry_run_does_not_touch_downstream_statuses() -> None:
     item = Item.objects.create(
         original_url="https://example.com/story",

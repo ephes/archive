@@ -899,6 +899,184 @@ def request_item_reprocess(item: Item) -> Item:
     return item
 
 
+def describe_item_downstream_normalization(item: Item) -> list[str]:
+    descriptions: list[str] = []
+    _normalize_transcript_state_for_replay(item, descriptions=descriptions)
+    _normalize_media_archive_state_for_replay(item, descriptions=descriptions)
+    _normalize_article_audio_state_for_replay(item, descriptions=descriptions)
+    return descriptions
+
+
+def normalize_item_downstream_state(
+    *,
+    item: Item,
+    update_fields: list[str] | None = None,
+) -> list[str]:
+    pending_fields = update_fields if update_fields is not None else []
+    _normalize_transcript_state_for_replay(item, update_fields=pending_fields)
+    _normalize_media_archive_state_for_replay(item, update_fields=pending_fields)
+    _normalize_article_audio_state_for_replay(item, update_fields=pending_fields)
+    return pending_fields
+
+
+def _normalize_transcript_state_for_replay(
+    item: Item,
+    *,
+    update_fields: list[str] | None = None,
+    descriptions: list[str] | None = None,
+) -> None:
+    if item.has_transcript:
+        _normalize_transcript_fields(
+            item=item,
+            reason="transcript already exists",
+            update_fields=update_fields,
+            descriptions=descriptions,
+        )
+        return
+
+    if can_transcribe_item(item):
+        return
+
+    _normalize_transcript_fields(
+        item=item,
+        reason="item is not transcribable",
+        update_fields=update_fields,
+        descriptions=descriptions,
+    )
+
+
+def _normalize_transcript_fields(
+    *,
+    item: Item,
+    reason: str,
+    update_fields: list[str] | None = None,
+    descriptions: list[str] | None = None,
+) -> None:
+    changes: list[str] = []
+    _set_normalized_attr(
+        item=item,
+        field_name="transcript_status",
+        value=EnrichmentStatus.COMPLETE,
+        label="status",
+        changes=changes,
+        update_fields=update_fields,
+    )
+    _set_normalized_attr(
+        item=item,
+        field_name="transcript_error",
+        value="",
+        label="error",
+        changes=changes,
+        update_fields=update_fields,
+    )
+    _append_normalization_description(
+        feature="transcript",
+        reason=reason,
+        changes=changes,
+        descriptions=descriptions,
+    )
+
+
+def _normalize_article_audio_state_for_replay(
+    item: Item,
+    *,
+    update_fields: list[str] | None = None,
+    descriptions: list[str] | None = None,
+) -> None:
+    if item.has_generated_article_audio:
+        reason = "generated article audio already exists"
+    elif not _supports_article_audio(item):
+        reason = "item is not article-audio eligible"
+    else:
+        return
+
+    changes: list[str] = []
+    _set_normalized_attr(
+        item=item,
+        field_name="article_audio_status",
+        value=EnrichmentStatus.COMPLETE,
+        label="status",
+        changes=changes,
+        update_fields=update_fields,
+    )
+    _set_normalized_attr(
+        item=item,
+        field_name="article_audio_error",
+        value="",
+        label="error",
+        changes=changes,
+        update_fields=update_fields,
+    )
+    _set_normalized_attr(
+        item=item,
+        field_name="article_audio_poll_at",
+        value=None,
+        label="poll_at",
+        changes=changes,
+        update_fields=update_fields,
+    )
+    _append_normalization_description(
+        feature="article_audio",
+        reason=reason,
+        changes=changes,
+        descriptions=descriptions,
+    )
+
+
+def _normalize_media_archive_state_for_replay(
+    item: Item,
+    *,
+    update_fields: list[str] | None = None,
+    descriptions: list[str] | None = None,
+) -> None:
+    if item.has_archived_audio:
+        reason = "archived audio already exists"
+    elif not _supports_media_archive(item):
+        reason = "item is not archivable"
+    else:
+        return
+
+    changes: list[str] = []
+    _set_normalized_attr(
+        item=item,
+        field_name="media_archive_status",
+        value=EnrichmentStatus.COMPLETE,
+        label="status",
+        changes=changes,
+        update_fields=update_fields,
+    )
+    _set_normalized_attr(
+        item=item,
+        field_name="media_archive_error",
+        value="",
+        label="error",
+        changes=changes,
+        update_fields=update_fields,
+    )
+    _set_normalized_attr(
+        item=item,
+        field_name="media_archive_retry_count",
+        value=0,
+        label="retry_count",
+        changes=changes,
+        update_fields=update_fields,
+    )
+    _set_normalized_attr(
+        item=item,
+        field_name="media_archive_retry_at",
+        value=None,
+        label="retry_at",
+        changes=changes,
+        update_fields=update_fields,
+    )
+    _append_normalization_description(
+        feature="media_archive",
+        reason=reason,
+        changes=changes,
+        descriptions=descriptions,
+    )
+
+
 def _refresh_article_audio_state(item: Item, update_fields: list[str]) -> None:
     if item.has_generated_article_audio:
         if item.article_audio_status != EnrichmentStatus.COMPLETE:
@@ -978,6 +1156,47 @@ def _refresh_media_archive_state(item: Item, update_fields: list[str]) -> None:
     if item.media_archive_retry_at is not None:
         item.media_archive_retry_at = None
         update_fields.append("media_archive_retry_at")
+
+
+def _set_normalized_attr(
+    *,
+    item: Item,
+    field_name: str,
+    value: object,
+    label: str,
+    changes: list[str],
+    update_fields: list[str] | None = None,
+) -> None:
+    current_value = getattr(item, field_name)
+    if current_value == value:
+        return
+    changes.append(
+        f"{label}: {_display_normalized_value(current_value)} -> "
+        f"{_display_normalized_value(value)}"
+    )
+    if update_fields is not None:
+        setattr(item, field_name, value)
+        update_fields.append(field_name)
+
+
+def _append_normalization_description(
+    *,
+    feature: str,
+    reason: str,
+    changes: list[str],
+    descriptions: list[str] | None = None,
+) -> None:
+    if descriptions is None or not changes:
+        return
+    descriptions.append(f"{feature}: {'; '.join(changes)} ({reason})")
+
+
+def _display_normalized_value(value: object) -> str:
+    if value in {"", None}:
+        return "none"
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
 
 
 def _apply_classification_decision(

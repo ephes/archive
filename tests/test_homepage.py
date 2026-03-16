@@ -2,10 +2,12 @@ import io
 from datetime import timedelta
 
 import pytest
+from django.contrib.admin.sites import AdminSite
 from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
 
+from archive.admin import ItemAdmin
 from archive.article_audio import DownloadedArticleAudio
 from archive.classification import CURRENT_CLASSIFICATION_ENGINE_VERSION
 from archive.forms import ItemForm
@@ -488,6 +490,59 @@ def test_admin_change_view_shows_classification_diagnostics(client, editor_user)
     assert "stored v1, current v2" in content
     assert "audio=https://cdn.example.com/audio.mp3; video=none" in content
     assert "Podcast feed diagnostic" in content
+
+
+@pytest.mark.django_db
+def test_admin_change_view_shows_downstream_state_diagnostic(client, editor_user) -> None:
+    client.force_login(editor_user)
+    item = Item.objects.create(
+        original_url="https://example.com/story",
+        title="Replay diagnostic item",
+        kind=ItemKind.LINK,
+        transcript_status=EnrichmentStatus.FAILED,
+        transcript_error="transcript failed",
+        media_archive_status=EnrichmentStatus.FAILED,
+        media_archive_error="archive failed",
+        media_archive_retry_count=2,
+        article_audio_status=EnrichmentStatus.FAILED,
+        article_audio_error="tts failed",
+    )
+
+    response = client.get(reverse("admin:archive_item_change", args=[item.pk]))
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert "Downstream state" in content
+    assert "transcript: status: failed -&gt; complete" in content
+    assert "media_archive: status: failed -&gt; complete" in content
+    assert "article_audio: status: failed -&gt; complete" in content
+
+
+def test_admin_downstream_state_diagnostic_does_not_mutate_item() -> None:
+    item = Item(
+        original_url="https://example.com/story",
+        title="Replay diagnostic item",
+        kind=ItemKind.LINK,
+        transcript_status=EnrichmentStatus.FAILED,
+        transcript_error="transcript failed",
+        media_archive_status=EnrichmentStatus.FAILED,
+        media_archive_error="archive failed",
+        media_archive_retry_count=2,
+        article_audio_status=EnrichmentStatus.FAILED,
+        article_audio_error="tts failed",
+    )
+    admin = ItemAdmin(Item, AdminSite())
+
+    diagnostic = admin.downstream_state_diagnostic(item)
+
+    assert "transcript: status: failed -> complete" in diagnostic
+    assert item.transcript_status == EnrichmentStatus.FAILED
+    assert item.transcript_error == "transcript failed"
+    assert item.media_archive_status == EnrichmentStatus.FAILED
+    assert item.media_archive_error == "archive failed"
+    assert item.media_archive_retry_count == 2
+    assert item.article_audio_status == EnrichmentStatus.FAILED
+    assert item.article_audio_error == "tts failed"
 
 
 @pytest.mark.parametrize(

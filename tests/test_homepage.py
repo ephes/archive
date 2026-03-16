@@ -74,6 +74,172 @@ def test_overview_uses_week_navigation_and_skips_empty_weeks(client, home_url: s
 
 
 @pytest.mark.django_db
+def test_search_finds_matches_in_title(client) -> None:
+    Item.objects.create(
+        original_url="https://example.com/match",
+        title="Lantern Signals",
+    )
+    Item.objects.create(
+        original_url="https://example.com/other",
+        title="Harbor Notes",
+    )
+
+    response = client.get(reverse("archive:search"), {"q": "lantern"})
+
+    assert response.status_code == 200
+    assert [item.title for item in response.context["results"]] == ["Lantern Signals"]
+
+
+@pytest.mark.django_db
+def test_search_requires_all_terms_for_multi_word_query(client) -> None:
+    Item.objects.create(
+        original_url="https://example.com/full-match",
+        title="Lantern Signals",
+    )
+    Item.objects.create(
+        original_url="https://example.com/partial-match",
+        title="Lantern Harbor",
+    )
+
+    response = client.get(reverse("archive:search"), {"q": "lantern signals"})
+
+    assert response.status_code == 200
+    assert [item.title for item in response.context["results"]] == ["Lantern Signals"]
+
+
+@pytest.mark.django_db
+def test_search_finds_matches_in_summaries_notes_and_transcript(client) -> None:
+    short_summary_item = Item.objects.create(
+        original_url="https://example.com/short-summary",
+        title="Short summary match",
+        short_summary="Cedar signals in the short summary.",
+    )
+    long_summary_item = Item.objects.create(
+        original_url="https://example.com/long-summary",
+        title="Long summary match",
+        long_summary="A cedar passage appears in the longer overview.",
+    )
+    notes_item = Item.objects.create(
+        original_url="https://example.com/notes",
+        title="Notes match",
+        notes="Personal cedar note for later.",
+    )
+    transcript_item = Item.objects.create(
+        original_url="https://example.com/transcript",
+        title="Transcript match",
+        transcript="The speaker mentions cedar directly in the transcript.",
+    )
+
+    response = client.get(reverse("archive:search"), {"q": "cedar"})
+
+    assert response.status_code == 200
+    assert {item.pk for item in response.context["results"]} == {
+        short_summary_item.pk,
+        long_summary_item.pk,
+        notes_item.pk,
+        transcript_item.pk,
+    }
+
+
+@pytest.mark.django_db
+def test_search_picks_up_item_updates_from_fts_sync(client) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/update-match",
+        title="Updated item",
+        short_summary="",
+    )
+    item.short_summary = "Fresh cedar summary from enrichment."
+    item.save(update_fields=["short_summary"])
+
+    response = client.get(reverse("archive:search"), {"q": "cedar"})
+
+    assert response.status_code == 200
+    assert [result.pk for result in response.context["results"]] == [item.pk]
+
+
+@pytest.mark.django_db
+def test_search_excludes_non_public_items(client) -> None:
+    Item.objects.create(
+        original_url="https://example.com/public",
+        title="Public match",
+        notes="Elm term",
+        is_public=True,
+    )
+    Item.objects.create(
+        original_url="https://example.com/private",
+        title="Private match",
+        notes="Elm term",
+        is_public=False,
+    )
+
+    response = client.get(reverse("archive:search"), {"q": "elm"})
+
+    assert response.status_code == 200
+    assert [item.title for item in response.context["results"]] == ["Public match"]
+
+
+@pytest.mark.django_db
+def test_search_removes_deleted_items_from_fts_sync(client) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/delete-match",
+        title="Delete match",
+        notes="Juniper term",
+    )
+    item.delete()
+
+    response = client.get(reverse("archive:search"), {"q": "juniper"})
+
+    assert response.status_code == 200
+    assert response.context["results"] == []
+
+
+@pytest.mark.django_db
+def test_search_handles_empty_query_cleanly(client) -> None:
+    Item.objects.create(
+        original_url="https://example.com/item",
+        title="Existing item",
+        notes="Should not show for blank queries",
+    )
+
+    response = client.get(reverse("archive:search"))
+
+    assert response.status_code == 200
+    assert response.context["search_query"] == ""
+    assert response.context["result_count"] == 0
+    assert response.context["results"] == []
+    assert b"Enter a search term" in response.content
+
+
+@pytest.mark.django_db
+def test_search_uses_stable_ordering_and_paginates_results(client) -> None:
+    base_time = timezone.now()
+    matching_items = []
+    for index in range(22):
+        matching_items.append(
+            Item.objects.create(
+                original_url=f"https://example.com/result-{index}",
+                title=f"Needle result {index}",
+                shared_at=base_time - timedelta(minutes=index),
+            )
+        )
+
+    response = client.get(reverse("archive:search"), {"q": "needle"})
+
+    assert response.status_code == 200
+    assert response.context["result_count"] == 22
+    assert [item.pk for item in response.context["results"]] == [
+        item.pk for item in matching_items[:20]
+    ]
+
+    second_page = client.get(reverse("archive:search"), {"q": "needle", "page": 2})
+
+    assert second_page.status_code == 200
+    assert [item.pk for item in second_page.context["results"]] == [
+        item.pk for item in matching_items[20:]
+    ]
+
+
+@pytest.mark.django_db
 def test_detail_page_shows_audio_player(client) -> None:
     item = Item.objects.create(
         original_url="https://example.com/episode",

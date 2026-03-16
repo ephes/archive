@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 
 from django.conf import settings
 from django.contrib.auth.views import LoginView, LogoutView
 from django.core.exceptions import ValidationError
 from django.core.paginator import EmptyPage, Paginator
 from django.core.validators import URLValidator
+from django.db import connection
 from django.db.models import Q
 from django.db.models.functions import Trim
 from django.http import (
@@ -40,6 +42,8 @@ from archive.services import (
 
 url_validator = URLValidator()
 FEED_PAGE_SIZE = 50
+SEARCH_PAGE_SIZE = 20
+SEARCH_TOKEN_RE = re.compile(r"\w+")
 
 
 class ArchiveLoginView(LoginView):
@@ -90,6 +94,31 @@ def _public_podcast_feed_items():
         for item in candidates
         if podcast_feed_decision_for_item(item).eligible
     ]
+
+
+def _build_search_match_query(raw_query: str) -> str:
+    tokens = SEARCH_TOKEN_RE.findall(raw_query.lower())
+    return " AND ".join(f"{token}*" for token in tokens)
+
+
+def _search_public_item_ids(raw_query: str) -> list[int]:
+    match_query = _build_search_match_query(raw_query)
+    if not match_query:
+        return []
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT item.id
+            FROM archive_item_fts
+            JOIN archive_item AS item ON item.id = archive_item_fts.rowid
+            WHERE archive_item_fts MATCH %s
+              AND item.is_public = 1
+            ORDER BY bm25(archive_item_fts), item.shared_at DESC, item.id DESC
+            """,
+            [match_query],
+        )
+        return [row[0] for row in cursor.fetchall()]
 
 
 def _render_feed(
@@ -209,6 +238,27 @@ def overview(request: HttpRequest) -> HttpResponse:
             "current_page": current_page,
             "newer_page": newer_page,
             "older_page": older_page,
+        },
+    )
+
+
+@require_GET
+def search(request: HttpRequest) -> HttpResponse:
+    raw_query = (request.GET.get("q") or "").strip()
+    item_ids = _search_public_item_ids(raw_query) if raw_query else []
+    paginator = Paginator(item_ids, SEARCH_PAGE_SIZE)
+    page_obj = paginator.get_page(request.GET.get("page") or 1)
+    items_by_id = Item.objects.in_bulk(page_obj.object_list)
+    results = [items_by_id[item_id] for item_id in page_obj.object_list if item_id in items_by_id]
+
+    return render(
+        request,
+        "archive/search.html",
+        {
+            "search_query": raw_query,
+            "results": results,
+            "page_obj": page_obj,
+            "result_count": len(item_ids),
         },
     )
 

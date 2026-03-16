@@ -10,10 +10,12 @@ Current shipped scope:
 - Milestone 4: background short summary, long summary, and tag generation with operator-editable values
 - Milestone 5: background transcription for audio/video items with archived-local-media preference and transcript-aware summary/tag refresh
 - Milestone 6: background archival of eligible remote audio/video, including YouTube page URLs, stable local audio enclosure URLs, and a separate podcast-style RSS feed
+- Milestone 7 slice: public server-rendered SQLite FTS search over titles, summaries, notes, and transcripts
 
 Public endpoints:
 
 - `/` week-based public archive overview
+- `/search/?q=<terms>` public full-text search over public item content
 - `/items/<id>/` public item detail page
 - `/feeds/rss.xml` canonical general RSS feed
 - `/feeds/rss/page/<n>.xml` older feed pages when more than 50 eligible items exist

@@ -11,12 +11,14 @@ from archive.views import (
     overview,
     podcast_feed,
     rss_feed,
+    search,
 )
 
 app_name = "archive"
 
 urlpatterns = [
     path("", overview, name="overview"),
+    path("search/", search, name="search"),
     path("api/items/", api_create_item, name="api-items"),
     path("feeds/rss.xml", rss_feed, name="rss-feed"),
     path("feeds/rss/page/<int:page>.xml", rss_feed, name="rss-feed-page"),

@@ -1,0 +1,61 @@
+{% extends "archive/base.html" %}
+
+{% block title %}Search Archive{% endblock %}
+
+{% block content %}
+<section class="hero">
+    <p class="kicker">Public archive search</p>
+    <h2>Search the archive</h2>
+    <p class="search-meta">
+        {% if search_query %}
+            {{ result_count }} result{{ result_count|pluralize }} for “{{ search_query }}”.
+        {% else %}
+            Search across titles, summaries, notes, and transcripts.
+        {% endif %}
+    </p>
+</section>
+
+{% if search_query and results %}
+    <section class="cards">
+        {% for item in results %}
+            <article class="card">
+                <p class="pill">{{ item.get_kind_display }}</p>
+                <h3 class="card-title"><a href="{{ item.get_absolute_url }}">{{ item.display_title }}</a></h3>
+                <p class="meta">{{ item.shared_at|date:"j M Y, H:i" }}{% if item.source %} · {{ item.source }}{% endif %}</p>
+                {% if item.short_summary %}
+                    <p>{{ item.short_summary|linebreaksbr }}</p>
+                {% elif item.notes %}
+                    <p>{{ item.notes|linebreaksbr }}</p>
+                {% elif item.long_summary %}
+                    <p>{{ item.long_summary|linebreaksbr }}</p>
+                {% elif item.transcript %}
+                    <p>{{ item.transcript|truncatechars:240|linebreaksbr }}</p>
+                {% endif %}
+            </article>
+        {% endfor %}
+    </section>
+{% elif search_query %}
+    <section class="empty">
+        <p>No public items matched “{{ search_query }}”.</p>
+    </section>
+{% else %}
+    <section class="empty">
+        <p>Enter a search term to browse the archive by content.</p>
+    </section>
+{% endif %}
+
+{% if page_obj.paginator.num_pages > 1 %}
+    <nav class="nav-row" aria-label="Search navigation">
+        <div>
+            {% if page_obj.has_previous %}
+                <a href="{% url 'archive:search' %}?q={{ search_query|urlencode }}&page={{ page_obj.previous_page_number }}">Previous page</a>
+            {% endif %}
+        </div>
+        <div>
+            {% if page_obj.has_next %}
+                <a href="{% url 'archive:search' %}?q={{ search_query|urlencode }}&page={{ page_obj.next_page_number }}">Next page</a>
+            {% endif %}
+        </div>
+    </nav>
+{% endif %}
+{% endblock %}

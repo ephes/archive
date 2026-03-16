@@ -9,6 +9,7 @@ import pytest
 from django.core.files.base import ContentFile
 from django.core.files.storage import storages
 from django.core.management import call_command
+from django.db import connection
 from django.urls import reverse
 from django.utils import timezone
 
@@ -756,6 +757,34 @@ def test_reclassify_items_dry_run_does_not_touch_downstream_statuses() -> None:
     assert item.transcript_error == "transcript failed"
     assert item.article_audio_status == EnrichmentStatus.FAILED
     assert item.article_audio_error == "article audio failed"
+
+
+@pytest.mark.django_db
+def test_rebuild_search_index_restores_search_results_after_fts_drift(client) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/searchable",
+        title="Search drift item",
+        notes="Spruce term for rebuilding.",
+    )
+
+    initial_response = client.get(reverse("archive:search"), {"q": "spruce"})
+    assert initial_response.status_code == 200
+    assert [result.pk for result in initial_response.context["results"]] == [item.pk]
+
+    with connection.cursor() as cursor:
+        cursor.execute("DELETE FROM archive_item_fts WHERE rowid = %s", [item.pk])
+
+    drifted_response = client.get(reverse("archive:search"), {"q": "spruce"})
+    assert drifted_response.status_code == 200
+    assert drifted_response.context["results"] == []
+
+    stdout = StringIO()
+    call_command("rebuild_search_index", stdout=stdout)
+
+    rebuilt_response = client.get(reverse("archive:search"), {"q": "spruce"})
+    assert rebuilt_response.status_code == 200
+    assert [result.pk for result in rebuilt_response.context["results"]] == [item.pk]
+    assert "Rebuilt Archive search index for 1 item." in stdout.getvalue()
 
 
 @pytest.mark.django_db

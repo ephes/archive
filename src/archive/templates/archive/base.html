@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Archive{% endblock %}</title>
     <link rel="alternate" type="application/rss+xml" title="Archive RSS feed" href="{% url 'archive:rss-feed' %}">
+    <link rel="alternate" type="application/rss+xml" title="Archive podcast feed" href="{% url 'archive:podcast-feed' %}">
     <style>
         :root {
             color-scheme: light;
@@ -152,6 +153,13 @@
             margin-top: 1rem;
         }
 
+        .copy-button {
+            border: 1px solid var(--line);
+            padding: 0.4rem 0.75rem;
+            color: var(--accent);
+            background: rgba(255, 255, 255, 0.65);
+        }
+
         .sr-only {
             position: absolute;
             width: 1px;
@@ -232,6 +240,18 @@
                 <nav>
                     <a href="{% url 'archive:rss-feed' %}">RSS</a>
                     ·
+                    <a href="{% url 'archive:podcast-feed' %}">Podcast feed</a>
+                    ·
+                    <button
+                        type="button"
+                        class="copy-button"
+                        data-copy-path="{% url 'archive:podcast-feed' %}"
+                        data-default-label="Copy podcast URL"
+                        data-success-label="Copied"
+                    >
+                        Copy podcast URL
+                    </button>
+                    ·
                     {% if request.user.is_authenticated %}
                         <a href="{% url 'archive:item-new' %}">Capture manually</a>
                         ·
@@ -255,5 +275,24 @@
         </header>
         {% block content %}{% endblock %}
     </div>
+    <script>
+        for (const button of document.querySelectorAll("[data-copy-path]")) {
+            button.addEventListener("click", async () => {
+                const podcastUrl = new URL(button.dataset.copyPath, window.location.origin).href;
+                const defaultLabel = button.dataset.defaultLabel || "Copy";
+                const successLabel = button.dataset.successLabel || "Copied";
+
+                try {
+                    await navigator.clipboard.writeText(podcastUrl);
+                    button.textContent = successLabel;
+                    window.setTimeout(() => {
+                        button.textContent = defaultLabel;
+                    }, 1500);
+                } catch {
+                    window.prompt("Copy podcast URL:", podcastUrl);
+                }
+            });
+        }
+    </script>
 </body>
 </html>

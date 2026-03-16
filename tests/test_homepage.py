@@ -47,6 +47,23 @@ def test_homepage_prefers_short_summary_over_notes(client, home_url: str) -> Non
 
 
 @pytest.mark.django_db
+def test_homepage_exposes_podcast_feed_link_and_copy_control(client, home_url: str) -> None:
+    response = client.get(home_url)
+
+    assert response.status_code == 200
+    assert reverse("archive:podcast-feed").encode() in response.content
+    assert b"Copy podcast URL" in response.content
+
+
+def test_robots_txt_disallows_search_indexing(client) -> None:
+    response = client.get(reverse("archive:robots-txt"))
+
+    assert response.status_code == 200
+    assert response["Content-Type"] == "text/plain; charset=utf-8"
+    assert response.content == b"User-agent: *\nDisallow: /\n"
+
+
+@pytest.mark.django_db
 def test_overview_uses_week_navigation_and_skips_empty_weeks(client, home_url: str) -> None:
     now = timezone.now()
     current_item = Item.objects.create(

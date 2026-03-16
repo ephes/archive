@@ -173,6 +173,12 @@ Metadata extraction plus transcription plus summary/tag generation runs in a sep
 just manage run_metadata_worker --once
 ```
 
+To rebuild the public SQLite FTS search index after a restore or manual SQLite repair:
+
+```bash
+just manage rebuild_search_index
+```
+
 Optional worker flags for the Milestone 6 slice:
 
 - `--media-archive-timeout` controls the per-item remote media download timeout and is also used for
@@ -209,6 +215,8 @@ Operator note:
 - the worker's `--media-archive-timeout` still guards network stalls and other blocking work, but it is
   not a strict wall-clock cap on a steady `yt-dlp` download; `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` remains the
   hard size limit for accepted source media
+- `just manage rebuild_search_index` rebuilds the SQLite FTS table from `archive_item` if search drift needs
+  operator repair after a restore or manual database intervention
 - Django admin now exposes the winning classification rule, stored classification evidence, a downstream-state
   normalization diagnostic, an operator-set podcast feed policy (`auto`, `include`, `exclude`), and a
   `Reprocess selected items` action that re-queues per-item enrichment without any bulk historical replay by

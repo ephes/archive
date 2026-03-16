@@ -264,6 +264,11 @@ def search(request: HttpRequest) -> HttpResponse:
 
 
 @require_GET
+def robots_txt(request: HttpRequest) -> HttpResponse:
+    return HttpResponse("User-agent: *\nDisallow: /\n", content_type="text/plain; charset=utf-8")
+
+
+@require_GET
 def rss_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
     return _render_feed(
         request,

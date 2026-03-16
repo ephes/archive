@@ -10,6 +10,7 @@ from archive.views import (
     item_detail,
     overview,
     podcast_feed,
+    robots_txt,
     rss_feed,
     search,
 )
@@ -18,6 +19,7 @@ app_name = "archive"
 
 urlpatterns = [
     path("", overview, name="overview"),
+    path("robots.txt", robots_txt, name="robots-txt"),
     path("search/", search, name="search"),
     path("api/items/", api_create_item, name="api-items"),
     path("feeds/rss.xml", rss_feed, name="rss-feed"),

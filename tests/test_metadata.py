@@ -16,7 +16,11 @@ from django.utils import timezone
 from archive.article_audio import ArticleAudioJobUpdate
 from archive.classification import CURRENT_CLASSIFICATION_ENGINE_VERSION, classify_item
 from archive.media_archival import ArchivedAudio
-from archive.metadata import MetadataExtractionError, extract_metadata_from_html
+from archive.metadata import (
+    MetadataExtractionError,
+    extract_metadata_from_html,
+    extract_metadata_from_url,
+)
 from archive.models import EnrichmentStatus, Item, ItemKind
 from archive.services import (
     MEDIA_ARCHIVE_RETRY_DELAYS,
@@ -138,6 +142,287 @@ def test_extract_metadata_from_html_detects_video_source_elements() -> None:
     assert metadata.media_candidates[0].url == "https://cdn.example.com/talk.mp4"
     assert metadata.media_candidates[0].candidate_type == "video"
     assert metadata.media_candidates[0].detection_source == "html_video"
+
+
+# ---------------------------------------------------------------------------
+# extract_metadata_from_url – unit tests for the HTTP fetch layer
+# ---------------------------------------------------------------------------
+
+
+class _FakeHTTPResponse:
+    """Minimal fake of the object returned by ``urllib.request.urlopen``."""
+
+    def __init__(
+        self, body: bytes, content_type: str = "text/html", charset: str = "utf-8"
+    ) -> None:
+        self._body = body
+        self._pos = 0
+        self._content_type = content_type
+        self._charset = charset
+        self.headers = self
+
+    # Mimic http.client.HTTPMessage interface used by the production code.
+    def get_content_type(self) -> str:
+        return self._content_type
+
+    def get_content_charset(self) -> str:
+        return self._charset
+
+    def read(self, n: int = -1) -> bytes:
+        if n == -1:
+            chunk = self._body[self._pos:]
+            self._pos = len(self._body)
+        else:
+            chunk = self._body[self._pos: self._pos + n]
+            self._pos += len(chunk)
+        return chunk
+
+    # Context-manager support (``with urlopen(...) as response``).
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_) -> None:
+        pass
+
+
+def test_extract_metadata_from_url_extracts_title_from_normal_page(monkeypatch) -> None:
+    html = b"""<html><head>
+        <meta property="og:title" content="Normal Page Title">
+        <meta property="og:site_name" content="Example">
+    </head><body><p>content</p></body></html>"""
+
+    monkeypatch.setattr(
+        "archive.metadata.urlopen",
+        lambda request, timeout: _FakeHTTPResponse(html),
+    )
+
+    metadata = extract_metadata_from_url("https://example.com/page")
+
+    assert metadata.title == "Normal Page Title"
+    assert metadata.source == "Example"
+
+
+def test_extract_metadata_from_url_succeeds_on_page_larger_than_1mib(monkeypatch) -> None:
+    """A page whose total body exceeds MAX_METADATA_BYTES must not raise.
+
+    All relevant metadata is in ``<head>``, which is emitted well before the
+    1 MiB mark.  The fix stops reading after ``</head>`` so large pages such
+    as YouTube are handled correctly.
+    """
+    head = (
+        b"<html><head>"
+        b'<meta property="og:title" content="Large Page Title">'
+        b'<meta property="og:site_name" content="Big Site">'
+        b"</head>"
+    )
+    # Body that pushes the total well beyond 1 MiB.
+    body = b"<body>" + b"x" * (2 * 1024 * 1024) + b"</body></html>"
+    html = head + body
+
+    monkeypatch.setattr(
+        "archive.metadata.urlopen",
+        lambda request, timeout: _FakeHTTPResponse(html),
+    )
+
+    metadata = extract_metadata_from_url("https://example.com/large")
+
+    assert metadata.title == "Large Page Title"
+    assert metadata.source == "Big Site"
+
+
+def test_extract_metadata_from_url_handles_head_tag_split_across_chunk_boundary(
+    monkeypatch,
+) -> None:
+    """``</head>`` straddling two read() calls must still be detected by the parser.
+
+    We place ``</head>`` so that its first 4 bytes (``</he``) fall at the very end
+    of chunk 1 and the remaining 3 bytes (``ad>``) open chunk 2.  Python's
+    ``HTMLParser`` buffers incomplete tags across ``feed()`` calls, so the
+    structural close must still be recognised and the title must be extracted.
+    """
+    from archive.metadata import _METADATA_CHUNK_SIZE
+
+    title_tag = b'<meta property="og:title" content="Straddled Title">'
+    head_prefix = b"<html><head>" + title_tag
+    sentinel = b"</head>"
+    split_in_sentinel = 4  # "</he" ends chunk 1, "ad>" starts chunk 2
+
+    # Pad head_prefix so the sentinel starts at exactly (CHUNK_SIZE - split_in_sentinel).
+    target_start = _METADATA_CHUNK_SIZE - split_in_sentinel
+    pad_len = target_start - len(head_prefix)
+    assert pad_len >= 0, "head_prefix exceeds one chunk; adjust split_in_sentinel"
+    html = head_prefix + b" " * pad_len + sentinel + b"<body></body></html>"
+
+    # Verify the split is where we expect it.
+    assert html[target_start : target_start + len(sentinel)] == sentinel
+    chunk1_tail = html[_METADATA_CHUNK_SIZE - split_in_sentinel : _METADATA_CHUNK_SIZE]
+    assert chunk1_tail == sentinel[:split_in_sentinel]
+    tail_len = len(sentinel) - split_in_sentinel
+    chunk2_head = html[_METADATA_CHUNK_SIZE : _METADATA_CHUNK_SIZE + tail_len]
+    assert chunk2_head == sentinel[split_in_sentinel:]
+
+    pos = 0
+
+    class _StreamingResponse(_FakeHTTPResponse):
+        def read(self, n: int = -1) -> bytes:
+            nonlocal pos
+            end = len(html) if n < 0 else pos + n
+            chunk = html[pos:end]
+            pos += len(chunk)
+            return chunk
+
+    monkeypatch.setattr(
+        "archive.metadata.urlopen",
+        lambda request, timeout: _StreamingResponse(b""),
+    )
+
+    metadata = extract_metadata_from_url("https://example.com/straddled")
+    assert metadata.title == "Straddled Title"
+
+
+def test_extract_metadata_from_url_ignores_head_close_tag_inside_script(monkeypatch) -> None:
+    """``</head>`` inside ``<script>`` content must not stop reading early.
+
+    Python's ``HTMLParser`` enters CDATA mode for ``<script>`` and does not fire
+    tag events for its contents, so a literal ``</head>`` string inside a script
+    must not set ``parser.head_closed`` before the structural ``</head>`` is seen.
+    """
+    html = (
+        b"<html><head>"
+        b'<script>var x = "</head>";</script>'
+        b'<meta property="og:title" content="Real Title">'
+        b"</head>"
+        b"<body>body</body></html>"
+    )
+
+    monkeypatch.setattr(
+        "archive.metadata.urlopen",
+        lambda request, timeout: _FakeHTTPResponse(html),
+    )
+
+    metadata = extract_metadata_from_url("https://example.com/script-trick")
+    assert metadata.title == "Real Title"
+
+
+def test_extract_metadata_from_url_raises_when_cap_reached_without_closing_head(
+    monkeypatch,
+) -> None:
+    """Exhausting MAX_METADATA_BYTES without a structural ``</head>`` must raise.
+
+    This preserves the old hard-failure behaviour for pages that genuinely have
+    no parseable head section within the size limit, preventing a silent partial
+    extraction from being treated as a successful metadata pass.
+    """
+    from archive.metadata import MAX_METADATA_BYTES
+
+    # A page with no </head> whose body exceeds the cap.
+    html = b"<html><head>" + b"x" * (MAX_METADATA_BYTES + 1)
+
+    monkeypatch.setattr(
+        "archive.metadata.urlopen",
+        lambda request, timeout: _FakeHTTPResponse(html),
+    )
+
+    with pytest.raises(MetadataExtractionError, match="exceeded"):
+        extract_metadata_from_url("https://example.com/no-head")
+
+
+def test_extract_metadata_from_url_raises_on_http_error(monkeypatch) -> None:
+    from urllib.error import HTTPError
+
+    def _raise(request, timeout):
+        raise HTTPError(  # type: ignore[arg-type]
+            url="https://example.com/404",
+            code=404,
+            msg="Not Found",
+            hdrs=None,
+            fp=None,
+        )
+
+    monkeypatch.setattr("archive.metadata.urlopen", _raise)
+
+    with pytest.raises(MetadataExtractionError, match="HTTP 404"):
+        extract_metadata_from_url("https://example.com/404")
+
+
+def test_extract_metadata_from_url_raises_on_unsupported_content_type(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "archive.metadata.urlopen",
+        lambda request, timeout: _FakeHTTPResponse(b"binary", content_type="application/pdf"),
+    )
+
+    with pytest.raises(MetadataExtractionError, match="Unsupported content type"):
+        extract_metadata_from_url("https://example.com/doc.pdf")
+
+
+def test_extract_metadata_from_url_captures_body_media_past_head_close(monkeypatch) -> None:
+    """Body ``<audio>`` / ``<video>`` tags beyond the ``</head>`` chunk must still
+    be captured, as long as they fall within ``MAX_METADATA_BYTES``.
+
+    Stopping the read at ``</head>`` would miss inline players on podcast and radio
+    pages whose embed markup lives in the document body.
+    """
+    from archive.metadata import _METADATA_CHUNK_SIZE
+
+    title_meta = b'<meta property="og:title" content="Body Audio Page">'
+    head = b"<html><head>" + title_meta + b"</head>"
+    # Push the audio tag past the first chunk boundary.
+    pad = b" " * (_METADATA_CHUNK_SIZE - len(head) + 10)
+    audio = b'<body><audio><source src="https://cdn.example.com/ep.mp3"></audio></body></html>'
+    html = head + pad + audio
+
+    monkeypatch.setattr(
+        "archive.metadata.urlopen",
+        lambda request, timeout: _FakeHTTPResponse(html),
+    )
+
+    metadata = extract_metadata_from_url("https://example.com/body-audio")
+
+    assert metadata.title == "Body Audio Page"
+    assert metadata.audio_url == "https://cdn.example.com/ep.mp3"
+
+
+def test_extract_metadata_from_url_handles_multibyte_char_split_across_chunk_boundary(
+    monkeypatch,
+) -> None:
+    """A UTF-8 character whose bytes straddle a chunk boundary must decode cleanly.
+
+    Without an incremental decoder, the first chunk's trailing incomplete byte is
+    replaced with U+FFFD and the second chunk's continuation bytes are replaced
+    separately, corrupting the extracted value.
+    """
+    from archive.metadata import _METADATA_CHUNK_SIZE
+
+    # € is encoded as three bytes in UTF-8: 0xe2 0x82 0xac.
+    # Position it so the first byte (0xe2) is the very last byte of chunk 1.
+    euro = "€".encode()
+    assert len(euro) == 3
+
+    attr_prefix = b'<meta property="og:title" content="Price:\xc2\xa0'
+    # \xc2\xa0 is the UTF-8 encoding of non-breaking space, used here to keep
+    # the attribute value realistic without additional padding complexity.
+    attr_suffix = b'5.99"></head><body></body></html>'
+    doc_prefix = b"<html><head>"
+
+    # Place the start of euro at exactly (CHUNK_SIZE - 1).
+    target = _METADATA_CHUNK_SIZE - 1
+    pad_len = target - len(doc_prefix) - len(attr_prefix)
+    assert pad_len >= 0, "attr_prefix too long; adjust target offset"
+    html = doc_prefix + b" " * pad_len + attr_prefix + euro + attr_suffix
+
+    assert html[target : target + 1] == euro[:1]
+    assert html[target + 1 : target + 3] == euro[1:]
+
+    monkeypatch.setattr(
+        "archive.metadata.urlopen",
+        lambda request, timeout: _FakeHTTPResponse(html),
+    )
+
+    metadata = extract_metadata_from_url("https://example.com/euro-title")
+
+    assert "€" in metadata.title
+    assert "5.99" in metadata.title
+    assert "\ufffd" not in metadata.title
 
 
 @pytest.mark.django_db

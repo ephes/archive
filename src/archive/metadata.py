@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import json
 from dataclasses import dataclass
 from datetime import datetime, time
@@ -15,6 +16,7 @@ from django.utils.dateparse import parse_date, parse_datetime
 AUDIO_SUFFIXES = (".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav")
 VIDEO_SUFFIXES = (".mp4", ".m4v", ".mov", ".webm", ".m3u8")
 MAX_METADATA_BYTES = 1024 * 1024
+_METADATA_CHUNK_SIZE = 8192
 REQUEST_HEADERS = {
     "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
     "User-Agent": "archive-bot/1.0 (+https://archive.home.xn--wersdrfer-47a.de/)",
@@ -55,6 +57,7 @@ class _MetadataHTMLParser(HTMLParser):
         self._in_jsonld = False
         self._jsonld_parts: list[str] = []
         self._media_context_stack: list[str] = []
+        self.head_closed: bool = False
 
     def handle_starttag(self, tag: str, attrs) -> None:
         tag = tag.lower()
@@ -107,6 +110,9 @@ class _MetadataHTMLParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
+        if tag == "head":
+            self.head_closed = True
+            return
         if tag == "title":
             self._in_title = False
             return
@@ -147,7 +153,7 @@ def extract_metadata_from_url(url: str, timeout: int = 15) -> ExtractedMetadata:
             if content_type and "html" not in content_type and "xml" not in content_type:
                 raise MetadataExtractionError(f"Unsupported content type: {content_type}")
             charset = response.headers.get_content_charset() or "utf-8"
-            payload = response.read(MAX_METADATA_BYTES + 1)
+            parser = _stream_head_from_response(response, charset, MAX_METADATA_BYTES)
     except HTTPError as exc:
         raise MetadataExtractionError(f"HTTP {exc.code} while fetching metadata") from exc
     except URLError as exc:
@@ -155,18 +161,62 @@ def extract_metadata_from_url(url: str, timeout: int = 15) -> ExtractedMetadata:
     except OSError as exc:
         raise MetadataExtractionError(f"Could not fetch metadata: {exc}") from exc
 
-    if len(payload) > MAX_METADATA_BYTES:
-        raise MetadataExtractionError("Metadata response exceeded 1 MiB limit")
+    return _build_metadata_from_parser(parser, base_url=url)
 
-    html = payload.decode(charset, errors="replace")
-    return extract_metadata_from_html(html=html, base_url=url)
+
+def _stream_head_from_response(response, charset: str, max_bytes: int) -> _MetadataHTMLParser:
+    """Feed the response body into the HTML parser one chunk at a time.
+
+    Reads up to ``max_bytes`` of the response, feeding everything to the parser
+    so that both ``<head>`` metadata and body-embedded ``<audio>``/``<video>`` tags
+    within that window are captured.
+
+    An incremental codec decoder is used so that multibyte characters (e.g. UTF-8
+    sequences for non-ASCII titles) that happen to be split across two ``read()``
+    calls are assembled correctly rather than replaced with substitution characters.
+
+    Using the HTML parser to detect ``</head>`` (rather than a raw byte search)
+    means a literal ``</head>`` string inside ``<script>`` content does not trigger
+    a false positive: Python's ``HTMLParser`` enters CDATA mode for ``<script>``
+    and does not fire tag events for its raw content.
+
+    Raises ``MetadataExtractionError`` when ``max_bytes`` is exhausted before a
+    structural ``</head>`` is seen, preserving the hard size cap for pages whose
+    head section is not reachable within the limit.
+    """
+    try:
+        dec = codecs.getincrementaldecoder(charset)(errors="replace")
+    except LookupError:
+        dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+    parser = _MetadataHTMLParser()
+    total = 0
+
+    while total < max_bytes:
+        to_read = min(_METADATA_CHUNK_SIZE, max_bytes - total)
+        chunk = response.read(to_read)
+        if not chunk:
+            break
+        total += len(chunk)
+        parser.feed(dec.decode(chunk))
+    else:
+        # The while condition became False: max_bytes reached without EOF.
+        if not parser.head_closed:
+            raise MetadataExtractionError("Metadata response exceeded 1 MiB limit")
+
+    parser.feed(dec.decode(b"", final=True))
+    parser.close()
+    return parser
 
 
 def extract_metadata_from_html(html: str, base_url: str) -> ExtractedMetadata:
     parser = _MetadataHTMLParser()
     parser.feed(html)
     parser.close()
+    return _build_metadata_from_parser(parser, base_url=base_url)
 
+
+def _build_metadata_from_parser(parser: _MetadataHTMLParser, base_url: str) -> ExtractedMetadata:
     jsonld_metadata = _extract_jsonld_metadata(parser.jsonld_blobs, base_url=base_url)
     meta = parser.meta
     source_from_host = _humanize_host(base_url)

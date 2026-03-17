@@ -21,6 +21,7 @@ from django.http import (
     JsonResponse,
 )
 from django.shortcuts import get_object_or_404, redirect, render
+from django.templatetags.static import static
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -132,6 +133,7 @@ def _render_feed(
     feed_description: str,
     page_description: str,
     include_enclosures: bool = False,
+    feed_image_path: str | None = None,
 ) -> HttpResponse:
     if page == 1 and request.path != reverse(canonical_view_name):
         return redirect(canonical_view_name, permanent=True)
@@ -199,6 +201,9 @@ def _render_feed(
             "next_url": older_url,
             "last_build_date": page_items[0].feed_published_at if page_items else timezone.now(),
             "feed_items": feed_items,
+            "feed_image_url": (
+                request.build_absolute_uri(static(feed_image_path)) if feed_image_path else ""
+            ),
         },
         content_type="application/rss+xml; charset=utf-8",
     )
@@ -294,6 +299,7 @@ def podcast_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
         feed_description="Podcast-style archive feed for items with stable local audio enclosures.",
         page_description="Archive podcast feed page {page}.",
         include_enclosures=True,
+        feed_image_path="archive/podcast-cover.png",
     )
 
 

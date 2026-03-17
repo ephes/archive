@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3000" height="3000" viewBox="0 0 3000 3000" role="img" aria-label="Archive podcast cover art">
+  <rect width="3000" height="3000" fill="#007bff" />
+  <g fill="#ffffff">
+    <rect x="540" y="820" width="1920" height="360" rx="72" />
+    <rect x="690" y="1100" width="1620" height="1030" rx="96" />
+    <rect x="1350" y="1490" width="300" height="150" rx="40" />
+  </g>
+  <g fill="#007bff">
+    <rect x="660" y="940" width="1680" height="120" rx="36" />
+    <rect x="810" y="1220" width="1380" height="790" rx="48" />
+  </g>
+  <g fill="none" stroke="#ffffff" stroke-width="72" stroke-linecap="round">
+    <path d="M960 1210 L1500 1540 L2040 1210" />
+    <path d="M960 1960 L960 1370" />
+    <path d="M2040 1960 L2040 1370" />
+  </g>
+  <text
+    x="1500"
+    y="2490"
+    fill="#ffffff"
+    font-family="Arial, Helvetica, sans-serif"
+    font-size="320"
+    font-weight="700"
+    text-anchor="middle"
+    letter-spacing="18"
+  >ARCHIVE</text>
+</svg>

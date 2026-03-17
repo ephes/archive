@@ -8,6 +8,7 @@ from django.utils import timezone
 from archive.models import Item, ItemKind, PodcastFeedPolicy
 
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
+ITUNES_NS = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
 
 
 def parse_channel(content: bytes) -> ET.Element:
@@ -77,6 +78,8 @@ def test_rss_feed_includes_only_eligible_public_items_and_uses_detail_urls(clien
     assert items[1].findtext("description") == "Use these notes"
     assert items[2].findtext("description") == "Archived from Deutschlandfunk."
     assert items[3].findtext("description") == f"Archived link: {fallback_item.original_url}"
+    assert channel.find("image") is None
+    assert channel.find("itunes:image", ITUNES_NS) is None
 
     atom_links = channel.findall("atom:link", ATOM_NS)
     assert {(link.attrib["rel"], link.attrib["href"]) for link in atom_links} == {
@@ -238,6 +241,13 @@ def test_podcast_feed_includes_only_items_with_local_archived_audio_and_summary(
 
     assert response.status_code == 200
     channel = parse_channel(response.content)
+    image = channel.find("image")
+    assert image is not None
+    assert image.findtext("url") == "http://testserver/static/archive/podcast-cover.png"
+    assert image.findtext("title") == "Archive Podcast"
+    itunes_image = channel.find("itunes:image", ITUNES_NS)
+    assert itunes_image is not None
+    assert itunes_image.attrib == {"href": "http://testserver/static/archive/podcast-cover.png"}
     items = channel.findall("item")
     assert [item.findtext("title") for item in items] == ["Archived video", "Archived episode"]
     first_enclosure = items[0].find("enclosure")

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
 <channel>
     <title>{{ feed_title }}</title>
     <link>{{ site_url }}</link>
@@ -7,6 +7,14 @@
     <language>en-us</language>
     <lastBuildDate>{{ last_build_date|date:"r" }}</lastBuildDate>
     <ttl>60</ttl>
+    {% if feed_image_url %}
+    <image>
+        <url>{{ feed_image_url }}</url>
+        <title>{{ feed_title }}</title>
+        <link>{{ site_url }}</link>
+    </image>
+    <itunes:image href="{{ feed_image_url }}" />
+    {% endif %}
     <atom:link href="{{ self_url }}" rel="self" type="application/rss+xml" />
     {% if previous_url %}<atom:link href="{{ previous_url }}" rel="previous" type="application/rss+xml" />{% endif %}
     {% if next_url %}<atom:link href="{{ next_url }}" rel="next" type="application/rss+xml" />{% endif %}

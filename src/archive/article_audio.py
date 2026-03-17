@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -9,6 +11,9 @@ from urllib.request import Request, urlopen
 from django.conf import settings
 
 from archive.models import Item, ItemKind
+from archive.summaries import MAX_ARTICLE_AUDIO_SOURCE_CHARS, extract_summary_source_from_url
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_AUDIO_FORMAT = "mp3"
 DEFAULT_AUDIO_CONTENT_TYPE = "audio/mpeg"
@@ -41,19 +46,38 @@ class DownloadedArticleAudio:
 
 
 def can_generate_article_audio(item: Item) -> bool:
+    """Return whether article audio has local fallback text ready.
+
+    This gate intentionally checks only stored summary/notes fields. Extracted
+    source text is fetched later at submission time on a best-effort basis.
+    """
+
     return item.kind == ItemKind.ARTICLE and bool(build_article_audio_script(item))
 
 
-def build_article_audio_script(item: Item) -> str:
+def build_article_audio_script(
+    item: Item,
+    source_text: str = "",
+    *,
+    max_chars: int | None = None,
+) -> str:
     if item.kind != ItemKind.ARTICLE:
         return ""
 
-    body = item.long_summary.strip() or item.short_summary.strip() or item.notes.strip()
+    body = (
+        source_text.strip()
+        or item.long_summary.strip()
+        or item.short_summary.strip()
+        or item.notes.strip()
+    )
     if not body:
         return ""
 
     parts = [part for part in (item.title.strip(), body) if part]
-    return "\n\n".join(parts).strip()
+    script = "\n\n".join(parts).strip()
+    if max_chars is not None:
+        script = _truncate_script(script, max_chars=max_chars)
+    return script
 
 
 def generate_item_article_audio(item: Item, timeout: int = 30) -> ArticleAudioJobUpdate:
@@ -61,12 +85,21 @@ def generate_item_article_audio(item: Item, timeout: int = 30) -> ArticleAudioJo
     if not api_key:
         raise ArticleAudioGenerationError("Article audio generation is not configured")
 
-    script = build_article_audio_script(item)
-    if not script:
-        raise ArticleAudioGenerationError("Item does not have article-audio source text yet")
-
     if item.article_audio_job_id.strip():
         return _poll_synthesis_job(job_id=item.article_audio_job_id.strip(), timeout=timeout)
+
+    extracted_source_text = _best_effort_article_audio_source_text(item=item, timeout=timeout)
+    script_max_chars = settings.ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS
+    if script_max_chars <= 0:
+        raise ArticleAudioGenerationError("Article audio script max chars must be positive")
+
+    script = build_article_audio_script(
+        item,
+        source_text=extracted_source_text,
+        max_chars=script_max_chars,
+    )
+    if not script:
+        raise ArticleAudioGenerationError("Item does not have article-audio source text yet")
 
     return _submit_synthesis_job(item=item, text=script, timeout=timeout)
 
@@ -110,6 +143,37 @@ def download_generated_article_audio(item: Item, timeout: int = 30) -> Downloade
     return DownloadedArticleAudio(content_type=content_type, payload=payload)
 
 
+def _truncate_script(value: str, *, max_chars: int) -> str:
+    normalized = value.strip()
+    if len(normalized) <= max_chars:
+        return normalized
+
+    truncated = normalized[:max_chars].rstrip()
+    whitespace_positions = [truncated.rfind(char) for char in (" ", "\n", "\t")]
+    last_whitespace = max(whitespace_positions)
+    if last_whitespace > 0:
+        return truncated[:last_whitespace].rstrip()
+    return truncated
+
+
+def _task_ref_for_script(item: Item, text: str) -> str:
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return f"archive-item-{item.pk}-article-audio-v2-{digest}"
+
+
+def _best_effort_article_audio_source_text(item: Item, timeout: int) -> str:
+    try:
+        source = extract_summary_source_from_url(
+            item.original_url,
+            timeout=timeout,
+            max_chars=MAX_ARTICLE_AUDIO_SOURCE_CHARS,
+        )
+    except Exception as exc:
+        logger.warning("Article audio source extraction failed for item %s: %s", item.pk, exc)
+        return ""
+    return source.extracted_text.strip()
+
+
 def _submit_synthesis_job(item: Item, text: str, timeout: int) -> ArticleAudioJobUpdate:
     request_body = json.dumps(
         {
@@ -126,7 +190,7 @@ def _submit_synthesis_job(item: Item, text: str, timeout: int) -> ArticleAudioJo
             },
             "output": {"formats": [DEFAULT_AUDIO_FORMAT]},
             "context": {"producer": "archive", "item_id": item.pk},
-            "task_ref": f"archive-item-{item.pk}-article-audio-v1",
+            "task_ref": _task_ref_for_script(item=item, text=text),
         }
     ).encode("utf-8")
     request = Request(

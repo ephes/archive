@@ -153,6 +153,7 @@ Important values:
 - `ARCHIVE_ARTICLE_AUDIO_VOICE` defaults to empty and lets Voxhelm choose its default voice
 - `ARCHIVE_ARTICLE_AUDIO_LANGUAGE` defaults to empty
 - `ARCHIVE_ARTICLE_AUDIO_POLL_SECONDS` defaults to `30`
+- `ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS` defaults to `5000` (matching the currently observed Voxhelm `synthesize` input limit)
 - `ARCHIVE_ARTICLE_AUDIO_MAX_BYTES` defaults to `52428800` (50 MiB)
 - `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` defaults to `262144000` (250 MiB)
 - `ARCHIVE_MEDIA_EXTRACTION_FFMPEG_BIN` defaults to `ffmpeg`
@@ -191,10 +192,15 @@ direct remote media URLs within the sync API size limit. Oversized archived loca
 Voxhelm's batch upload path (`POST /v1/uploads` plus `POST /v1/jobs` with `input.kind=upload`) instead of
 trying to chunk/transcode inside Archive. Failed summary jobs retry automatically with bounded backoff
 (5 minutes, 30 minutes, 2 hours) before remaining in a failed state for operator review. Article items can
-also submit a Voxhelm batch `synthesize` job once a summary exists; Archive stores the private artifact
-reference and exposes the finished audio through a public item-scoped proxy URL on the detail page. Podcast
-episodes with a direct remote audio source are also archived asynchronously into the configured archive-media
-storage backend and then served through a stable item-scoped Archive URL for playback and podcast enclosures.
+also submit a Voxhelm batch `synthesize` job once a summary exists; Archive prefers extracted article body
+text as the TTS input when it can fetch it and falls back to stored summary/notes text otherwise. That fetch
+currently reuses the summary-source extractor, so it still inherits the 1 MiB raw source download cap and
+falls back to stored summary/notes text for oversized, blocked, or otherwise unreadable pages. The final
+submitted script is capped by `ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS` before submission. Archive stores the
+private artifact reference and exposes the finished audio through a public item-scoped proxy URL on the
+detail page. Podcast episodes with a direct remote audio source are also archived asynchronously into the
+configured archive-media storage backend and then served through a stable item-scoped Archive URL for
+playback and podcast enclosures.
 Video items with a direct downloadable media URL (`.mp4`, `.m4v`, `.mov`, or `.webm`) are archived into the
 same storage backend, then processed with `ffmpeg` to produce a stable local MP3 enclosure under
 `/items/<id>/audio/`. YouTube page URLs (`youtube.com/watch`, `youtube.com/shorts`, `youtube.com/live`,
@@ -266,7 +272,9 @@ Operator workflow in Django admin:
 - use `Reprocess selected items` to re-queue one or more items for a fresh enrichment pass
 
 The reprocess action is intentionally per-item or small-batch in this slice. It does not trigger any implicit
-bulk historical replay.
+bulk historical replay. It also does not currently clear an existing generated article-audio artifact or job
+reference on its own, so a true article-audio regeneration still requires clearing the stored article-audio
+state first and then reprocessing the item.
 
 Historical replay workflow:
 

@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 MAX_SUMMARY_SOURCE_BYTES = 1024 * 1024
 MAX_SUMMARY_INPUT_CHARS = 12_000
+MAX_ARTICLE_AUDIO_SOURCE_CHARS = 100_000
 MAX_TRANSCRIPT_INPUT_CHARS = 8_000
 MAX_SOURCE_WITH_TRANSCRIPT_INPUT_CHARS = 4_000
 
@@ -121,7 +122,12 @@ def _best_effort_summary_source(item: Item, timeout: int) -> SummarySource:
         return SummarySource()
 
 
-def extract_summary_source_from_url(url: str, timeout: int = 60) -> SummarySource:
+def extract_summary_source_from_url(
+    url: str,
+    timeout: int = 60,
+    *,
+    max_chars: int = MAX_SUMMARY_INPUT_CHARS,
+) -> SummarySource:
     request = Request(url, headers=REQUEST_HEADERS)
     try:
         with urlopen(request, timeout=timeout) as response:
@@ -140,17 +146,21 @@ def extract_summary_source_from_url(url: str, timeout: int = 60) -> SummarySourc
 
     text = payload.decode(charset, errors="replace")
     if content_type.startswith("text/plain"):
-        return SummarySource(extracted_text=_truncate_text(text))
+        return SummarySource(extracted_text=_truncate_text(text, max_chars=max_chars))
     if "html" in content_type or "xml" in content_type:
-        return extract_summary_source_from_html(text)
+        return extract_summary_source_from_html(text, max_chars=max_chars)
     return SummarySource()
 
 
-def extract_summary_source_from_html(html: str) -> SummarySource:
+def extract_summary_source_from_html(
+    html: str,
+    *,
+    max_chars: int = MAX_SUMMARY_INPUT_CHARS,
+) -> SummarySource:
     parser = _SummaryHTMLParser()
     parser.feed(html)
     parser.close()
-    combined = _truncate_text("\n\n".join(parser.text_chunks))
+    combined = _truncate_text("\n\n".join(parser.text_chunks), max_chars=max_chars)
     return SummarySource(
         meta_description=parser.meta_description,
         extracted_text=combined,

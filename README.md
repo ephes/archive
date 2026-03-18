@@ -16,7 +16,7 @@ Public endpoints:
 
 - `/` week-based public archive overview
 - `/search/?q=<terms>` public full-text search over public item content
-- `/items/<id>/` public item detail page
+- `/items/<id>/` public item detail page with improved transcript readability
 - `/feeds/rss.xml` canonical general RSS feed
 - `/feeds/rss/page/<n>.xml` older feed pages when more than 50 eligible items exist
 - `/feeds/podcast.xml` podcast-style feed for items with stable local audio enclosures

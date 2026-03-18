@@ -40,6 +40,7 @@ from archive.services import (
     to_week_page,
     week_bounds,
 )
+from archive.transcript_display import split_transcript_for_display
 
 url_validator = URLValidator()
 FEED_PAGE_SIZE = 50
@@ -327,7 +328,14 @@ def item_archived_audio(request: HttpRequest, pk: int) -> HttpResponse:
 @require_GET
 def item_detail(request: HttpRequest, pk: int) -> HttpResponse:
     item = get_object_or_404(Item, pk=pk, is_public=True)
-    return render(request, "archive/detail.html", {"item": item})
+    return render(
+        request,
+        "archive/detail.html",
+        {
+            "item": item,
+            "transcript_paragraphs": split_transcript_for_display(item.transcript),
+        },
+    )
 
 
 @require_GET

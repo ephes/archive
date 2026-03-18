@@ -34,10 +34,14 @@
         </section>
     {% endif %}
 
-    {% if item.transcript %}
-        <section class="content-block">
+    {% if transcript_paragraphs %}
+        <section class="content-block transcript-block">
             <h3>Transcript</h3>
-            <p>{{ item.transcript|linebreaksbr }}</p>
+            <div class="transcript-body">
+                {% for paragraph in transcript_paragraphs %}
+                    <p>{{ paragraph|linebreaksbr }}</p>
+                {% endfor %}
+            </div>
         </section>
     {% endif %}
 

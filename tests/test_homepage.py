@@ -1,4 +1,6 @@
+import html
 import io
+import re
 from datetime import timedelta
 
 import pytest
@@ -278,8 +280,84 @@ def test_detail_page_shows_audio_player(client) -> None:
     assert b"Open original" in response.content
     assert b"Short summary" in response.content
     assert b"Long summary for the item." in response.content
-    assert b"Transcript paragraph one." in response.content
     assert b"feature" in response.content
+
+    content = response.content.decode()
+    assert '<section class="content-block transcript-block">' in content
+    transcript_match = re.search(
+        r'<div class="transcript-body">\s*<p>(?P<first>.*?)</p>\s*<p>(?P<second>.*?)</p>\s*</div>',
+        content,
+        re.DOTALL,
+    )
+    assert transcript_match is not None
+    assert transcript_match.group("first") == "Transcript paragraph one."
+    assert transcript_match.group("second") == "Transcript paragraph two."
+
+
+@pytest.mark.django_db
+def test_detail_page_auto_paragraphs_transcript_without_mutating_stored_text(client) -> None:
+    transcript = (
+        "The first speaker opens with a long uninterrupted passage that keeps going without any "
+        "blank line markers in the stored transcript at all. The next sentence keeps the same "
+        "dense block format so the detail page needs a display-only fallback for readability. "
+        "A third sentence pushes the first display paragraph comfortably past the minimum size "
+        "threshold before the renderer starts a new one. The second speaker then responds with "
+        "another substantial section that should appear as its own paragraph on the public page. "
+        "Nothing about this request should rewrite the transcript field in the database because "
+        "search, editing, and stored semantics still belong to the original captured text."
+    )
+    item = Item.objects.create(
+        original_url="https://example.com/fallback-transcript",
+        title="Fallback transcript formatting",
+        transcript=transcript,
+        kind=ItemKind.PODCAST_EPISODE,
+    )
+
+    response = client.get(reverse("archive:item-detail", kwargs={"pk": item.pk}))
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    transcript_match = re.search(
+        r'<div class="transcript-body">(?P<body>.*?)</div>',
+        content,
+        re.DOTALL,
+    )
+    assert transcript_match is not None
+
+    paragraph_html = re.findall(r"<p>(.*?)</p>", transcript_match.group("body"), re.DOTALL)
+    assert len(paragraph_html) >= 2
+    rendered_text = " ".join(
+        html.unescape(re.sub(r"<br\s*/?>", "\n", paragraph)).replace("\n", " ").strip()
+        for paragraph in paragraph_html
+    )
+    assert rendered_text == " ".join(transcript.split())
+
+    item.refresh_from_db()
+    assert item.transcript == transcript
+
+
+@pytest.mark.django_db
+def test_detail_page_preserves_single_newline_transcript_breaks(client) -> None:
+    transcript = "Speaker one starts here.\nSpeaker two answers on the next line."
+    item = Item.objects.create(
+        original_url="https://example.com/line-break-transcript",
+        title="Line break transcript formatting",
+        transcript=transcript,
+        kind=ItemKind.PODCAST_EPISODE,
+    )
+
+    response = client.get(reverse("archive:item-detail", kwargs={"pk": item.pk}))
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    transcript_match = re.search(
+        r'<div class="transcript-body">(?P<body>.*?)</div>',
+        content,
+        re.DOTALL,
+    )
+    assert transcript_match is not None
+    paragraph_html = re.findall(r"<p>(.*?)</p>", transcript_match.group("body"), re.DOTALL)
+    assert paragraph_html == ["Speaker one starts here.<br>Speaker two answers on the next line."]
 
 
 @pytest.mark.django_db

@@ -183,6 +183,11 @@ def _build_summary_prompt(item: Item, source: SummarySource) -> str:
         "short_summary must be 1 or 2 sentences and under 240 characters.",
         "long_summary must be 2 to 4 sentences.",
         "tags must be a JSON array of 3 to 8 short lowercase tags.",
+        "Write summaries and tags in the same language as the transcript when present.",
+        (
+            "If there is no transcript, use the dominant language of the page description and "
+            "extracted source text. Do not translate non-English content into English."
+        ),
         "Avoid markdown, bullets, and filler.",
         "",
         f"Original URL: {item.original_url}",

@@ -7,7 +7,7 @@ Current shipped scope:
 - Milestone 1: authenticated capture, public website, admin/editor UI
 - Milestone 2: public RSS feed with fixed-size archive pagination and autodiscovery
 - Milestone 3: background URL metadata extraction for title/source/author/publication time/media URL
-- Milestone 4: background short summary, long summary, and tag generation with operator-editable values
+- Milestone 4: background short summary, long summary, and tag generation with operator-editable values, preserving the source/transcript language instead of translating to English
 - Milestone 5: background transcription for audio/video items with archived-local-media preference and transcript-aware summary/tag refresh
 - Milestone 6: background archival of eligible remote audio/video, including YouTube page URLs, stable local audio enclosure URLs, and a separate podcast-style RSS feed
 - Milestone 7 slice: public server-rendered SQLite FTS search over titles, summaries, notes, and transcripts

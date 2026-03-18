@@ -110,3 +110,5 @@ def test_build_summary_prompt_includes_transcript_context() -> None:
     assert "Transcript:" in prompt
     assert "First transcript paragraph." in prompt
     assert "Extracted source text:" in prompt
+    assert "same language as the transcript when present" in prompt
+    assert "Do not translate non-English content into English." in prompt

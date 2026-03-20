@@ -223,6 +223,10 @@ Operator note:
   hard size limit for accepted source media
 - `just manage rebuild_search_index` rebuilds the SQLite FTS table from `archive_item` if search drift needs
   operator repair after a restore or manual database intervention
+- deleting an `Item` now also deletes its archived `archive_media` objects after the DB transaction commits,
+  while still preserving any object key that is referenced by another item
+- `just manage cleanup_archive_media_orphans` reports unreferenced objects left behind in the configured
+  `archive_media` storage backend; add `--delete` to remove them after reviewing the dry-run output
 - Django admin now exposes the winning classification rule, stored classification evidence, a downstream-state
   normalization diagnostic, an operator-set podcast feed policy (`auto`, `include`, `exclude`), and a
   `Reprocess selected items` action that re-queues per-item enrichment without any bulk historical replay by

@@ -1,8 +1,27 @@
+from django.contrib.auth.forms import AuthenticationForm
 from django.forms import ModelForm, Textarea
 
 from archive.classification import CURRENT_CLASSIFICATION_ENGINE_VERSION
 from archive.media_archival import can_archive_audio
 from archive.models import EnrichmentStatus, Item, ItemKind
+
+
+class ArchiveAuthenticationForm(AuthenticationForm):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.fields["username"].widget.attrs.update(
+            {
+                "autocomplete": "username",
+                "autocapitalize": "none",
+                "autocorrect": "off",
+                "spellcheck": "false",
+            }
+        )
+        self.fields["password"].widget.attrs.update(
+            {
+                "autocomplete": "current-password",
+            }
+        )
 
 
 class ItemForm(ModelForm):

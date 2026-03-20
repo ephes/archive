@@ -31,7 +31,7 @@ from django.views.generic.edit import CreateView
 
 from archive.article_audio import ArticleAudioGenerationError, download_generated_article_audio
 from archive.classification import classify_item, podcast_feed_decision_for_item
-from archive.forms import ItemForm
+from archive.forms import ArchiveAuthenticationForm, ItemForm
 from archive.media_archival import MediaArchivalError, open_archived_audio
 from archive.models import Item
 from archive.services import (
@@ -49,6 +49,7 @@ SEARCH_TOKEN_RE = re.compile(r"\w+")
 
 
 class ArchiveLoginView(LoginView):
+    authentication_form = ArchiveAuthenticationForm
     template_name = "registration/login.html"
 
 

@@ -59,6 +59,25 @@ def test_homepage_exposes_feed_copy_controls(client, home_url: str) -> None:
     assert b"Copy podcast URL" in response.content
 
 
+@pytest.mark.django_db
+def test_login_page_uses_browser_friendly_autofill_markup(client) -> None:
+    login_url = reverse("archive:login")
+    next_url = reverse("archive:item-new")
+    response = client.get(login_url, {"next": next_url})
+
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert f'form method="post" action="{login_url}" autocomplete="on"' in content
+    assert 'name="username"' in content
+    assert 'autocomplete="username"' in content
+    assert 'autocorrect="off"' in content
+    assert 'spellcheck="false"' in content
+    assert 'name="password"' in content
+    assert 'autocomplete="current-password"' in content
+    assert f'type="hidden" name="next" value="{next_url}"' in content
+
+
 def test_robots_txt_disallows_search_indexing(client) -> None:
     response = client.get(reverse("archive:robots-txt"))
 

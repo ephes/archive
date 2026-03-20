@@ -6,9 +6,24 @@
 <section class="form-card">
     <p class="kicker">Editor access</p>
     <h2>Sign in</h2>
-    <form method="post">
+    {% if form.non_field_errors %}
+        {{ form.non_field_errors }}
+    {% endif %}
+    <form method="post" action="{% url 'archive:login' %}" autocomplete="on">
         {% csrf_token %}
-        {{ form.as_p }}
+        <p>
+            <label for="{{ form.username.id_for_label }}">Username:</label>
+            {{ form.username }}
+            {{ form.username.errors }}
+        </p>
+        <p>
+            <label for="{{ form.password.id_for_label }}">Password:</label>
+            {{ form.password }}
+            {{ form.password.errors }}
+        </p>
+        {% if next %}
+            <input type="hidden" name="next" value="{{ next }}">
+        {% endif %}
         <button type="submit">Log in</button>
     </form>
 </section>

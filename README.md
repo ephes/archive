@@ -184,6 +184,9 @@ Optional worker flags for the Milestone 6 slice:
 
 - `--media-archive-timeout` controls the per-item remote media download timeout and is also used for
   video-to-audio extraction work
+- `--stale-processing-after` controls how old an in-flight `processing` lease must be before the worker
+  re-queues it during normal runtime and also acts as the worker's hard cap for a single in-flight item;
+  by default Archive uses the larger of 1 hour or 2x the combined per-item stage timeouts
 
 Summary generation is asynchronous and does not block capture or immediate publication. Audio/video
 transcription is also asynchronous and writes transcript text back onto the item when a transcribable media
@@ -210,6 +213,11 @@ transcription is still deferred because Voxhelm's staged batch input currently s
 media archival jobs now
 retry with the same bounded backoff pattern as summary generation (5 minutes, 30 minutes, 2 hours) before
 remaining failed for operator review.
+The worker also persists when an item first entered `processing` and now re-queues stale `processing`
+states during normal loop iterations instead of only recovering them on worker startup. The same stale
+window is enforced against the currently running item, so a transcript or summary path that stops making
+progress no longer strands the row in `processing` indefinitely. Startup recovery still clears any leftover
+`processing` rows immediately after a worker restart.
 
 Operator note:
 
@@ -221,6 +229,8 @@ Operator note:
 - the worker's `--media-archive-timeout` still guards network stalls and other blocking work, but it is
   not a strict wall-clock cap on a steady `yt-dlp` download; `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` remains the
   hard size limit for accepted source media
+- if healthy batch transcription or archival runs legitimately exceed the worker's stale-processing window,
+  raise `--stale-processing-after` so runtime recovery does not reclaim them prematurely
 - `just manage rebuild_search_index` rebuilds the SQLite FTS table from `archive_item` if search drift needs
   operator repair after a restore or manual database intervention
 - deleting an `Item` now also deletes its archived `archive_media` objects after the DB transaction commits,

@@ -32,6 +32,7 @@ from archive.services import (
     enrich_pending_items,
     prepare_item_for_enrichment,
     recover_processing_items,
+    recover_stale_processing_items,
     request_item_reprocess,
 )
 from archive.summaries import GeneratedSummary
@@ -1123,6 +1124,143 @@ def test_prepare_item_for_enrichment_marks_fully_populated_items_complete() -> N
 
 
 @pytest.mark.django_db
+def test_run_metadata_worker_recovers_stale_processing_items_during_loop(monkeypatch) -> None:
+    startup_calls: list[bool] = []
+    runtime_calls: list[datetime] = []
+
+    def fake_recover_processing_items() -> int:
+        startup_calls.append(True)
+        return 0
+
+    def fake_recover_stale_processing_items(*, stale_before: datetime) -> int:
+        runtime_calls.append(stale_before)
+        return 1
+
+    monkeypatch.setattr(
+        "archive.management.commands.run_metadata_worker.signal.signal",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "archive.management.commands.run_metadata_worker.recover_processing_items",
+        fake_recover_processing_items,
+    )
+    monkeypatch.setattr(
+        "archive.management.commands.run_metadata_worker.recover_stale_processing_items",
+        fake_recover_stale_processing_items,
+    )
+    monkeypatch.setattr(
+        "archive.management.commands.run_metadata_worker.claim_pending_item",
+        lambda *, exclude_ids=None: None,
+    )
+
+    stdout = StringIO()
+    stderr = StringIO()
+    call_command(
+        "run_metadata_worker",
+        "--once",
+        "--stale-processing-after",
+        "120",
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert startup_calls == [True]
+    assert len(runtime_calls) == 1
+    assert "Recovered 1 stale processing item(s) during worker runtime" in stderr.getvalue()
+    assert "Processed 0 item(s)." in stdout.getvalue()
+
+
+@pytest.mark.django_db
+def test_run_metadata_worker_requeues_current_item_when_processing_stalls(monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/stalled",
+        enrichment_status=EnrichmentStatus.PROCESSING,
+    )
+    claimed_items = [item, None]
+    recovered_ids: list[int] = []
+
+    def fake_recover_processing_item(item_id: int) -> int:
+        recovered_ids.append(item_id)
+        return 1
+
+    monkeypatch.setattr(
+        "archive.management.commands.run_metadata_worker.signal.signal",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "archive.management.commands.run_metadata_worker.recover_processing_items",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "archive.management.commands.run_metadata_worker.recover_stale_processing_items",
+        lambda *, stale_before: 0,
+    )
+    monkeypatch.setattr(
+        "archive.management.commands.run_metadata_worker.claim_pending_item",
+        lambda *, exclude_ids=None: claimed_items.pop(0),
+    )
+    monkeypatch.setattr(
+        "archive.management.commands.run_metadata_worker.enrich_item_metadata",
+        lambda **kwargs: (_ for _ in ()).throw(
+            importlib.import_module(
+                "archive.management.commands.run_metadata_worker"
+            ).ItemProcessingStalled("stalled")
+        ),
+    )
+    monkeypatch.setattr(
+        "archive.management.commands.run_metadata_worker.recover_processing_item",
+        fake_recover_processing_item,
+    )
+
+    stdout = StringIO()
+    stderr = StringIO()
+    call_command(
+        "run_metadata_worker",
+        "--once",
+        "--stale-processing-after",
+        "120",
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert recovered_ids == [item.pk]
+    assert f"Processing item {item.pk}: https://example.com/stalled" in stdout.getvalue()
+    assert "re-queued its in-flight work" in stderr.getvalue()
+
+
+@pytest.mark.django_db
+def test_item_processing_timeout_escapes_stage_level_exception_handlers(monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/stalled-summary",
+        title="Summary timeout",
+        source="Example",
+        author="Author",
+        original_published_at=timezone.now(),
+        media_url="https://cdn.example.com/video.mp4",
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.PROCESSING,
+        transcript_status=EnrichmentStatus.COMPLETE,
+    )
+    stalled = importlib.import_module(
+        "archive.management.commands.run_metadata_worker"
+    ).ItemProcessingStalled("stalled")
+
+    monkeypatch.setattr(
+        "archive.services.generate_item_summaries",
+        lambda item, timeout: (_ for _ in ()).throw(stalled),
+    )
+
+    with pytest.raises(type(stalled)):
+        enrich_item_metadata(item)
+
+    item.refresh_from_db()
+    assert item.summary_status == EnrichmentStatus.PROCESSING
+    assert item.summary_error == ""
+    assert item.summary_retry_count == 0
+    assert item.summary_retry_at is None
+
+
+@pytest.mark.django_db
 def test_recover_processing_items_requeues_stale_items() -> None:
     stuck = Item.objects.create(
         original_url="https://example.com/stuck",
@@ -1160,6 +1298,7 @@ def test_recover_processing_items_requeues_summary_only_processing_items() -> No
     stuck.refresh_from_db()
     assert stuck.enrichment_status == EnrichmentStatus.COMPLETE
     assert stuck.summary_status == EnrichmentStatus.PENDING
+    assert stuck.processing_started_at is None
     assert stuck.summary_retry_at is None
 
 
@@ -1175,6 +1314,7 @@ def test_recover_processing_items_requeues_transcript_processing_items() -> None
 
     stuck.refresh_from_db()
     assert stuck.transcript_status == EnrichmentStatus.PENDING
+    assert stuck.processing_started_at is None
 
 
 @pytest.mark.django_db
@@ -1190,6 +1330,7 @@ def test_claim_pending_item_includes_archived_media_only_transcripts() -> None:
     assert claimed is not None
     assert claimed.pk == item.pk
     item.refresh_from_db()
+    assert item.processing_started_at is not None
     assert item.transcript_status == EnrichmentStatus.PROCESSING
 
 
@@ -1207,7 +1348,42 @@ def test_recover_processing_items_requeues_media_archive_processing_items() -> N
 
     stuck.refresh_from_db()
     assert stuck.media_archive_status == EnrichmentStatus.PENDING
+    assert stuck.processing_started_at is None
     assert stuck.media_archive_retry_at is None
+
+
+@pytest.mark.django_db
+def test_recover_stale_processing_items_only_requeues_items_older_than_threshold() -> None:
+    now = timezone.now()
+    stale = Item.objects.create(
+        original_url="https://example.com/stale-summary",
+        title="Stale summary",
+        source="Example",
+        author="Author",
+        original_published_at=now,
+        media_url="https://cdn.example.com/video.mp4",
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.PROCESSING,
+        summary_retry_count=1,
+        summary_retry_at=now + timedelta(minutes=5),
+        processing_started_at=now - timedelta(hours=3),
+    )
+    fresh = Item.objects.create(
+        original_url="https://example.com/fresh-transcript.mp3",
+        kind=ItemKind.PODCAST_EPISODE,
+        transcript_status=EnrichmentStatus.PROCESSING,
+        processing_started_at=now - timedelta(minutes=5),
+    )
+
+    assert recover_stale_processing_items(stale_before=now - timedelta(hours=1)) == 1
+
+    stale.refresh_from_db()
+    fresh.refresh_from_db()
+    assert stale.summary_status == EnrichmentStatus.PENDING
+    assert stale.summary_retry_at is None
+    assert stale.processing_started_at is None
+    assert fresh.transcript_status == EnrichmentStatus.PROCESSING
+    assert fresh.processing_started_at is not None
 
 
 @pytest.mark.django_db

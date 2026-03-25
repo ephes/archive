@@ -437,13 +437,31 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
 
 
 def recover_processing_items() -> int:
-    return Item.objects.filter(
+    return _recover_processing_items(_processing_item_query())
+
+
+def recover_processing_item(item_id: int) -> int:
+    return _recover_processing_items(Q(pk=item_id) & _processing_item_query())
+
+
+def recover_stale_processing_items(*, stale_before: datetime) -> int:
+    return _recover_processing_items(
+        _processing_item_query() & Q(processing_started_at__lte=stale_before)
+    )
+
+
+def _processing_item_query() -> Q:
+    return (
         Q(enrichment_status=EnrichmentStatus.PROCESSING)
         | Q(summary_status=EnrichmentStatus.PROCESSING)
         | Q(transcript_status=EnrichmentStatus.PROCESSING)
         | Q(media_archive_status=EnrichmentStatus.PROCESSING)
         | Q(article_audio_status=EnrichmentStatus.PROCESSING)
-    ).update(
+    )
+
+
+def _recover_processing_items(query: Q) -> int:
+    return Item.objects.filter(query).update(
         enrichment_status=Case(
             When(
                 enrichment_status=EnrichmentStatus.PROCESSING,
@@ -491,24 +509,23 @@ def recover_processing_items() -> int:
             When(article_audio_status=EnrichmentStatus.PROCESSING, then=Value(None)),
             default=F("article_audio_poll_at"),
         ),
+        processing_started_at=Value(None),
     )
 
 
-def claim_pending_item() -> Item | None:
+def claim_pending_item(*, exclude_ids: set[int] | None = None) -> Item | None:
     now = timezone.now()
     with transaction.atomic():
-        item = (
-            Item.objects.select_for_update()
-            .filter(
-                Q(enrichment_status=EnrichmentStatus.PENDING)
-                | _claimable_media_archive_query(now)
-                | _claimable_transcript_query()
-                | _claimable_summary_query(now)
-                | _claimable_article_audio_query(now)
-            )
-            .order_by("shared_at", "id")
-            .first()
+        queryset = Item.objects.select_for_update().filter(
+            Q(enrichment_status=EnrichmentStatus.PENDING)
+            | _claimable_media_archive_query(now)
+            | _claimable_transcript_query()
+            | _claimable_summary_query(now)
+            | _claimable_article_audio_query(now)
         )
+        if exclude_ids:
+            queryset = queryset.exclude(pk__in=exclude_ids)
+        item = queryset.order_by("shared_at", "id").first()
         if item is None:
             return None
 

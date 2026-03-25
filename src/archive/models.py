@@ -85,6 +85,7 @@ class Item(models.Model):
     transcript_error = models.TextField(blank=True)
     media_archive_error = models.TextField(blank=True)
     article_audio_error = models.TextField(blank=True)
+    processing_started_at = models.DateTimeField(blank=True, null=True, db_index=True)
     summary_retry_count = models.PositiveSmallIntegerField(default=0)
     summary_retry_at = models.DateTimeField(blank=True, null=True)
     media_archive_retry_count = models.PositiveSmallIntegerField(default=0)
@@ -203,4 +204,30 @@ class Item(models.Model):
     def save(self, *args, **kwargs) -> None:
         if self.is_public and self.published_at is None:
             self.published_at = self.shared_at
+
+        update_fields = kwargs.get("update_fields")
+        target_processing_started_at = self._processing_started_at_value()
+        if self.processing_started_at != target_processing_started_at:
+            self.processing_started_at = target_processing_started_at
+            if update_fields is not None:
+                kwargs["update_fields"] = sorted(
+                    {*(update_fields or ()), "processing_started_at"}
+                )
         super().save(*args, **kwargs)
+
+    def _processing_started_at_value(self):
+        if self._has_processing_status():
+            return self.processing_started_at or timezone.now()
+        return None
+
+    def _has_processing_status(self) -> bool:
+        return any(
+            status == EnrichmentStatus.PROCESSING
+            for status in (
+                self.enrichment_status,
+                self.summary_status,
+                self.transcript_status,
+                self.media_archive_status,
+                self.article_audio_status,
+            )
+        )

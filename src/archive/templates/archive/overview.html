@@ -25,6 +25,7 @@
                 {% elif item.notes %}
                     <p>{{ item.notes|linebreaksbr }}</p>
                 {% endif %}
+                <p class="meta"><a href="{{ item.original_url }}" rel="noopener noreferrer">Open original</a></p>
             </article>
         {% endfor %}
     </section>

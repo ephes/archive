@@ -30,6 +30,8 @@ def test_homepage_renders_public_items(client, home_url: str) -> None:
     assert response.status_code == 200
     assert b"Example article" in response.content
     assert b"Short note" in response.content
+    assert b'href="https://example.com/article"' in response.content
+    assert b"Open original" in response.content
 
 
 @pytest.mark.django_db
@@ -302,6 +304,7 @@ def test_detail_page_shows_audio_player(client) -> None:
     assert b"feature" in response.content
 
     content = response.content.decode()
+    assert content.rindex('href="https://example.com/episode"') < content.index("Short summary")
     assert '<section class="content-block transcript-block">' in content
     transcript_match = re.search(
         r'<div class="transcript-body">\s*<p>(?P<first>.*?)</p>\s*<p>(?P<second>.*?)</p>\s*</div>',

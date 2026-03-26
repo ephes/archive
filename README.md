@@ -15,8 +15,9 @@ Current shipped scope:
 Public endpoints:
 
 - `/` week-based public archive overview
+- The week overview cards link both to the Archive detail page and directly to the original saved URL
 - `/search/?q=<terms>` public full-text search over public item content
-- `/items/<id>/` public item detail page with improved transcript readability
+- `/items/<id>/` public item detail page with improved transcript readability and the original link near the top of the page
 - `/feeds/rss.xml` canonical general RSS feed
 - `/feeds/rss/page/<n>.xml` older feed pages when more than 50 eligible items exist
 - `/feeds/podcast.xml` podcast-style feed for items with stable local audio enclosures

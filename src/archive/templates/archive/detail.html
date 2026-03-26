@@ -16,6 +16,8 @@
         <p class="meta">Originally published {{ item.original_published_at|date:"j M Y, H:i" }}</p>
     {% endif %}
 
+    <p class="meta"><a href="{{ item.original_url }}" rel="noopener noreferrer">Open original</a></p>
+
     {% if item.notes %}
         <p>{{ item.notes|linebreaksbr }}</p>
     {% endif %}
@@ -68,7 +70,5 @@
     {% if item.media_url and item.media_url != item.audio_url %}
         <p><a href="{{ item.media_url }}" rel="noopener noreferrer">Open media</a></p>
     {% endif %}
-
-    <p><a href="{{ item.original_url }}" rel="noopener noreferrer">Open original</a></p>
 </article>
 {% endblock %}

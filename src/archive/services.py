@@ -20,6 +20,11 @@ from archive.classification import (
     infer_kind as classify_infer_kind,
 )
 from archive.media_archival import archive_item_audio, can_archive_audio
+from archive.media_storage import (
+    archive_media_path_is_referenced,
+    delete_archive_media_paths,
+    item_archive_media_paths,
+)
 from archive.metadata import extract_metadata_from_url
 from archive.models import EnrichmentStatus, Item, ItemKind
 from archive.summaries import generate_item_summaries
@@ -37,6 +42,47 @@ TRANSCRIBABLE_ITEM_KINDS = (ItemKind.PODCAST_EPISODE, ItemKind.VIDEO)
 
 def infer_kind(url: str, explicit_kind: str = "", audio_url: str = "") -> str:
     return classify_infer_kind(url=url, explicit_kind=explicit_kind, audio_url=audio_url)
+
+
+def _clear_stale_archive_media(
+    *,
+    item: Item,
+    update_fields: list[str] | None = None,
+) -> None:
+    stale_paths = item_archive_media_paths(item)
+    if not stale_paths:
+        return
+
+    item.archived_audio_path = ""
+    item.archived_audio_content_type = ""
+    item.archived_audio_size_bytes = 0
+    item.archived_video_path = ""
+    item.archived_video_content_type = ""
+    item.archived_video_size_bytes = 0
+
+    if update_fields is not None:
+        update_fields.extend(
+            [
+                "archived_audio_path",
+                "archived_audio_content_type",
+                "archived_audio_size_bytes",
+                "archived_video_path",
+                "archived_video_content_type",
+                "archived_video_size_bytes",
+            ]
+        )
+
+    using = item._state.db or "default"
+
+    def delete_unreferenced_paths() -> None:
+        paths_to_delete = [
+            path
+            for path in stale_paths
+            if not archive_media_path_is_referenced(path, using=using)
+        ]
+        delete_archive_media_paths(paths_to_delete)
+
+    transaction.on_commit(delete_unreferenced_paths, using=using)
 
 
 @dataclass(frozen=True)
@@ -877,6 +923,10 @@ def _next_article_audio_poll_at() -> datetime:
 
 def request_item_reprocess(item: Item) -> Item:
     update_fields: list[str] = []
+    # Reprocess first recomputes the cheap classification/media-resolution view from
+    # currently stored fields so stale archived source media can be dropped before a
+    # fresh metadata fetch runs. Items that depend on new metadata hints may
+    # therefore pass through a transient generic kind until enrichment completes.
     decision = classify_item(
         original_url=item.original_url,
         current_kind=item.kind,
@@ -886,6 +936,8 @@ def request_item_reprocess(item: Item) -> Item:
         existing_evidence=item.classification_evidence,
     )
     set_item_classification(item=item, decision=decision, update_fields=update_fields)
+    if (item.has_archived_audio or item.has_archived_video) and not _supports_media_archive(item):
+        _clear_stale_archive_media(item=item, update_fields=update_fields)
     prepare_item_for_enrichment(item)
     update_fields.extend(
         [

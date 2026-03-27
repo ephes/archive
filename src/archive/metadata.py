@@ -53,6 +53,7 @@ class _MetadataHTMLParser(HTMLParser):
         self.meta: dict[str, str] = {}
         self.jsonld_blobs: list[str] = []
         self.media_candidates: list[ExtractedMediaCandidate] = []
+        self.saw_article_tag: bool = False
         self._in_title = False
         self._in_jsonld = False
         self._jsonld_parts: list[str] = []
@@ -78,6 +79,10 @@ class _MetadataHTMLParser(HTMLParser):
                 key = (attr_map.get(key_name) or "").strip().lower()
                 if key and key not in self.meta:
                     self.meta[key] = content
+            return
+
+        if tag == "article":
+            self.saw_article_tag = True
             return
 
         if tag in {"audio", "video"}:
@@ -289,6 +294,7 @@ def _build_metadata_from_parser(parser: _MetadataHTMLParser, base_url: str) -> E
     kind_hint = _first_nonempty(
         _kind_hint_from_og_type(meta.get("og:type", "")),
         jsonld_metadata.kind_hint,
+        "article" if parser.saw_article_tag else "",
     )
     media_candidates = tuple(
         ExtractedMediaCandidate(

@@ -14,9 +14,10 @@ from urllib.request import Request, urlopen
 
 from django.conf import settings
 
+from archive.classification import resolve_media_sources_for_item
 from archive.media_archival import MediaArchivalError, open_archived_audio, open_archived_video
 from archive.metadata import REQUEST_HEADERS
-from archive.models import Item, ItemKind
+from archive.models import Item
 
 MAX_TRANSCRIPTION_BYTES = 25 * 1024 * 1024
 SUPPORTED_SUFFIXES = {
@@ -148,19 +149,10 @@ def _select_transcription_source(item: Item) -> TranscriptionSource | None:
 
 
 def _select_remote_transcription_source_url(item: Item) -> str | None:
-    candidates = [item.audio_url.strip(), item.media_url.strip(), item.original_url.strip()]
-    seen: set[str] = set()
-    for candidate in candidates:
-        if not candidate or candidate in seen:
-            continue
-        seen.add(candidate)
-        if _looks_like_media_url(candidate):
+    audio_source_url, video_source_url = resolve_media_sources_for_item(item)
+    for candidate in (audio_source_url, video_source_url):
+        if candidate:
             return candidate
-
-    if item.kind in {ItemKind.PODCAST_EPISODE, ItemKind.VIDEO}:
-        for candidate in candidates:
-            if candidate:
-                return candidate
     return None
 
 

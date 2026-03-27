@@ -255,13 +255,20 @@ Current first-slice behavior:
 - supported YouTube page URLs classify as `video`
 - generic metadata extraction still parses OG, Twitter, JSON-LD, and HTML title fields
 - generic page-media extraction now also parses HTML `<audio>` / `<source>` and `<video>` / `<source>`
+- generic pages with a real `<article>` container now get an `article` kind hint even when upstream OG tags
+  only advertise the page as a generic `website`
 - the winning semantic classification is still stored in `Item.kind`
 - Archive also stores `classification_rule` and `classification_evidence` for admin/debugging
 
 Media-resolution policy in this slice:
 
 - direct audio candidates are preferred for archival when available
-- otherwise supported video candidates are used and Archive extracts a stable local MP3 enclosure
+- supported page-video / direct-video candidates are only treated as semantic `video` signals when the URL
+  itself is video-shaped (`media_url`, `original_url`, YouTube page adapter, etc.); an incidental embedded
+  HTML `<video>` on an article page is not enough on its own
+- otherwise supported video candidates are used and Archive extracts a stable local MP3 enclosure, but weak
+  embedded HTML `<video>` candidates are ignored for non-`video` items so article-audio can still win on
+  long-form written pages
 - Castro episode pages rely on generic HTML audio discovery unless a future Castro-specific extractor becomes
   necessary
 
@@ -289,7 +296,11 @@ Operator workflow in Django admin:
 The reprocess action is intentionally per-item or small-batch in this slice. It does not trigger any implicit
 bulk historical replay. It also does not currently clear an existing generated article-audio artifact or job
 reference on its own, so a true article-audio regeneration still requires clearing the stored article-audio
-state first and then reprocessing the item.
+state first and then reprocessing the item. It now does clear stale archived source media when the current
+classification/media-resolution policy no longer supports that stored enclosure, so a previously misclassified
+embedded-video page can move back onto the article-audio path without manual database edits. Because this
+first pass uses only currently stored fields, an item that depends on fresh metadata hints can briefly fall
+back to a generic `link` classification until the next metadata enrichment pass completes.
 
 Historical replay workflow:
 
@@ -301,6 +312,9 @@ Historical replay workflow:
 - add `--normalize-downstream` to preview or explicitly apply cheap downstream status cleanup after replay;
   this clears stale unsupported/materialized transcript, media-archive, and article-audio state without
   queuing new worker work
+- after the embedded-HTML-video policy change in this slice, start with a dry-run such as
+  `just manage reclassify_items --rule media_candidate_video` to find older items that may have been promoted
+  to `video` only because a generic page exposed a weak `html_video` candidate
 - replay apply mode does not queue metadata, media archival, transcript, summary, or article-audio work;
   explicit reprocessing remains a separate operator step
 - if an item becomes newly eligible for archival/transcript/article-audio after replay, use explicit

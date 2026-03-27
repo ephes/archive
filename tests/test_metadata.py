@@ -14,7 +14,12 @@ from django.urls import reverse
 from django.utils import timezone
 
 from archive.article_audio import ArticleAudioJobUpdate
-from archive.classification import CURRENT_CLASSIFICATION_ENGINE_VERSION, classify_item
+from archive.classification import (
+    CURRENT_CLASSIFICATION_ENGINE_VERSION,
+    build_media_candidates,
+    classify_item,
+    resolve_media_sources_for_item,
+)
 from archive.media_archival import ArchivedAudio
 from archive.metadata import (
     MetadataExtractionError,
@@ -141,6 +146,31 @@ def test_extract_metadata_from_html_detects_video_source_elements() -> None:
 
     assert metadata.media_url == "https://cdn.example.com/talk.mp4"
     assert metadata.media_candidates[0].url == "https://cdn.example.com/talk.mp4"
+    assert metadata.media_candidates[0].candidate_type == "video"
+    assert metadata.media_candidates[0].detection_source == "html_video"
+
+
+@pytest.mark.django_db
+def test_extract_metadata_from_html_uses_article_tag_as_kind_hint_even_with_embedded_video(
+) -> None:
+    metadata = extract_metadata_from_html(
+        html="""
+        <html>
+          <body>
+            <article>
+              <h1>Harness design for long-running application development</h1>
+              <video controls>
+                <source src="https://cdn.example.com/talk.mp4" type="video/mp4">
+              </video>
+            </article>
+          </body>
+        </html>
+        """,
+        base_url="https://example.com/engineering/harness-design",
+    )
+
+    assert metadata.kind_hint == ItemKind.ARTICLE
+    assert metadata.media_url == "https://cdn.example.com/talk.mp4"
     assert metadata.media_candidates[0].candidate_type == "video"
     assert metadata.media_candidates[0].detection_source == "html_video"
 
@@ -678,6 +708,90 @@ def test_request_item_reprocess_preserves_operator_override_and_resets_media_arc
 
 
 @pytest.mark.django_db
+def test_request_item_reprocess_clears_stale_archived_media_for_weak_html_video_items() -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/story",
+        media_url="https://cdn.example.com/story.mp4",
+        kind=ItemKind.VIDEO,
+        classification_rule="media_candidate_video",
+        classification_engine_version=CURRENT_CLASSIFICATION_ENGINE_VERSION,
+        classification_evidence={
+            "media_candidates": [
+                {
+                    "url": "https://cdn.example.com/story.mp4",
+                    "candidate_type": "video",
+                    "detection_source": "html_video",
+                }
+            ],
+            "selected_media": {
+                "audio": "",
+                "video": "https://cdn.example.com/story.mp4",
+            },
+        },
+        archived_audio_path="items/1/audio/extracted.mp3",
+        archived_audio_content_type="audio/mpeg",
+        archived_audio_size_bytes=12345,
+        archived_video_path="items/1/video/source.mp4",
+        archived_video_content_type="video/mp4",
+        archived_video_size_bytes=67890,
+        media_archive_status=EnrichmentStatus.COMPLETE,
+    )
+    _save_archived_media(item.archived_audio_path, b"audio")
+    _save_archived_media(item.archived_video_path, b"video")
+
+    request_item_reprocess(item)
+
+    item.refresh_from_db()
+    assert item.kind == ItemKind.LINK
+    assert item.archived_audio_path == ""
+    assert item.archived_video_path == ""
+    assert item.media_archive_status == EnrichmentStatus.COMPLETE
+
+
+def test_build_media_candidates_preserves_html_video_provenance_over_media_url_duplicates() -> None:
+    candidates = build_media_candidates(
+        original_url="https://example.com/story",
+        media_url="https://cdn.example.com/story.mp4",
+        existing_evidence={
+            "media_candidates": [
+                {
+                    "url": "https://cdn.example.com/story.mp4",
+                    "candidate_type": "video",
+                    "detection_source": "html_video",
+                }
+            ]
+        },
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].url == "https://cdn.example.com/story.mp4"
+    assert candidates[0].candidate_type == "video"
+    assert candidates[0].detection_source == "html_video"
+
+
+@pytest.mark.django_db
+def test_resolve_media_sources_keeps_html_video_for_explicit_video_items() -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/story",
+        kind=ItemKind.VIDEO,
+        classification_evidence={
+            "media_candidates": [
+                {
+                    "url": "https://cdn.example.com/story.mp4",
+                    "candidate_type": "video",
+                    "detection_source": "html_video",
+                }
+            ]
+        },
+    )
+
+    assert resolve_media_sources_for_item(item) == (
+        None,
+        "https://cdn.example.com/story.mp4",
+    )
+
+
+@pytest.mark.django_db
 def test_reclassify_items_dry_run_reports_changed_and_unchanged_items() -> None:
     changed_item = Item.objects.create(
         original_url="https://castro.fm/episode/ubOf93",
@@ -1043,6 +1157,67 @@ def test_reclassify_items_dry_run_does_not_touch_downstream_statuses() -> None:
     assert item.transcript_error == "transcript failed"
     assert item.article_audio_status == EnrichmentStatus.FAILED
     assert item.article_audio_error == "article audio failed"
+
+
+@pytest.mark.django_db
+def test_enrich_item_metadata_keeps_article_pages_with_embedded_video_on_article_audio_path(
+    monkeypatch,
+) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/engineering/harness-design",
+        kind=ItemKind.LINK,
+    )
+
+    def fake_extract(url: str, timeout: int):
+        assert url == item.original_url
+        return extract_metadata_from_html(
+            html="""
+            <html>
+              <body>
+                <article>
+                  <h1>Harness design for long-running application development</h1>
+                  <video controls>
+                    <source src="https://cdn.example.com/talk.mp4" type="video/mp4">
+                  </video>
+                </article>
+              </body>
+            </html>
+            """,
+            base_url=url,
+        )
+
+    def fail_archive(*args, **kwargs):
+        raise AssertionError("embedded html_video media should not trigger source audio archival")
+
+    monkeypatch.setattr("archive.services.extract_metadata_from_url", fake_extract)
+    monkeypatch.setattr("archive.services.archive_item_audio", fail_archive)
+    monkeypatch.setattr(
+        "archive.services.generate_item_summaries",
+        lambda item, timeout: GeneratedSummary(
+            short_summary="Short generated summary",
+            long_summary="Long generated summary with enough detail for article audio.",
+            tags=("article", "design", "agents"),
+        ),
+    )
+    monkeypatch.setattr(
+        "archive.services.generate_item_article_audio",
+        lambda item, timeout: ArticleAudioJobUpdate(
+            job_id="job-123",
+            state="succeeded",
+            artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+        ),
+    )
+
+    assert enrich_item_metadata(item) is True
+
+    item.refresh_from_db()
+    assert item.kind == ItemKind.ARTICLE
+    assert item.classification_rule == "metadata_kind_hint"
+    assert item.classification_evidence["selected_media"]["video"] == ""
+    assert item.archived_audio_path == ""
+    assert item.media_archive_status == EnrichmentStatus.COMPLETE
+    assert item.article_audio_generated is True
+    assert item.article_audio_artifact_path == "/v1/jobs/job-123/artifacts/speech.mp3"
 
 
 @pytest.mark.django_db

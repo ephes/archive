@@ -74,8 +74,12 @@ def classify_item(
         metadata_candidates=metadata_candidates,
         existing_evidence=existing_evidence,
     )
-    selected_audio = select_audio_archive_source_url_from_candidates(media_candidates)
-    selected_video = select_video_archive_source_url_from_candidates(media_candidates)
+    selected_audio_candidate = select_audio_archive_source_candidate_from_candidates(
+        media_candidates
+    )
+    selected_video_candidate = select_video_archive_source_candidate_from_candidates(
+        media_candidates
+    )
     adapter_name, adapter_kind = _match_source_adapter(original_url)
 
     if (
@@ -102,10 +106,10 @@ def classify_item(
         if generic_kind != str(ItemKind.LINK):
             kind = generic_kind
             rule = generic_rule
-        elif selected_video:
+        elif _video_candidate_has_semantic_weight(selected_video_candidate):
             kind = str(ItemKind.VIDEO)
             rule = "media_candidate_video"
-        elif selected_audio:
+        elif selected_audio_candidate:
             kind = str(ItemKind.PODCAST_EPISODE)
             rule = "media_candidate_audio"
         else:
@@ -122,8 +126,11 @@ def classify_item(
             kind_hint=kind_hint,
             matched_adapter=adapter_name,
             media_candidates=media_candidates,
-            selected_audio=selected_audio,
-            selected_video=selected_video,
+            selected_audio=selected_audio_candidate.url if selected_audio_candidate else None,
+            selected_video=_resolved_video_candidate_url(
+                selected_video_candidate,
+                item_kind=kind,
+            ),
             existing_evidence=existing_evidence,
         ),
     )
@@ -138,14 +145,23 @@ def build_media_candidates(
     existing_evidence: dict[str, Any] | None = None,
 ) -> list[MediaCandidate]:
     candidates: list[MediaCandidate] = []
-    seen: set[tuple[str, str]] = set()
+    candidate_indexes: dict[tuple[str, str], int] = {}
 
-    def add_candidate(candidate: MediaCandidate) -> None:
+    def add_candidate(candidate: MediaCandidate, *, priority: int) -> None:
         key = (candidate.url, candidate.candidate_type)
-        if not candidate.url or key in seen:
+        if not candidate.url:
             return
-        seen.add(key)
-        candidates.append(candidate)
+        existing_index = candidate_indexes.get(key)
+        if existing_index is None:
+            candidate_indexes[key] = len(candidates)
+            candidates.append(candidate)
+            return
+
+        existing_candidate = candidates[existing_index]
+        if priority <= _candidate_source_priority(existing_candidate.detection_source):
+            return
+
+        candidates[existing_index] = candidate
 
     explicit_audio_url = audio_url.strip()
     if explicit_audio_url:
@@ -158,14 +174,15 @@ def build_media_candidates(
                     url=explicit_audio_url,
                     candidate_type=candidate_type,
                     detection_source="explicit_audio_url",
-                )
+                ),
+                priority=_candidate_source_priority("explicit_audio_url"),
             )
 
     for candidate in metadata_candidates:
-        add_candidate(candidate)
+        add_candidate(candidate, priority=_candidate_source_priority(candidate.detection_source))
 
     for candidate in _media_candidates_from_evidence(existing_evidence):
-        add_candidate(candidate)
+        add_candidate(candidate, priority=_candidate_source_priority(candidate.detection_source))
 
     for url, detection_source in (
         (media_url.strip(), "media_url"),
@@ -180,7 +197,8 @@ def build_media_candidates(
                     url=url,
                     candidate_type=candidate_type,
                     detection_source=detection_source,
-                )
+                ),
+                priority=_candidate_source_priority(detection_source),
             )
 
     return candidates
@@ -193,9 +211,14 @@ def resolve_media_sources_for_item(item: Item) -> tuple[str | None, str | None]:
         media_url=item.media_url,
         existing_evidence=item.classification_evidence,
     )
+    selected_audio_candidate = select_audio_archive_source_candidate_from_candidates(candidates)
+    selected_video_candidate = select_video_archive_source_candidate_from_candidates(candidates)
     return (
-        select_audio_archive_source_url_from_candidates(candidates),
-        select_video_archive_source_url_from_candidates(candidates),
+        selected_audio_candidate.url if selected_audio_candidate else None,
+        _resolved_video_candidate_url(
+            selected_video_candidate,
+            item_kind=item.kind,
+        ),
     )
 
 
@@ -230,18 +253,55 @@ def normalized_classification_evidence(evidence: dict[str, Any] | None) -> dict[
 def select_audio_archive_source_url_from_candidates(
     candidates: Iterable[MediaCandidate],
 ) -> str | None:
-    for candidate in candidates:
-        if candidate.candidate_type == "audio":
-            return candidate.url
-    return None
+    candidate = select_audio_archive_source_candidate_from_candidates(candidates)
+    return candidate.url if candidate else None
 
 
 def select_video_archive_source_url_from_candidates(
     candidates: Iterable[MediaCandidate],
 ) -> str | None:
+    candidate = select_video_archive_source_candidate_from_candidates(candidates)
+    return candidate.url if candidate else None
+
+
+def select_audio_archive_source_candidate_from_candidates(
+    candidates: Iterable[MediaCandidate],
+) -> MediaCandidate | None:
+    for candidate in candidates:
+        if candidate.candidate_type == "audio":
+            return candidate
+    return None
+
+
+def select_video_archive_source_candidate_from_candidates(
+    candidates: Iterable[MediaCandidate],
+) -> MediaCandidate | None:
     for candidate in candidates:
         if candidate.candidate_type in {"video", "page_video"}:
-            return candidate.url
+            return candidate
+    return None
+
+
+def _video_candidate_has_semantic_weight(candidate: MediaCandidate | None) -> bool:
+    if candidate is None:
+        return False
+    return candidate.candidate_type == "page_video" or candidate.detection_source in {
+        "media_url",
+        "original_url",
+    }
+
+
+def _resolved_video_candidate_url(
+    candidate: MediaCandidate | None,
+    *,
+    item_kind: str,
+) -> str | None:
+    if candidate is None:
+        return None
+    if _video_candidate_has_semantic_weight(candidate):
+        return candidate.url
+    if candidate.detection_source == "html_video" and item_kind == str(ItemKind.VIDEO):
+        return candidate.url
     return None
 
 
@@ -383,6 +443,26 @@ def _candidate_type_for_url(url: str) -> str:
     if _looks_like_supported_video_page_url(url):
         return "page_video"
     return ""
+
+
+def _candidate_source_priority(detection_source: str) -> int:
+    # Candidate provenance is semantically meaningful. Fresh metadata evidence must
+    # keep its detection source when the same URL is also mirrored into media_url,
+    # otherwise weak html_video discoveries could be accidentally upgraded into a
+    # strong semantic video signal by later duplicate insertion.
+    return {
+        "explicit_audio_url": 50,
+        "html_audio": 40,
+        "og_audio": 40,
+        "twitter_player_stream": 40,
+        "json_ld_audio": 40,
+        "html_video": 40,
+        "og_video": 40,
+        "twitter_player": 40,
+        "json_ld_video": 40,
+        "media_url": 20,
+        "original_url": 10,
+    }.get(detection_source, 30)
 
 
 def _media_candidates_from_evidence(

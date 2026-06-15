@@ -136,6 +136,13 @@ ARCHIVE_MEDIA_EXTRACTION_FFMPEG_BIN = os.getenv(
     "ARCHIVE_MEDIA_EXTRACTION_FFMPEG_BIN",
     "ffmpeg",
 )
+_archive_media_ytdlp_js_runtimes = os.getenv("ARCHIVE_MEDIA_YTDLP_JS_RUNTIMES")
+if _archive_media_ytdlp_js_runtimes is None:
+    ARCHIVE_MEDIA_YTDLP_JS_RUNTIMES = ["node"]
+else:
+    ARCHIVE_MEDIA_YTDLP_JS_RUNTIMES = [
+        item.strip() for item in _archive_media_ytdlp_js_runtimes.split(",") if item.strip()
+    ]
 ARCHIVE_MEDIA_STORAGE_BACKEND = os.getenv(
     "ARCHIVE_MEDIA_STORAGE_BACKEND",
     "django.core.files.storage.FileSystemStorage",

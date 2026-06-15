@@ -69,6 +69,16 @@ def test_can_transcribe_item_detects_media_sources() -> None:
 
 
 @pytest.mark.django_db
+def test_can_transcribe_item_rejects_supported_video_pages_without_archived_media() -> None:
+    item = Item(
+        original_url="https://www.youtube.com/watch?v=demo123",
+        kind=ItemKind.VIDEO,
+    )
+
+    assert can_transcribe_item(item) is False
+
+
+@pytest.mark.django_db
 def test_generate_item_transcript_downloads_media_and_parses_response(
     monkeypatch, settings
 ) -> None:

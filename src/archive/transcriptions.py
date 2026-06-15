@@ -151,7 +151,7 @@ def _select_transcription_source(item: Item) -> TranscriptionSource | None:
 def _select_remote_transcription_source_url(item: Item) -> str | None:
     audio_source_url, video_source_url = resolve_media_sources_for_item(item)
     for candidate in (audio_source_url, video_source_url):
-        if candidate:
+        if candidate and _looks_like_media_url(candidate):
             return candidate
     return None
 

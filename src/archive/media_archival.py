@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mimetypes
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,7 +28,7 @@ DEFAULT_AUDIO_CONTENT_TYPE = "audio/mpeg"
 DEFAULT_EXTRACTED_AUDIO_SUFFIX = ".mp3"
 AMBIGUOUS_AUDIO_SUFFIXES = {".webm"}
 YOUTUBE_PAGE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
-YTDLP_PROGRESSIVE_VIDEO_FORMAT = "best[ext=mp4]/best[ext=webm]/best"
+YTDLP_AUDIO_ONLY_FORMAT = "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio[ext=mp4]/bestaudio"
 AUDIO_CONTENT_TYPE_SUFFIXES = {
     "audio/aac": ".aac",
     "audio/flac": ".flac",
@@ -149,6 +150,13 @@ def _archive_direct_audio(item: Item, source_url: str, timeout: int) -> Archived
 
 
 def _archive_video_audio(item: Item, source_url: str, timeout: int) -> ArchivedAudio:
+    if _looks_like_supported_video_page_url(source_url):
+        return _archive_supported_video_page_audio(
+            item=item,
+            source_url=source_url,
+            timeout=timeout,
+        )
+
     try:
         with TemporaryDirectory(prefix="archive-media-") as temp_dir:
             temp_dir_path = Path(temp_dir)
@@ -207,6 +215,36 @@ def _archive_video_audio(item: Item, source_url: str, timeout: int) -> ArchivedA
     )
 
 
+def _archive_supported_video_page_audio(
+    item: Item,
+    source_url: str,
+    timeout: int,
+) -> ArchivedAudio:
+    try:
+        with TemporaryDirectory(prefix="archive-media-") as temp_dir:
+            temp_dir_path = Path(temp_dir)
+            source_path, content_type, size_bytes = _download_supported_video_page_audio_source(
+                source_url=source_url,
+                temp_dir=temp_dir_path,
+                timeout=timeout,
+            )
+            object_name = f"items/{item.pk}/audio/source{source_path.suffix}"
+            saved_name = _save_storage_path(
+                target_name=object_name,
+                file_path=source_path,
+                existing_name=item.archived_audio_path,
+            )
+            _delete_stored_object(item.archived_video_path)
+    except OSError as exc:
+        raise MediaArchivalError(f"Video archival failed: {exc}") from exc
+
+    return ArchivedAudio(
+        object_name=saved_name,
+        content_type=content_type,
+        size_bytes=size_bytes,
+    )
+
+
 def _download_video_source(
     *,
     source_url: str,
@@ -215,12 +253,6 @@ def _download_video_source(
 ) -> tuple[Path, str, int]:
     if _looks_like_direct_video_url(source_url):
         return _download_direct_video_source(
-            source_url=source_url,
-            temp_dir=temp_dir,
-            timeout=timeout,
-        )
-    if _looks_like_supported_video_page_url(source_url):
-        return _download_supported_video_page_source(
             source_url=source_url,
             temp_dir=temp_dir,
             timeout=timeout,
@@ -269,7 +301,7 @@ def _download_direct_video_source(
     return source_path, normalized_content_type, total_bytes
 
 
-def _download_supported_video_page_source(
+def _download_supported_video_page_audio_source(
     *,
     source_url: str,
     temp_dir: Path,
@@ -282,16 +314,29 @@ def _download_supported_video_page_source(
 
     output_template = str(temp_dir / "source.%(ext)s")
     options = {
-        "format": YTDLP_PROGRESSIVE_VIDEO_FORMAT,
+        "ffmpeg_location": _youtube_dl_ffmpeg_location(
+            settings.ARCHIVE_MEDIA_EXTRACTION_FFMPEG_BIN
+        ),
+        "format": YTDLP_AUDIO_ONLY_FORMAT,
         "max_filesize": settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES,
         "noplaylist": True,
         "nopart": True,
         "no_warnings": True,
         "outtmpl": output_template,
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "2",
+            }
+        ],
         "quiet": True,
         "restrictfilenames": True,
         "socket_timeout": timeout,
     }
+    js_runtimes = _youtube_dl_js_runtimes_option(settings.ARCHIVE_MEDIA_YTDLP_JS_RUNTIMES)
+    if js_runtimes:
+        options["js_runtimes"] = js_runtimes
     try:
         with yt_dlp.YoutubeDL(options) as downloader:
             downloader.extract_info(source_url, download=True)
@@ -299,32 +344,43 @@ def _download_supported_video_page_source(
         detail = str(exc).strip() or exc.__class__.__name__
         raise MediaArchivalError(f"Video page download failed: {detail}") from exc
 
-    source_path = _find_downloaded_video_path(temp_dir)
+    source_path = _find_downloaded_audio_path(temp_dir)
     if source_path is None:
-        raise MediaArchivalError("Video page download did not produce a supported media file")
+        raise MediaArchivalError("Video page download did not produce a supported audio file")
 
     size_bytes = source_path.stat().st_size
     if size_bytes <= 0:
-        raise MediaArchivalError("Video page download produced an empty media file")
+        raise MediaArchivalError("Video page download produced an empty audio file")
     if size_bytes > settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES:
         raise MediaArchivalError(
             "Video source exceeded the configured "
             f"{settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES}-byte archive limit"
         )
 
-    suffix = _detect_video_suffix(url=str(source_path), content_type="")
+    suffix = _detect_audio_suffix(url=str(source_path), content_type="")
     if not suffix:
-        raise MediaArchivalError("Video page download produced an unsupported media file")
-    return source_path, _content_type_for_video_suffix(suffix), size_bytes
+        raise MediaArchivalError("Video page download produced an unsupported audio file")
+    return source_path, _content_type_for_audio_suffix(suffix), size_bytes
 
 
-def _find_downloaded_video_path(temp_dir: Path) -> Path | None:
+def _youtube_dl_js_runtimes_option(runtimes: list[str]) -> dict[str, dict[str, object]]:
+    return {runtime: {} for runtime in runtimes if runtime}
+
+
+def _youtube_dl_ffmpeg_location(ffmpeg_bin: str) -> str:
+    resolved = shutil.which(ffmpeg_bin)
+    if resolved:
+        return str(Path(resolved).parent)
+    return ffmpeg_bin
+
+
+def _find_downloaded_audio_path(temp_dir: Path) -> Path | None:
     candidates = sorted(
         path
         for path in temp_dir.iterdir()
         if path.is_file()
         and path.name.startswith("source.")
-        and _looks_like_direct_video_url(path.name)
+        and _detect_audio_suffix(url=path.name, content_type="")
     )
     return candidates[0] if candidates else None
 

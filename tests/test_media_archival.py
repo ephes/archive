@@ -301,8 +301,9 @@ def test_archive_item_audio_prefers_video_path_for_webm_video_urls(monkeypatch) 
 
 
 @pytest.mark.django_db
-def test_archive_item_audio_downloads_supported_youtube_page_before_extracting_audio(
+def test_archive_item_audio_downloads_supported_youtube_page_audio_directly(
     monkeypatch,
+    settings,
 ) -> None:
     item = Item.objects.create(
         original_url="https://www.youtube.com/watch?v=demo123",
@@ -310,27 +311,45 @@ def test_archive_item_audio_downloads_supported_youtube_page_before_extracting_a
     )
     _delete_storage_objects(
         f"items/{item.pk}/video/source.mp4",
-        f"items/{item.pk}/audio/extracted.mp3",
+        f"items/{item.pk}/audio/source.mp3",
     )
     _FakeYoutubeDL.instances.clear()
-    _FakeYoutubeDL.payload = b"youtube-page-video"
-    _FakeYoutubeDL.suffix = ".mp4"
+    _FakeYoutubeDL.payload = b"youtube-page-audio"
+    _FakeYoutubeDL.suffix = ".mp3"
     _FakeYoutubeDL.error = None
     monkeypatch.setattr(
         "archive.media_archival.yt_dlp",
         SimpleNamespace(YoutubeDL=_FakeYoutubeDL),
     )
-    monkeypatch.setattr("archive.media_archival.subprocess.run", _fake_ffmpeg_run)
+    monkeypatch.setattr("archive.media_archival.shutil.which", lambda name: f"/usr/bin/{name}")
+    settings.ARCHIVE_MEDIA_YTDLP_JS_RUNTIMES = ["node", "deno"]
 
     archived_audio = archive_item_audio(item=item)
 
-    assert archived_audio.object_name == f"items/{item.pk}/audio/extracted.mp3"
-    assert archived_audio.source_object_name == f"items/{item.pk}/video/source.mp4"
-    assert archived_audio.source_content_type == "video/mp4"
-    assert archived_audio.source_size_bytes == len(b"youtube-page-video")
-    assert _FakeYoutubeDL.instances[0].options["format"] == "best[ext=mp4]/best[ext=webm]/best"
+    assert archived_audio.object_name == f"items/{item.pk}/audio/source.mp3"
+    assert archived_audio.content_type == "audio/mpeg"
+    assert archived_audio.size_bytes == len(b"youtube-page-audio")
+    assert archived_audio.source_object_name == ""
+    assert archived_audio.source_content_type == ""
+    assert archived_audio.source_size_bytes == 0
+    assert (
+        _FakeYoutubeDL.instances[0].options["format"]
+        == "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio[ext=mp4]/bestaudio"
+    )
+    assert _FakeYoutubeDL.instances[0].options["ffmpeg_location"] == "/usr/bin"
+    assert _FakeYoutubeDL.instances[0].options["postprocessors"] == [
+        {
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "2",
+        }
+    ]
+    assert _FakeYoutubeDL.instances[0].options["js_runtimes"] == {
+        "node": {},
+        "deno": {},
+    }
     assert storages["archive_media"].exists(archived_audio.object_name) is True
-    assert storages["archive_media"].exists(archived_audio.source_object_name) is True
+    assert storages["archive_media"].exists(f"items/{item.pk}/video/source.mp4") is False
 
 
 @pytest.mark.django_db

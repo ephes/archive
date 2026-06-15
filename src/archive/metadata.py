@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import codecs
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, time
 from email.utils import parsedate_to_datetime
@@ -25,6 +26,31 @@ REQUEST_HEADERS = {
 
 class MetadataExtractionError(RuntimeError):
     pass
+
+
+# WDR/ARD mediathek pages embed the real enclosure in an inline (non-JSON-LD)
+# script as a media object, e.g.
+#   inlineMediaData["binaryImporter-…"] = { "mediaResource": { "dflt": {
+#       "audioURL": "//wdrmedien-a.akamaihd.net/…_MP3-128.mp3" } } }
+# Their og:audio tag deceptively points at the HTML page itself, so the
+# enclosure is only discoverable from this script payload.
+_ARD_MEDIA_AUDIO_URL_RE = re.compile(r'"audioURL"\s*:\s*"([^"]+)"')
+
+
+def _ard_audio_urls_from_script(blob: str) -> list[str]:
+    """Audio enclosure URLs from a WDR/ARD inline media-object script blob.
+
+    Scoped to scripts that actually define an ARD media resource so unrelated
+    inline scripts that merely contain the substring are ignored.
+    """
+    if "mediaResource" not in blob:
+        return []
+    urls: list[str] = []
+    for match in _ARD_MEDIA_AUDIO_URL_RE.finditer(blob):
+        url = match.group(1).strip()
+        if url and url not in urls:
+            urls.append(url)
+    return urls
 
 
 @dataclass(frozen=True)
@@ -57,6 +83,8 @@ class _MetadataHTMLParser(HTMLParser):
         self._in_title = False
         self._in_jsonld = False
         self._jsonld_parts: list[str] = []
+        self._in_inline_script = False
+        self._inline_script_parts: list[str] = []
         self._media_context_stack: list[str] = []
         self.head_closed: bool = False
 
@@ -112,6 +140,12 @@ class _MetadataHTMLParser(HTMLParser):
             if "ld+json" in script_type:
                 self._in_jsonld = True
                 self._jsonld_parts = []
+            else:
+                # Capture inline (non-JSON-LD) script bodies so WDR/ARD media
+                # objects embedded as plain JavaScript can be mined for the
+                # real audio enclosure.
+                self._in_inline_script = True
+                self._inline_script_parts = []
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
@@ -133,12 +167,25 @@ class _MetadataHTMLParser(HTMLParser):
                 self.jsonld_blobs.append(blob)
             self._in_jsonld = False
             self._jsonld_parts = []
+            return
+        if tag == "script" and self._in_inline_script:
+            blob = "".join(self._inline_script_parts)
+            for audio_url in _ard_audio_urls_from_script(blob):
+                self._add_media_candidate(
+                    url=audio_url,
+                    candidate_type="audio",
+                    detection_source="ard_media_object",
+                )
+            self._in_inline_script = False
+            self._inline_script_parts = []
 
     def handle_data(self, data: str) -> None:
         if self._in_title:
             self.title_parts.append(data)
         if self._in_jsonld:
             self._jsonld_parts.append(data)
+        if self._in_inline_script:
+            self._inline_script_parts.append(data)
 
     def _add_media_candidate(self, *, url: str, candidate_type: str, detection_source: str) -> None:
         candidate = ExtractedMediaCandidate(

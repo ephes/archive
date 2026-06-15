@@ -158,6 +158,7 @@ Important values:
 - `ARCHIVE_ARTICLE_AUDIO_MAX_BYTES` defaults to `52428800` (50 MiB)
 - `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` defaults to `262144000` (250 MiB)
 - `ARCHIVE_MEDIA_EXTRACTION_FFMPEG_BIN` defaults to `ffmpeg`
+- `ARCHIVE_MEDIA_YTDLP_JS_RUNTIMES` defaults to `node`
 - `ARCHIVE_MEDIA_STORAGE_BACKEND` defaults to local filesystem storage; set to `storages.backends.s3.S3Storage` for MinIO/S3-compatible object storage
 - `ARCHIVE_MEDIA_STORAGE_LOCATION` defaults to `archive-media` under the project root for local filesystem storage
 - `ARCHIVE_MEDIA_STORAGE_BUCKET_NAME` MinIO/S3 bucket for archived media objects
@@ -209,7 +210,10 @@ Video items with a direct downloadable media URL (`.mp4`, `.m4v`, `.mov`, or `.w
 same storage backend, then processed with `ffmpeg` to produce a stable local MP3 enclosure under
 `/items/<id>/audio/`. YouTube page URLs (`youtube.com/watch`, `youtube.com/shorts`, `youtube.com/live`,
 `youtube.com/embed`, and `youtu.be/<id>`) are also supported for this path via a bundled `yt-dlp`
-downloader. Vimeo and other non-direct video pages are still unsupported. Oversized archived uploaded video
+downloader. Archive now ships `yt-dlp[default]` plus `bgutil-ytdlp-pot-provider` so modern YouTube bot-check
+flows can resolve playable formats without requiring browser cookies in the common case, and it archives
+YouTube pages as audio-first local enclosures instead of downloading a full local video file first. Vimeo and
+other non-direct video pages are still unsupported. Oversized archived uploaded video
 transcription is still deferred because Voxhelm's staged batch input currently supports audio only. Failed
 media archival jobs now
 retry with the same bounded backoff pattern as summary generation (5 minutes, 30 minutes, 2 hours) before
@@ -223,6 +227,8 @@ progress no longer strands the row in `processing` indefinitely. Startup recover
 Operator note:
 
 - the worker host must have `ffmpeg` installed for video-derived local audio extraction
+- the worker host must have at least one supported JavaScript runtime installed for `yt-dlp` YouTube page
+  downloads; Archive defaults `ARCHIVE_MEDIA_YTDLP_JS_RUNTIMES=node`
 - the transcription API base should point at Voxhelm's `/v1` root if you want oversized archived local audio
   to use the staged batch upload path
 - `yt-dlp` changes frequently to keep up with YouTube; if page downloads start failing after a period of
@@ -255,6 +261,10 @@ Current first-slice behavior:
 - supported YouTube page URLs classify as `video`
 - generic metadata extraction still parses OG, Twitter, JSON-LD, and HTML title fields
 - generic page-media extraction now also parses HTML `<audio>` / `<source>` and `<video>` / `<source>`
+- WDR/ARD mediathek pages embed the real enclosure in an inline (non-JSON-LD) script as
+  `mediaResource.dflt.audioURL` while their `og:audio` deceptively points back at the HTML page;
+  extraction now mines that media-object payload so a shared WDR/ARD episode page yields a real
+  audio enclosure (and thus podcast-feed eligibility) instead of only a title
 - generic pages with a real `<article>` container now get an `article` kind hint even when upstream OG tags
   only advertise the page as a generic `website`
 - the winning semantic classification is still stored in `Item.kind`

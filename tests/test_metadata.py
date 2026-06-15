@@ -130,6 +130,47 @@ def test_extract_metadata_from_html_detects_audio_source_elements() -> None:
 
 
 @pytest.mark.django_db
+def test_extract_metadata_from_html_detects_ard_media_object_audio() -> None:
+    # WDR/ARD mediathek pages embed the real audio enclosure in an inline
+    # (non-JSON-LD) script as mediaResource.dflt.audioURL, and their og:audio
+    # deceptively points back at the HTML page itself.
+    metadata = extract_metadata_from_html(
+        html="""
+        <html>
+          <head>
+            <meta property="og:audio" content="https://www1.wdr.de/mediathek/audio/wdr5/audio-x-100.html"/>
+            <meta property="og:audio:type" content="audio/vnd.facebook.bridge"/>
+          </head>
+          <body>
+            <script type="text/javascript">
+              window.inlineMediaData = window.inlineMediaData || {};
+              inlineMediaData["binaryImporter-abc"] = {
+                "mediaVersion": "1.4.0",
+                "mediaType": "aod",
+                "mediaResource": {
+                  "dflt": {
+                    "audioURL": "//wdrmedien-a.akamaihd.net/media/p/public/x_MP3-128.mp3",
+                    "mediaFormat": "mp3"
+                  }
+                }
+              };
+            </script>
+          </body>
+        </html>
+        """,
+        base_url="https://www1.wdr.de/mediathek/audio/wdr5/audio-x-100.html",
+    )
+
+    assert metadata.audio_url == "https://wdrmedien-a.akamaihd.net/media/p/public/x_MP3-128.mp3"
+    assert any(
+        candidate.candidate_type == "audio"
+        and candidate.detection_source == "ard_media_object"
+        and candidate.url == "https://wdrmedien-a.akamaihd.net/media/p/public/x_MP3-128.mp3"
+        for candidate in metadata.media_candidates
+    )
+
+
+@pytest.mark.django_db
 def test_extract_metadata_from_html_detects_video_source_elements() -> None:
     metadata = extract_metadata_from_html(
         html="""

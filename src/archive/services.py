@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
@@ -38,6 +39,7 @@ SUMMARY_RETRY_DELAYS = (
 )
 MEDIA_ARCHIVE_RETRY_DELAYS = SUMMARY_RETRY_DELAYS
 TRANSCRIBABLE_ITEM_KINDS = (ItemKind.PODCAST_EPISODE, ItemKind.VIDEO)
+WEEK_TOKEN_RE = re.compile(r"^(\d{4})-W(\d{2})$")
 
 
 def infer_kind(url: str, explicit_kind: str = "", audio_url: str = "") -> str:
@@ -107,6 +109,24 @@ def to_week_page(value: datetime) -> WeekPage:
         token=f"{iso_year}-W{iso_week:02d}",
         year=iso_year,
         week=iso_week,
+        starts_on=starts_on,
+        ends_on=ends_on,
+    )
+
+
+def week_page_from_token(token: str) -> WeekPage:
+    match = WEEK_TOKEN_RE.match(token)
+    if match is None:
+        raise ValueError("Invalid week token")
+
+    year = int(match.group(1))
+    week = int(match.group(2))
+    starts_on = date.fromisocalendar(year, week, 1)
+    ends_on = date.fromisocalendar(year, week, 7)
+    return WeekPage(
+        token=f"{year}-W{week:02d}",
+        year=year,
+        week=week,
         starts_on=starts_on,
         ends_on=ends_on,
     )

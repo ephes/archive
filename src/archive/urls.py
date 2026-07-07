@@ -13,6 +13,7 @@ from archive.views import (
     robots_txt,
     rss_feed,
     search,
+    weekly_items_json,
 )
 
 app_name = "archive"
@@ -24,6 +25,7 @@ urlpatterns = [
     path("api/items/", api_create_item, name="api-items"),
     path("feeds/rss.xml", rss_feed, name="rss-feed"),
     path("feeds/rss/page/<int:page>.xml", rss_feed, name="rss-feed-page"),
+    path("feeds/week/<str:week>.json", weekly_items_json, name="weekly-items-json"),
     path("feeds/podcast.xml", podcast_feed, name="podcast-feed"),
     path("feeds/podcast/page/<int:page>.xml", podcast_feed, name="podcast-feed-page"),
     path("items/new/", ItemCreateView.as_view(), name="item-new"),

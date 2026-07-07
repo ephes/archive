@@ -39,6 +39,7 @@ from archive.services import (
     set_item_classification,
     to_week_page,
     week_bounds,
+    week_page_from_token,
 )
 from archive.transcript_display import split_transcript_for_display
 
@@ -302,6 +303,43 @@ def podcast_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
         page_description="Archive podcast feed page {page}.",
         include_enclosures=True,
         feed_image_path="archive/podcast-cover.png",
+    )
+
+
+@require_GET
+def weekly_items_json(request: HttpRequest, week: str) -> JsonResponse:
+    try:
+        page = week_page_from_token(week)
+    except ValueError:
+        return JsonResponse({"error": "Invalid week"}, status=400)
+
+    starts_at, ends_at = week_bounds(page)
+    items = Item.objects.filter(
+        is_public=True,
+        shared_at__gte=starts_at,
+        shared_at__lt=ends_at,
+    ).order_by("shared_at", "id")
+
+    return JsonResponse(
+        {
+            "week": page.token,
+            "items": [
+                {
+                    "id": item.pk,
+                    "kind": item.kind,
+                    "kind_display": item.get_kind_display(),
+                    "title": item.display_title,
+                    "original_url": item.original_url,
+                    "short_summary": item.short_summary,
+                    "tags": item.tag_list,
+                    "source": item.source,
+                    "author": item.author,
+                    "shared_at": item.shared_at.isoformat(),
+                    "published_at": item.published_at.isoformat() if item.published_at else None,
+                }
+                for item in items
+            ],
+        }
     )
 
 

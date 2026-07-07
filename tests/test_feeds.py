@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -16,6 +16,19 @@ def parse_channel(content: bytes) -> ET.Element:
     channel = root.find("channel")
     assert channel is not None
     return channel
+
+
+def aware_datetime(
+    year: int,
+    month: int,
+    day: int,
+    hour: int = 0,
+    minute: int = 0,
+) -> datetime:
+    return timezone.make_aware(
+        datetime(year, month, day, hour, minute),
+        timezone.get_current_timezone(),
+    )
 
 
 @pytest.mark.django_db
@@ -162,6 +175,164 @@ def test_empty_rss_feed_returns_empty_channel(client) -> None:
     assert {(link.attrib["rel"], link.attrib["href"]) for link in atom_links} == {
         ("self", "http://testserver/feeds/rss.xml"),
     }
+
+
+@pytest.mark.django_db
+def test_weekly_items_json_returns_only_items_shared_in_requested_iso_week(client) -> None:
+    Item.objects.create(
+        original_url="https://example.com/previous-week",
+        title="Previous week",
+        shared_at=aware_datetime(2026, 6, 28, 23, 59),
+    )
+    monday_item = Item.objects.create(
+        original_url="https://example.com/monday",
+        title="Monday item",
+        shared_at=aware_datetime(2026, 6, 29),
+    )
+    midweek_item = Item.objects.create(
+        original_url="https://example.com/midweek",
+        title="Midweek item",
+        shared_at=aware_datetime(2026, 7, 1, 12),
+    )
+    sunday_item = Item.objects.create(
+        original_url="https://example.com/sunday",
+        title="Sunday item",
+        shared_at=aware_datetime(2026, 7, 5, 23, 59),
+    )
+    Item.objects.create(
+        original_url="https://example.com/next-week",
+        title="Next week",
+        shared_at=aware_datetime(2026, 7, 6),
+    )
+
+    response = client.get(reverse("archive:weekly-items-json", kwargs={"week": "2026-W27"}))
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == [
+        monday_item.pk,
+        midweek_item.pk,
+        sunday_item.pk,
+    ]
+
+
+@pytest.mark.django_db
+def test_weekly_items_json_excludes_private_items(client) -> None:
+    public_item = Item.objects.create(
+        original_url="https://example.com/public",
+        title="Public item",
+        shared_at=aware_datetime(2026, 7, 1),
+    )
+    Item.objects.create(
+        original_url="https://example.com/private",
+        title="Private item",
+        is_public=False,
+        shared_at=aware_datetime(2026, 7, 1, 1),
+    )
+
+    response = client.get(reverse("archive:weekly-items-json", kwargs={"week": "2026-W27"}))
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == [public_item.pk]
+
+
+@pytest.mark.django_db
+def test_weekly_items_json_orders_same_timestamp_items_by_id(client) -> None:
+    shared_at = aware_datetime(2026, 7, 1, 12)
+    first_item = Item.objects.create(
+        original_url="https://example.com/first",
+        title="First item",
+        shared_at=shared_at,
+    )
+    second_item = Item.objects.create(
+        original_url="https://example.com/second",
+        title="Second item",
+        shared_at=shared_at,
+    )
+
+    response = client.get(reverse("archive:weekly-items-json", kwargs={"week": "2026-W27"}))
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == [first_item.pk, second_item.pk]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("week", ["nope", "2026-W"])
+def test_weekly_items_json_returns_400_for_malformed_weeks(client, week: str) -> None:
+    response = client.get(reverse("archive:weekly-items-json", kwargs={"week": week}))
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "Invalid week"}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("week", ["2026-W99", "2026-W00"])
+def test_weekly_items_json_returns_400_for_out_of_range_weeks(client, week: str) -> None:
+    response = client.get(reverse("archive:weekly-items-json", kwargs={"week": week}))
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "Invalid week"}
+
+
+@pytest.mark.django_db
+def test_weekly_items_json_returns_empty_items_for_empty_week(client) -> None:
+    response = client.get(reverse("archive:weekly-items-json", kwargs={"week": "2026-W01"}))
+
+    assert response.status_code == 200
+    assert response.json() == {"week": "2026-W01", "items": []}
+
+
+@pytest.mark.django_db
+def test_weekly_items_json_uses_whitelisted_fields_and_list_tags(client) -> None:
+    shared_at = aware_datetime(2026, 7, 1, 9, 30)
+    published_at = aware_datetime(2026, 7, 1, 10, 15)
+    item = Item.objects.create(
+        original_url="https://example.com/article",
+        title="Whitelisted item",
+        kind=ItemKind.ARTICLE,
+        short_summary="Short public summary",
+        long_summary="Excluded long summary",
+        transcript="Excluded transcript",
+        notes="Excluded notes",
+        tags="python\nDjango, ai",
+        source="Example Source",
+        author="Example Author",
+        shared_at=shared_at,
+        published_at=published_at,
+    )
+
+    response = client.get(reverse("archive:weekly-items-json", kwargs={"week": "2026-W27"}))
+
+    assert response.status_code == 200
+    item.refresh_from_db()
+    payload = response.json()["items"][0]
+    assert set(payload) == {
+        "id",
+        "kind",
+        "kind_display",
+        "title",
+        "original_url",
+        "short_summary",
+        "tags",
+        "source",
+        "author",
+        "shared_at",
+        "published_at",
+    }
+    assert not {"detail_url", "notes", "transcript", "long_summary"} & set(payload)
+    assert payload == {
+        "id": item.pk,
+        "kind": "article",
+        "kind_display": "Article",
+        "title": "Whitelisted item",
+        "original_url": "https://example.com/article",
+        "short_summary": "Short public summary",
+        "tags": ["python", "Django", "ai"],
+        "source": "Example Source",
+        "author": "Example Author",
+        "shared_at": item.shared_at.isoformat(),
+        "published_at": item.published_at.isoformat(),
+    }
+    assert isinstance(payload["tags"], list)
 
 
 @pytest.mark.django_db

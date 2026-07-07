@@ -20,8 +20,40 @@ Public endpoints:
 - `/items/<id>/` public item detail page with improved transcript readability and the original link near the top of the page
 - `/feeds/rss.xml` canonical general RSS feed
 - `/feeds/rss/page/<n>.xml` older feed pages when more than 50 eligible items exist
+- `/feeds/week/<YYYY-Wnn>.json` read-only JSON feed of public items shared in an ISO week
 - `/feeds/podcast.xml` podcast-style feed for items with stable local audio enclosures
 - `/feeds/podcast/page/<n>.xml` older podcast feed pages when more than 50 eligible items exist
+
+## Week JSON Feed
+
+`GET /feeds/week/<YYYY-Wnn>.json` returns public (`is_public=True`) items whose `shared_at`
+timestamp falls in the requested ISO week. Served items always have a non-null `published_at`
+(the archive auto-populates `published_at = shared_at` for public items on save), so consumers
+may treat `published_at` as always present and `>= shared_at`. The response shape is:
+
+```json
+{
+  "week": "2026-W27",
+  "items": [
+    {
+      "id": 123,
+      "kind": "article",
+      "kind_display": "Article",
+      "title": "Example item",
+      "original_url": "https://example.com/item",
+      "short_summary": "Short public summary.",
+      "tags": ["tag-a", "tag-b"],
+      "source": "Example Source",
+      "author": "Example Author",
+      "shared_at": "2026-07-01T09:30:00+02:00",
+      "published_at": "2026-07-01T09:30:00+02:00"
+    }
+  ]
+}
+```
+
+The endpoint deliberately omits `notes`, `transcript`, `long_summary`, and `detail_url`;
+consumers should link only to `original_url`.
 
 ## iOS Share Sheet Setup
 

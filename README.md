@@ -214,6 +214,15 @@ Metadata extraction plus transcription plus summary/tag generation runs in a sep
 just manage run_metadata_worker --once
 ```
 
+To classify recent non-quote items as reusable weeknote opening quotes with the summary API:
+
+```bash
+just manage classify_quote_items --dry-run
+just manage classify_quote_items --limit 25 --since-days 14
+```
+
+The quote classifier skips existing `quote` items and operator overrides, records `quote_classifier` evidence for both yes and no decisions, and only changes `kind` to `quote` for high-confidence yes decisions.
+
 To rebuild the public SQLite FTS search index after a restore or manual SQLite repair:
 
 ```bash
@@ -307,6 +316,7 @@ Current first-slice behavior:
   only advertise the page as a generic `website`
 - the winning semantic classification is still stored in `Item.kind`
 - Archive also stores `classification_rule` and `classification_evidence` for admin/debugging
+- the optional `classify_quote_items` management command asks the configured OpenAI-compatible summary API whether recent unprocessed items are reusable weeknote opening quotes; high-confidence yes decisions set `kind=quote`, `classification_rule=quote_classifier`, and current classification engine version, while no decisions are recorded in `classification_evidence.quote_classifier` so they are not retried
 
 Media-resolution policy in this slice:
 

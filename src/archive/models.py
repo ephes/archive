@@ -10,6 +10,7 @@ class ItemKind(models.TextChoices):
     VIDEO = "video", "Video"
     ARTICLE = "article", "Article"
     SOCIAL_POST = "social_post", "Social post"
+    QUOTE = "quote", "Quote"
     LINK = "link", "Link"
 
 

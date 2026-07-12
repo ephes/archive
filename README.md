@@ -1,6 +1,6 @@
 # archive
 
-Self-hosted archive for podcast episodes, articles, videos, and social links shared from iOS/macOS, with automatic summaries, tags, and public feeds.
+Self-hosted archive for podcast episodes, articles, videos, quotes, and social links shared from iOS/macOS, with automatic summaries, tags, and public feeds.
 
 Current shipped scope:
 
@@ -136,7 +136,7 @@ As of 2026-03-10, we have not found an Apple-documented entitlement, system sett
 ### Tips
 
 - The API token is the `ARCHIVE_API_TOKEN` value from your deployment secrets.
-- You can also pass optional fields in the JSON body: `title`, `notes`, `kind`, `audio_url`, `source`.
+- You can also pass optional fields in the JSON body: `title`, `notes`, `kind`, `audio_url`, `media_url`, `source`, `author`, `original_published_at`. Valid `kind` values include `podcast_episode`, `video`, `article`, `social_post`, `quote`, and `link`.
 - For Castro specifically: Castro shares a URL, so the shortcut works as-is. The metadata extraction worker will enrich the item automatically.
 - On macOS, share via **File > Share** in your browser, then double-click the shortcut and allow the permission prompt.
 
@@ -152,6 +152,12 @@ Reference docs:
 
 - Apple Shortcuts: `Get Contents of URL`, input types, variables, and Content Graph
 - Tailscale: macOS client variants, device-management settings, and Shortcuts integration
+
+## API
+
+`POST /api/items/` captures a new item with `Authorization: Bearer <ARCHIVE_API_TOKEN>` and a JSON body containing `url`. Optional fields include `title`, `notes`, `kind`, `audio_url`, `media_url`, `source`, `author`, and `original_published_at`. `kind="quote"` is accepted through the same explicit-kind path as the other item kinds.
+
+`PATCH /api/items/<id>/` uses the same bearer token authentication and currently supports minimal kind updates, for example `{"kind":"quote"}`. Invalid kind values are rejected with `400`; valid updates are recorded as an operator classification override.
 
 ## Development
 
@@ -332,7 +338,7 @@ Operator workflow in Django admin:
   stored decision looks stale relative to the current engine
 - inspect the downstream-state diagnostic before using replay normalization
 - override podcast feed policy with `auto`, `include`, or `exclude`
-- manually override `kind` when automatic classification is wrong
+- manually override `kind` when automatic classification is wrong; supported values include `quote` for daybook/weeknote quote items
 - use `Reprocess selected items` to re-queue one or more items for a fresh enrichment pass
 
 The reprocess action is intentionally per-item or small-batch in this slice. It does not trigger any implicit

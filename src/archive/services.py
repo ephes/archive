@@ -1321,3 +1321,126 @@ def set_item_classification(
         update_fields=pending_fields,
     )
     return pending_fields
+
+
+def apply_operator_kind_override(
+    *,
+    item: Item,
+    kind: str,
+    update_fields: list[str] | None = None,
+) -> list[str]:
+    if kind not in ItemKind.values:
+        raise ValueError("Invalid item kind")
+
+    pending_fields = update_fields if update_fields is not None else []
+    if item.kind != kind:
+        item.kind = kind
+        pending_fields.append("kind")
+    if item.classification_rule != "operator_override":
+        item.classification_rule = "operator_override"
+        pending_fields.append("classification_rule")
+    if item.classification_engine_version != CURRENT_CLASSIFICATION_ENGINE_VERSION:
+        item.classification_engine_version = CURRENT_CLASSIFICATION_ENGINE_VERSION
+        pending_fields.append("classification_engine_version")
+
+    evidence = (
+        item.classification_evidence
+        if isinstance(item.classification_evidence, dict)
+        else {}
+    )
+    override_evidence = {
+        **evidence,
+        "operator_override": {
+            "kind": kind,
+        },
+    }
+    if item.classification_evidence != override_evidence:
+        item.classification_evidence = override_evidence
+        pending_fields.append("classification_evidence")
+
+    normalize_item_kind_dependent_statuses(item=item, update_fields=pending_fields)
+    return pending_fields
+
+
+def normalize_item_kind_dependent_statuses(
+    *,
+    item: Item,
+    update_fields: list[str] | None = None,
+) -> list[str]:
+    pending_fields = update_fields if update_fields is not None else []
+    _normalize_media_archive_status_for_kind(item=item, update_fields=pending_fields)
+    _normalize_article_audio_status_for_kind(item=item, update_fields=pending_fields)
+    return pending_fields
+
+
+def _normalize_article_audio_status_for_kind(
+    *,
+    item: Item,
+    update_fields: list[str],
+) -> None:
+    status = (
+        EnrichmentStatus.PENDING
+        if item.kind == ItemKind.ARTICLE
+        else EnrichmentStatus.COMPLETE
+    )
+    if item.has_generated_article_audio:
+        status = EnrichmentStatus.COMPLETE
+
+    _set_fields_if_changed(
+        item=item,
+        values={
+            "article_audio_status": status,
+            "article_audio_error": "",
+            "article_audio_poll_at": None,
+        },
+        update_fields=update_fields,
+    )
+
+
+def _normalize_media_archive_status_for_kind(
+    *,
+    item: Item,
+    update_fields: list[str],
+) -> None:
+    status = EnrichmentStatus.PENDING if can_archive_audio(item) else EnrichmentStatus.COMPLETE
+    if item.has_archived_audio:
+        status = EnrichmentStatus.COMPLETE
+
+    _set_fields_if_changed(
+        item=item,
+        values={
+            "media_archive_status": status,
+            "media_archive_error": "",
+            "media_archive_retry_count": 0,
+            "media_archive_retry_at": None,
+        },
+        update_fields=update_fields,
+    )
+
+
+def _set_fields_if_changed(
+    *,
+    item: Item,
+    values: dict[str, object],
+    update_fields: list[str],
+) -> None:
+    for field_name, value in values.items():
+        _set_field_if_changed(
+            item=item,
+            field_name=field_name,
+            value=value,
+            update_fields=update_fields,
+        )
+
+
+def _set_field_if_changed(
+    *,
+    item: Item,
+    field_name: str,
+    value: object,
+    update_fields: list[str],
+) -> None:
+    if getattr(item, field_name) == value:
+        return
+    setattr(item, field_name, value)
+    update_fields.append(field_name)

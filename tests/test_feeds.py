@@ -286,9 +286,9 @@ def test_weekly_items_json_uses_whitelisted_fields_and_list_tags(client) -> None
     shared_at = aware_datetime(2026, 7, 1, 9, 30)
     published_at = aware_datetime(2026, 7, 1, 10, 15)
     item = Item.objects.create(
-        original_url="https://example.com/article",
+        original_url="https://example.com/quote",
         title="Whitelisted item",
-        kind=ItemKind.ARTICLE,
+        kind=ItemKind.QUOTE,
         short_summary="Short public summary",
         long_summary="Excluded long summary",
         transcript="Excluded transcript",
@@ -321,10 +321,10 @@ def test_weekly_items_json_uses_whitelisted_fields_and_list_tags(client) -> None
     assert not {"detail_url", "notes", "transcript", "long_summary"} & set(payload)
     assert payload == {
         "id": item.pk,
-        "kind": "article",
-        "kind_display": "Article",
+        "kind": "quote",
+        "kind_display": "Quote",
         "title": "Whitelisted item",
-        "original_url": "https://example.com/article",
+        "original_url": "https://example.com/quote",
         "short_summary": "Short public summary",
         "tags": ["python", "Django", "ai"],
         "source": "Example Source",

@@ -511,6 +511,28 @@ def test_api_creates_item_and_returns_detail_url(client, api_url: str, settings)
 
 
 @pytest.mark.django_db
+def test_api_create_accepts_quote_kind_via_explicit_kind_path(
+    client,
+    api_url: str,
+    settings,
+) -> None:
+    settings.ARCHIVE_API_TOKEN = "test-token"
+
+    response = client.post(
+        api_url,
+        data='{"url":"https://example.com/quote","title":"Saved quote","kind":"quote"}',
+        content_type="application/json",
+        headers={"Authorization": "Bearer test-token"},
+    )
+
+    assert response.status_code == 201
+    item = Item.objects.get(pk=response.json()["id"])
+    assert item.kind == ItemKind.QUOTE
+    assert item.get_kind_display() == "Quote"
+    assert item.classification_rule == "explicit_kind"
+
+
+@pytest.mark.django_db
 def test_api_rejects_invalid_token(client, api_url: str, settings) -> None:
     settings.ARCHIVE_API_TOKEN = "right-token"
 
@@ -593,6 +615,70 @@ def test_api_rejects_empty_body(client, api_url: str, settings) -> None:
     )
 
     assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_api_patch_updates_kind_as_operator_override(client, settings) -> None:
+    settings.ARCHIVE_API_TOKEN = "test-token"
+    item = Item.objects.create(
+        original_url="https://example.com/article",
+        title="Existing article",
+        kind=ItemKind.ARTICLE,
+        article_audio_status=EnrichmentStatus.PENDING,
+        classification_rule="metadata_kind_hint",
+        classification_evidence={"metadata_signals": {"kind_hint": "article"}},
+        classification_engine_version=CURRENT_CLASSIFICATION_ENGINE_VERSION - 1,
+    )
+
+    response = client.patch(
+        reverse("archive:api-item", kwargs={"pk": item.pk}),
+        data='{"kind":"quote"}',
+        content_type="application/json",
+        headers={"Authorization": "Bearer test-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"id": item.pk, "kind": "quote", "kind_display": "Quote"}
+    item.refresh_from_db()
+    assert item.kind == ItemKind.QUOTE
+    assert item.classification_rule == "operator_override"
+    assert item.classification_engine_version == CURRENT_CLASSIFICATION_ENGINE_VERSION
+    assert item.classification_evidence["operator_override"] == {"kind": "quote"}
+    assert item.classification_evidence["metadata_signals"] == {"kind_hint": "article"}
+    assert item.article_audio_status == EnrichmentStatus.COMPLETE
+
+
+@pytest.mark.django_db
+def test_api_patch_rejects_invalid_kind(client, settings) -> None:
+    settings.ARCHIVE_API_TOKEN = "test-token"
+    item = Item.objects.create(original_url="https://example.com/link", kind=ItemKind.LINK)
+
+    response = client.patch(
+        reverse("archive:api-item", kwargs={"pk": item.pk}),
+        data='{"kind":"not-a-kind"}',
+        content_type="application/json",
+        headers={"Authorization": "Bearer test-token"},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "Invalid kind"}
+    item.refresh_from_db()
+    assert item.kind == ItemKind.LINK
+
+
+@pytest.mark.django_db
+def test_api_patch_rejects_invalid_token(client, settings) -> None:
+    settings.ARCHIVE_API_TOKEN = "right-token"
+    item = Item.objects.create(original_url="https://example.com/link")
+
+    response = client.patch(
+        reverse("archive:api-item", kwargs={"pk": item.pk}),
+        data='{"kind":"quote"}',
+        content_type="application/json",
+        headers={"Authorization": "Bearer wrong-token"},
+    )
+
+    assert response.status_code == 401
 
 
 @pytest.mark.django_db
@@ -691,6 +777,32 @@ def test_item_form_marks_new_article_items_article_audio_pending() -> None:
     item = form.save()
 
     assert item.article_audio_status == EnrichmentStatus.PENDING
+
+
+@pytest.mark.django_db
+def test_item_form_accepts_quote_kind() -> None:
+    form = ItemForm(
+        data={
+            "original_url": "https://example.com/quote",
+            "title": "Manual quote",
+            "short_summary": "",
+            "long_summary": "",
+            "transcript": "",
+            "tags": "",
+            "notes": "",
+            "kind": ItemKind.QUOTE,
+            "source": "",
+            "audio_url": "",
+            "podcast_feed_policy": PodcastFeedPolicy.AUTO,
+            "is_public": True,
+        }
+    )
+
+    assert form.is_valid(), form.errors
+    item = form.save()
+    assert item.kind == ItemKind.QUOTE
+    assert item.get_kind_display() == "Quote"
+    assert item.article_audio_status == EnrichmentStatus.COMPLETE
 
 
 @pytest.mark.django_db
@@ -834,6 +946,7 @@ def test_admin_downstream_state_diagnostic_does_not_mutate_item() -> None:
     ("url", "explicit_kind", "audio_url", "expected"),
     [
         ("https://example.com/article", ItemKind.ARTICLE, "", ItemKind.ARTICLE),
+        ("https://example.com/quote", ItemKind.QUOTE, "", ItemKind.QUOTE),
         (
             "https://example.com/article",
             "",

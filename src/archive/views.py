@@ -33,8 +33,9 @@ from archive.article_audio import ArticleAudioGenerationError, download_generate
 from archive.classification import classify_item, podcast_feed_decision_for_item
 from archive.forms import ArchiveAuthenticationForm, ItemForm
 from archive.media_archival import MediaArchivalError, open_archived_audio
-from archive.models import Item
+from archive.models import Item, ItemKind
 from archive.services import (
+    apply_operator_kind_override,
     prepare_item_for_enrichment,
     set_item_classification,
     to_week_page,
@@ -417,17 +418,25 @@ class ItemCreateView(CreateView):
         return redirect(item.get_absolute_url())
 
 
+def _api_request_is_authorized(request: HttpRequest) -> bool:
+    auth_header = request.headers.get("Authorization", "")
+    expected_header = f"Bearer {settings.ARCHIVE_API_TOKEN}"
+    return bool(
+        settings.ARCHIVE_API_TOKEN and hmac.compare_digest(auth_header, expected_header)
+    )
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 def api_create_item(request: HttpRequest) -> JsonResponse:
-    auth_header = request.headers.get("Authorization", "")
-    expected_header = f"Bearer {settings.ARCHIVE_API_TOKEN}"
-    if not settings.ARCHIVE_API_TOKEN or not hmac.compare_digest(auth_header, expected_header):
+    if not _api_request_is_authorized(request):
         return JsonResponse({"error": "Unauthorized"}, status=401)
 
     try:
         payload = json.loads(request.body or b"{}")
     except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    if not isinstance(payload, dict):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
 
     url = (payload.get("url") or "").strip()
@@ -437,7 +446,7 @@ def api_create_item(request: HttpRequest) -> JsonResponse:
     media_url = (payload.get("media_url") or "").strip()
     source = (payload.get("source") or "").strip()
     author = (payload.get("author") or "").strip()
-    explicit_kind = (payload.get("kind") or "").strip()
+    explicit_kind = str(payload.get("kind") or "").strip()
     original_published_at_raw = (payload.get("original_published_at") or "").strip()
 
     try:
@@ -485,6 +494,37 @@ def api_create_item(request: HttpRequest) -> JsonResponse:
             "detail_url": request.build_absolute_uri(item.get_absolute_url()),
         },
         status=201,
+    )
+
+
+@csrf_exempt
+@require_http_methods(["PATCH"])
+def api_update_item(request: HttpRequest, pk: int) -> JsonResponse:
+    if not _api_request_is_authorized(request):
+        return JsonResponse({"error": "Unauthorized"}, status=401)
+
+    try:
+        payload = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    if not isinstance(payload, dict):
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    kind = str(payload.get("kind") or "").strip()
+    if kind not in ItemKind.values:
+        return JsonResponse({"error": "Invalid kind"}, status=400)
+
+    item = get_object_or_404(Item, pk=pk)
+    update_fields = apply_operator_kind_override(item=item, kind=kind)
+    if update_fields:
+        item.save(update_fields=sorted(set(update_fields)))
+
+    return JsonResponse(
+        {
+            "id": item.pk,
+            "kind": item.kind,
+            "kind_display": item.get_kind_display(),
+        }
     )
 
 

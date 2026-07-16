@@ -649,6 +649,76 @@ def test_api_patch_updates_kind_as_operator_override(client, settings) -> None:
 
 
 @pytest.mark.django_db
+def test_api_patch_can_preserve_quote_classifier_provenance(client, settings) -> None:
+    settings.ARCHIVE_API_TOKEN = "test-token"
+    item = Item.objects.create(
+        original_url="https://example.com/quote",
+        title="Existing quote candidate",
+        kind=ItemKind.ARTICLE,
+        article_audio_status=EnrichmentStatus.PENDING,
+        classification_rule="metadata_kind_hint",
+        classification_evidence={"metadata_signals": {"kind_hint": "article"}},
+        classification_engine_version=CURRENT_CLASSIFICATION_ENGINE_VERSION - 1,
+    )
+
+    response = client.patch(
+        reverse("archive:api-item", kwargs={"pk": item.pk}),
+        data='{"kind":"quote","classification_rule":"quote_classifier"}',
+        content_type="application/json",
+        headers={"Authorization": "Bearer test-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"id": item.pk, "kind": "quote", "kind_display": "Quote"}
+    item.refresh_from_db()
+    assert item.kind == ItemKind.QUOTE
+    assert item.classification_rule == "quote_classifier"
+    assert item.classification_engine_version == CURRENT_CLASSIFICATION_ENGINE_VERSION
+    assert item.classification_evidence["quote_classifier"] == {"kind": "quote"}
+    assert item.classification_evidence["metadata_signals"] == {"kind_hint": "article"}
+    assert item.article_audio_status == EnrichmentStatus.COMPLETE
+
+
+@pytest.mark.django_db
+def test_api_patch_rejects_classifier_over_operator_override(client, settings) -> None:
+    settings.ARCHIVE_API_TOKEN = "test-token"
+    item = Item.objects.create(
+        original_url="https://example.com/link",
+        kind=ItemKind.LINK,
+        classification_rule="operator_override",
+    )
+
+    response = client.patch(
+        reverse("archive:api-item", kwargs={"pk": item.pk}),
+        data='{"kind":"quote","classification_rule":"quote_classifier"}',
+        content_type="application/json",
+        headers={"Authorization": "Bearer test-token"},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "Item has an operator override"}
+    item.refresh_from_db()
+    assert item.kind == ItemKind.LINK
+    assert item.classification_rule == "operator_override"
+
+
+@pytest.mark.django_db
+def test_api_patch_rejects_invalid_classifier_rule(client, settings) -> None:
+    settings.ARCHIVE_API_TOKEN = "test-token"
+    item = Item.objects.create(original_url="https://example.com/link", kind=ItemKind.LINK)
+
+    response = client.patch(
+        reverse("archive:api-item", kwargs={"pk": item.pk}),
+        data='{"kind":"link","classification_rule":"quote_classifier"}',
+        content_type="application/json",
+        headers={"Authorization": "Bearer test-token"},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "Invalid classification_rule"}
+
+
+@pytest.mark.django_db
 def test_api_patch_rejects_invalid_kind(client, settings) -> None:
     settings.ARCHIVE_API_TOKEN = "test-token"
     item = Item.objects.create(original_url="https://example.com/link", kind=ItemKind.LINK)

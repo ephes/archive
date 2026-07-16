@@ -30,12 +30,13 @@ from django.views.decorators.http import require_GET, require_http_methods
 from django.views.generic.edit import CreateView
 
 from archive.article_audio import ArticleAudioGenerationError, download_generated_article_audio
-from archive.classification import classify_item, podcast_feed_decision_for_item
+from archive.classification import CURRENT_CLASSIFICATION_ENGINE_VERSION, classify_item, podcast_feed_decision_for_item
 from archive.forms import ArchiveAuthenticationForm, ItemForm
 from archive.media_archival import MediaArchivalError, open_archived_audio
 from archive.models import Item, ItemKind
 from archive.services import (
     apply_operator_kind_override,
+    normalize_item_kind_dependent_statuses,
     prepare_item_for_enrichment,
     set_item_classification,
     to_week_page,
@@ -329,6 +330,7 @@ def weekly_items_json(request: HttpRequest, week: str) -> JsonResponse:
                     "id": item.pk,
                     "kind": item.kind,
                     "kind_display": item.get_kind_display(),
+                    "classification_rule": item.classification_rule,
                     "title": item.display_title,
                     "original_url": item.original_url,
                     "short_summary": item.short_summary,
@@ -515,7 +517,18 @@ def api_update_item(request: HttpRequest, pk: int) -> JsonResponse:
         return JsonResponse({"error": "Invalid kind"}, status=400)
 
     item = get_object_or_404(Item, pk=pk)
-    update_fields = apply_operator_kind_override(item=item, kind=kind)
+    classification_rule = str(payload.get("classification_rule") or "").strip()
+    if classification_rule:
+        if classification_rule != "quote_classifier" or kind != ItemKind.QUOTE:
+            return JsonResponse({"error": "Invalid classification_rule"}, status=400)
+        try:
+            update_fields = _apply_api_quote_classifier_kind(item=item)
+        except ValueError as exc:
+            if str(exc) == "operator_override_conflict":
+                return JsonResponse({"error": "Item has an operator override"}, status=409)
+            raise
+    else:
+        update_fields = apply_operator_kind_override(item=item, kind=kind)
     if update_fields:
         item.save(update_fields=sorted(set(update_fields)))
 
@@ -526,6 +539,28 @@ def api_update_item(request: HttpRequest, pk: int) -> JsonResponse:
             "kind_display": item.get_kind_display(),
         }
     )
+
+
+def _apply_api_quote_classifier_kind(*, item: Item) -> list[str]:
+    update_fields: list[str] = []
+    if item.kind != ItemKind.QUOTE:
+        item.kind = ItemKind.QUOTE
+        update_fields.append("kind")
+    if item.classification_rule == "operator_override":
+        raise ValueError("operator_override_conflict")
+    if item.classification_rule != "quote_classifier":
+        item.classification_rule = "quote_classifier"
+        update_fields.append("classification_rule")
+    if item.classification_engine_version != CURRENT_CLASSIFICATION_ENGINE_VERSION:
+        item.classification_engine_version = CURRENT_CLASSIFICATION_ENGINE_VERSION
+        update_fields.append("classification_engine_version")
+    evidence = item.classification_evidence if isinstance(item.classification_evidence, dict) else {}
+    next_evidence = {**evidence, "quote_classifier": {"kind": ItemKind.QUOTE}}
+    if item.classification_evidence != next_evidence:
+        item.classification_evidence = next_evidence
+        update_fields.append("classification_evidence")
+    normalize_item_kind_dependent_statuses(item=item, update_fields=update_fields)
+    return update_fields
 
 
 def _podcast_enclosure_attributes(request: HttpRequest, item: Item) -> dict[str, str | int]:

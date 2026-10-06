@@ -30,7 +30,17 @@ from django.views.decorators.http import require_GET, require_http_methods
 from django.views.generic.edit import CreateView
 
 from archive.article_audio import ArticleAudioGenerationError, download_generated_article_audio
-from archive.classification import CURRENT_CLASSIFICATION_ENGINE_VERSION, classify_item, podcast_feed_decision_for_item
+from archive.capture import (
+    IDEMPOTENCY_KEY_MAX_LENGTH,
+    IdempotencyKeyConflict,
+    capture_item,
+    find_recent_capture,
+)
+from archive.classification import (
+    CURRENT_CLASSIFICATION_ENGINE_VERSION,
+    classify_item,
+    podcast_feed_decision_for_item,
+)
 from archive.forms import ArchiveAuthenticationForm, ItemForm
 from archive.media_archival import MediaArchivalError, open_archived_audio
 from archive.models import Item, ItemKind
@@ -407,6 +417,12 @@ class ItemCreateView(CreateView):
         return super().dispatch(request, *args, **kwargs)
 
     def form_valid(self, form):
+        confirmed = self.request.POST.get("confirm_duplicate") == "1"
+        existing = find_recent_capture(form.cleaned_data["original_url"])
+        if existing is not None and not confirmed:
+            return self.render_to_response(
+                self.get_context_data(form=form, duplicate_item=existing)
+            )
         item = form.save(commit=False)
         decision = classify_item(
             original_url=item.original_url,
@@ -416,8 +432,14 @@ class ItemCreateView(CreateView):
         )
         set_item_classification(item=item, decision=decision)
         prepare_item_for_enrichment(item)
-        item.save()
-        return redirect(item.get_absolute_url())
+        # After the owner confirmed the warning, save the duplicate on purpose. Without
+        # confirmation a capture that committed after the check above still wins.
+        result = capture_item(item, allow_duplicate=confirmed)
+        if result.duplicate:
+            return self.render_to_response(
+                self.get_context_data(form=form, duplicate_item=result.item)
+            )
+        return redirect(result.item.get_absolute_url())
 
 
 def _api_request_is_authorized(request: HttpRequest) -> bool:
@@ -460,6 +482,10 @@ def api_create_item(request: HttpRequest) -> JsonResponse:
     except ValidationError:
         return JsonResponse({"error": "Invalid or missing url"}, status=400)
 
+    idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+    if len(idempotency_key) > IDEMPOTENCY_KEY_MAX_LENGTH:
+        return JsonResponse({"error": "Idempotency-Key is too long"}, status=400)
+
     original_published_at = None
     if original_published_at_raw:
         original_published_at = parse_datetime(original_published_at_raw)
@@ -489,13 +515,20 @@ def api_create_item(request: HttpRequest) -> JsonResponse:
     )
     set_item_classification(item=item, decision=decision)
     prepare_item_for_enrichment(item)
-    item.save()
+    try:
+        result = capture_item(item, idempotency_key=idempotency_key)
+    except IdempotencyKeyConflict:
+        return JsonResponse(
+            {"error": "Idempotency-Key was already used for a different url"},
+            status=409,
+        )
     return JsonResponse(
         {
-            "id": item.pk,
-            "detail_url": request.build_absolute_uri(item.get_absolute_url()),
+            "id": result.item.pk,
+            "detail_url": request.build_absolute_uri(result.item.get_absolute_url()),
+            "duplicate": result.duplicate,
         },
-        status=201,
+        status=200 if result.duplicate else 201,
     )
 
 
@@ -554,7 +587,9 @@ def _apply_api_quote_classifier_kind(*, item: Item) -> list[str]:
     if item.classification_engine_version != CURRENT_CLASSIFICATION_ENGINE_VERSION:
         item.classification_engine_version = CURRENT_CLASSIFICATION_ENGINE_VERSION
         update_fields.append("classification_engine_version")
-    evidence = item.classification_evidence if isinstance(item.classification_evidence, dict) else {}
+    evidence = item.classification_evidence
+    if not isinstance(evidence, dict):
+        evidence = {}
     next_evidence = {**evidence, "quote_classifier": {"kind": ItemKind.QUOTE}}
     if item.classification_evidence != next_evidence:
         item.classification_evidence = next_evidence

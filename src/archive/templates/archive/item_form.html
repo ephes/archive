@@ -6,10 +6,22 @@
 <section class="form-card">
     <p class="kicker">Authenticated fallback capture</p>
     <h2>New archive item</h2>
+    {% if duplicate_item %}
+    <p class="form-warning" role="alert">
+        This URL was already captured on {{ duplicate_item.shared_at|date:"Y-m-d H:i" }}:
+        <a href="{{ duplicate_item.get_absolute_url }}">{{ duplicate_item.display_title }}</a>.
+        Saving again creates a second item and runs its enrichment again.
+    </p>
+    {% endif %}
     <form method="post">
         {% csrf_token %}
         {{ form.as_p }}
+        {% if duplicate_item %}
+        <input type="hidden" name="confirm_duplicate" value="1">
+        <button type="submit">Save duplicate anyway</button>
+        {% else %}
         <button type="submit">Save item</button>
+        {% endif %}
     </form>
 </section>
 {% endblock %}

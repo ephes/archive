@@ -4,6 +4,8 @@ from django.db import models
 from django.urls import reverse
 from django.utils import timezone
 
+from archive.urlkeys import capture_key_for_url
+
 
 class ItemKind(models.TextChoices):
     PODCAST_EPISODE = "podcast_episode", "Podcast episode"
@@ -68,6 +70,22 @@ class Item(models.Model):
     )
     is_public = models.BooleanField(default=True)
     original_url = models.URLField()
+    # Nullable so SQLite can ADD COLUMN instead of rebuilding archive_item (see constraints).
+    url_key = models.CharField(
+        max_length=64,
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False,
+        help_text="SHA-256 of the normalised URL, used to recognise repeated captures.",
+    )
+    capture_key = models.CharField(
+        max_length=64,
+        blank=True,
+        null=True,
+        editable=False,
+        help_text="Equal to url_key on the newest item for a URL; NULL on older copies.",
+    )
     title = models.CharField(max_length=500, blank=True)
     shared_at = models.DateTimeField(default=timezone.now, db_index=True)
     published_at = models.DateTimeField(blank=True, null=True)
@@ -108,9 +126,24 @@ class Item(models.Model):
 
     class Meta:
         ordering = ("-shared_at", "-id")
+        constraints = [
+            # Partial unique indexes: SQLite can add them with CREATE UNIQUE INDEX instead of
+            # rebuilding archive_item, which would drop the full-text search triggers.
+            models.UniqueConstraint(
+                fields=("capture_key",),
+                condition=models.Q(capture_key__isnull=False),
+                name="archive_item_unique_capture_key",
+            ),
+        ]
 
     def __str__(self) -> str:
         return self.display_title
+
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        instance = super().from_db(db, field_names, values)
+        instance._loaded_url_key = instance.__dict__.get("url_key")
+        return instance
 
     @property
     def display_title(self) -> str:
@@ -206,6 +239,25 @@ class Item(models.Model):
         if self.is_public and self.published_at is None:
             self.published_at = self.shared_at
 
+        if not getattr(self, "_capture_managed", False):
+            # capture_key is owned by archive.capture: ordinary saves must not write a stale
+            # in-memory value over it. New items get it from the post_save signal.
+            if self._state.adding:
+                self.capture_key = None
+            elif kwargs.get("update_fields") is None:
+                deferred = self.get_deferred_fields()
+                kwargs["update_fields"] = [
+                    field.name
+                    for field in self._meta.concrete_fields
+                    if not field.primary_key
+                    and field.attname not in deferred
+                    and field.name != "capture_key"
+                ]
+            else:
+                kwargs["update_fields"] = [
+                    name for name in kwargs["update_fields"] if name != "capture_key"
+                ]
+
         update_fields = kwargs.get("update_fields")
         target_processing_started_at = self._processing_started_at_value()
         if self.processing_started_at != target_processing_started_at:
@@ -214,6 +266,10 @@ class Item(models.Model):
                 kwargs["update_fields"] = sorted(
                     {*(update_fields or ()), "processing_started_at"}
                 )
+                update_fields = kwargs["update_fields"]
+        self.url_key = capture_key_for_url(self.original_url)
+        if update_fields is not None and "original_url" in update_fields:
+            kwargs["update_fields"] = sorted({*update_fields, "url_key"})
         super().save(*args, **kwargs)
 
     def _processing_started_at_value(self):
@@ -232,3 +288,18 @@ class Item(models.Model):
                 self.article_audio_status,
             )
         )
+
+
+class CaptureIdempotencyKey(models.Model):
+    """A client ``Idempotency-Key`` and the item its first capture request resolved to."""
+
+    key = models.CharField(max_length=255, unique=True)
+    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="idempotency_keys")
+    url_key = models.CharField(
+        max_length=64,
+        help_text="url_key of the URL sent with the first request using this key.",
+    )
+    created_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self) -> str:
+        return self.key

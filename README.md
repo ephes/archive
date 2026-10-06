@@ -126,6 +126,7 @@ As of 2026-03-10, we have not found an Apple-documented entitlement, system sett
   Replace `URLS_VARIABLE` with the magic variable from step 1: right-click inside the script text, choose **Insert Variable**, and select the **URLs** output from "Get URLs from". It will appear as a colored pill.
 - In our testing, passing the URL via stdin or `$1` was less reliable than embedding the magic variable directly in the script text.
 - The `head -1` is a workaround for Shortcuts sometimes coercing the shared input into a newline-separated list and repeating the same URL.
+- If a share is retried anyway (for example after a slow response), the API returns the existing item with `"duplicate": true` instead of creating a second one.
 - Input: **Input**
 - Pass Input: **to stdin**
 
@@ -157,6 +158,15 @@ Reference docs:
 
 `POST /api/items/` captures a new item with `Authorization: Bearer <ARCHIVE_API_TOKEN>` and a JSON body containing `url`. Optional fields include `title`, `notes`, `kind`, `audio_url`, `media_url`, `source`, `author`, and `original_published_at`. `kind="quote"` is accepted through the same explicit-kind path as the other item kinds.
 
+A new item returns `201` with `{"id", "detail_url", "duplicate": false}`. Repeated captures are deduplicated so share-sheet retries and Shortcuts that send the URL twice do not create a second item or pay for its summary, transcription, media archival and article audio again:
+
+- If the same URL was captured within `ARCHIVE_CAPTURE_DEDUPE_SECONDS` (default 24 hours), the API returns `200` with the existing item's `{"id", "detail_url", "duplicate": true}` and creates nothing. URLs are compared after lower-casing scheme and host, dropping default ports, the `#fragment`, and tracking parameters (`utm_*`, `fbclid`, `gclid`, `mc_cid`, `mc_eid`). Path case and other query parameters still distinguish URLs.
+- Sharing the URL again after the window creates a new item on purpose. Later shares are compared against the newest item with that URL; editing an item's URL or deleting the newest copy moves that role to the newest remaining copy. `ARCHIVE_CAPTURE_DEDUPE_SECONDS=0` turns URL deduplication off.
+- Clients that can send an `Idempotency-Key` header (up to 255 characters) get the item their first request with that key resolved to, whatever the window and even if that request was itself deduplicated. Reusing a key with a different URL than that first request returns `409`.
+- The check is race-safe: on SQLite each capture takes the database write lock before looking for duplicates, and unique indexes on the newest copy's URL fingerprint and on idempotency keys make a losing concurrent request retry and return the winner as a duplicate.
+
+The authenticated `/items/new/` form warns when the URL was captured within the window and offers **Save duplicate anyway** to create a second item deliberately.
+
 `PATCH /api/items/<id>/` uses the same bearer token authentication and currently supports minimal kind updates, for example `{"kind":"quote"}`. Invalid kind values are rejected with `400`; valid updates are recorded as an operator classification override.
 
 ## Development
@@ -179,6 +189,7 @@ Important values:
 - `DJANGO_CSRF_TRUSTED_ORIGINS`
 - `DJANGO_DB_PATH`
 - `ARCHIVE_API_TOKEN`
+- `ARCHIVE_CAPTURE_DEDUPE_SECONDS` defaults to `86400` (24 hours); repeated captures of the same normalised URL within this window return the existing item, `0` disables it (see [API](#api))
 - `ARCHIVE_SUMMARY_API_KEY`
 - `ARCHIVE_SUMMARY_API_BASE` defaults to `https://api.openai.com/v1`
 - `ARCHIVE_SUMMARY_MODEL` defaults to `gpt-4o-mini`

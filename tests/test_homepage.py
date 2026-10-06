@@ -1373,3 +1373,27 @@ def test_item_archived_audio_streams_s3_objects_with_ranged_get(
     assert body == AUDIO_PAYLOAD[start : end + 1]
     assert s3_file.obj.bodies[0].closed is True
     assert s3_file.closed is True
+
+
+@pytest.mark.django_db
+def test_item_archived_audio_returns_502_when_s3_get_fails(client, monkeypatch) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/episode",
+        title="Archived episode",
+        kind=ItemKind.PODCAST_EPISODE,
+        archived_audio_path="items/1/audio/source.mp3",
+        archived_audio_content_type="audio/mpeg",
+        archived_audio_size_bytes=len(AUDIO_PAYLOAD),
+    )
+    s3_file = _fake_s3_file(AUDIO_PAYLOAD)
+
+    def missing_object(Range: str):  # noqa: N803 - boto3 parameter name
+        raise RuntimeError("NoSuchKey")
+
+    s3_file.obj.get = missing_object
+    monkeypatch.setattr("archive.views.open_archived_audio", lambda item: s3_file)
+
+    response = client.get(_archived_audio_url(item), headers={"Range": "bytes=0-1"})
+
+    assert response.status_code == 502
+    assert s3_file.closed is True

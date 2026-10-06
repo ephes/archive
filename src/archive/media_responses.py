@@ -6,6 +6,7 @@ so enclosures must answer ``Range: bytes=...`` with ``206 Partial Content``.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Iterator
 from typing import IO
@@ -17,6 +18,7 @@ try:
 except ImportError:  # pragma: no cover - django-storages is an optional backend.
     S3File = None  # type: ignore[assignment,misc]
 
+logger = logging.getLogger(__name__)
 STREAM_CHUNK_BYTES = 64 * 1024
 _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 _MAX_RANGE_DIGITS = 18
@@ -102,10 +104,20 @@ def ranged_file_response(
         file_handle.close()
         response = HttpResponse(content_type=content_type)
     else:
-        response = StreamingHttpResponse(
-            _iter_file_range(file_handle, start=start, length=length),
-            content_type=content_type,
-        )
+        s3_object = _unloaded_s3_object(file_handle)
+        if s3_object is not None:
+            # Open the ranged GET before sending headers so backend failures
+            # (missing object, outage) become a 502 instead of a broken stream.
+            try:
+                body = s3_object.get(Range=f"bytes={start}-{end}")["Body"]
+            except Exception:
+                file_handle.close()
+                logger.warning("Ranged S3 read failed", exc_info=True)
+                return HttpResponse("Audio is temporarily unavailable.", status=502)
+            content: Iterator[bytes] = _iter_s3_body(file_handle, body, length=length)
+        else:
+            content = _iter_file_range(file_handle, start=start, length=length)
+        response = StreamingHttpResponse(content, content_type=content_type)
     if byte_range is not None:
         response.status_code = 206
         response["Content-Range"] = f"bytes {start}-{end}/{size}"
@@ -116,10 +128,6 @@ def ranged_file_response(
 
 
 def _iter_file_range(file_handle: IO[bytes], *, start: int, length: int) -> Iterator[bytes]:
-    s3_object = _unloaded_s3_object(file_handle)
-    if s3_object is not None:
-        yield from _iter_s3_range(file_handle, s3_object, start=start, length=length)
-        return
     try:
         if start:
             file_handle.seek(start)
@@ -148,11 +156,8 @@ def _unloaded_s3_object(file_handle: IO[bytes]):
     return file_handle.obj
 
 
-def _iter_s3_range(file_handle, s3_object, *, start: int, length: int) -> Iterator[bytes]:
-    body = None
+def _iter_s3_body(file_handle, body, *, length: int) -> Iterator[bytes]:
     try:
-        response = s3_object.get(Range=f"bytes={start}-{start + length - 1}")
-        body = response["Body"]
         remaining = length
         for chunk in body.iter_chunks(STREAM_CHUNK_BYTES):
             if not chunk:
@@ -163,8 +168,7 @@ def _iter_s3_range(file_handle, s3_object, *, start: int, length: int) -> Iterat
             if remaining <= 0:
                 break
     finally:
-        if body is not None:
-            body.close()
+        body.close()
         file_handle.close()
 
 

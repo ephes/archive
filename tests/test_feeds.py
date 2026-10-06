@@ -459,6 +459,9 @@ def test_podcast_feed_includes_substantial_generated_article_audio(client) -> No
         article_audio_status="complete",
         article_audio_generated=True,
         article_audio_artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+        article_audio_storage_path="items/1/audio/article.mp3",
+        article_audio_content_type="audio/mpeg",
+        article_audio_size_bytes=123456,
     )
 
     response = client.get(reverse("archive:podcast-feed"))
@@ -471,7 +474,7 @@ def test_podcast_feed_includes_substantial_generated_article_audio(client) -> No
     assert enclosure is not None
     assert enclosure.attrib == {
         "url": f"http://testserver{reverse('archive:item-article-audio', kwargs={'pk': item.pk})}",
-        "length": "0",
+        "length": "123456",
         "type": "audio/mpeg",
     }
 

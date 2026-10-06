@@ -105,6 +105,9 @@ class Item(models.Model):
     article_audio_job_id = models.CharField(max_length=64, blank=True)
     article_audio_artifact_path = models.CharField(max_length=500, blank=True)
     article_audio_poll_at = models.DateTimeField(blank=True, null=True)
+    article_audio_storage_path = models.CharField(max_length=500, blank=True)
+    article_audio_content_type = models.CharField(max_length=100, blank=True)
+    article_audio_size_bytes = models.PositiveBigIntegerField(default=0)
 
     class Meta:
         ordering = ("-shared_at", "-id")
@@ -149,6 +152,10 @@ class Item(models.Model):
     @property
     def has_generated_article_audio(self) -> bool:
         return bool(self.article_audio_artifact_path.strip())
+
+    @property
+    def has_stored_article_audio(self) -> bool:
+        return bool(self.article_audio_storage_path.strip())
 
     @property
     def has_archived_audio(self) -> bool:

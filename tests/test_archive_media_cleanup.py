@@ -8,7 +8,8 @@ from django.core.files.storage import storages
 from django.core.management import call_command
 from django.db import transaction
 
-from archive.models import Item
+from archive.models import Item, ItemKind
+from archive.services import request_item_reprocess
 
 
 @pytest.fixture(autouse=True)
@@ -161,3 +162,57 @@ def test_cleanup_archive_media_orphans_delete_removes_only_orphans() -> None:
     assert storages["archive_media"].exists(orphaned_path) is False
 
     _delete_archive_media(referenced_audio_path, referenced_video_path)
+
+
+@pytest.mark.django_db
+def test_cleanup_archive_media_orphans_keeps_stored_article_audio() -> None:
+    article_audio_path = "items/cleanup-article/audio/article.mp3"
+    Item.objects.create(
+        original_url="https://example.com/cleanup-article",
+        article_audio_artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+        article_audio_storage_path=article_audio_path,
+    )
+    _save_archive_media(article_audio_path, b"article-audio")
+
+    stdout = StringIO()
+    call_command("cleanup_archive_media_orphans", "--delete", stdout=stdout)
+
+    assert "No orphaned archive media objects found." in stdout.getvalue()
+    assert storages["archive_media"].exists(article_audio_path) is True
+
+
+@pytest.mark.django_db(transaction=True)
+def test_item_delete_removes_stored_article_audio_after_commit() -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/delete-article",
+        article_audio_artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+        article_audio_storage_path="items/delete-article/audio/article.mp3",
+    )
+    _save_archive_media(item.article_audio_storage_path, b"article-audio")
+
+    item.delete()
+
+    assert storages["archive_media"].exists("items/delete-article/audio/article.mp3") is False
+
+
+@pytest.mark.django_db(transaction=True)
+def test_reprocess_clearing_stale_source_media_keeps_stored_article_audio() -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/article-with-stale-media",
+        title="Article",
+        kind=ItemKind.ARTICLE,
+        archived_audio_path="items/reprocess-article/audio/source.mp3",
+        article_audio_artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+        article_audio_storage_path="items/reprocess-article/audio/article.mp3",
+    )
+    _save_archive_media(item.archived_audio_path, b"source-audio")
+    _save_archive_media(item.article_audio_storage_path, b"article-audio")
+
+    with transaction.atomic():
+        request_item_reprocess(item)
+
+    item.refresh_from_db()
+    assert item.archived_audio_path == ""
+    assert item.article_audio_storage_path == "items/reprocess-article/audio/article.mp3"
+    assert storages["archive_media"].exists("items/reprocess-article/audio/source.mp3") is False
+    assert storages["archive_media"].exists("items/reprocess-article/audio/article.mp3") is True

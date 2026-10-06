@@ -10,7 +10,11 @@ from django.db import transaction
 from django.db.models import Case, F, Q, Value, When
 from django.utils import timezone
 
-from archive.article_audio import can_generate_article_audio, generate_item_article_audio
+from archive.article_audio import (
+    can_generate_article_audio,
+    generate_item_article_audio,
+    store_generated_article_audio,
+)
 from archive.classification import (
     CURRENT_CLASSIFICATION_ENGINE_VERSION,
     ClassificationDecision,
@@ -22,6 +26,7 @@ from archive.classification import (
 )
 from archive.media_archival import archive_item_audio, can_archive_audio
 from archive.media_storage import (
+    ARCHIVED_SOURCE_MEDIA_PATH_FIELDS,
     archive_media_path_is_referenced,
     delete_archive_media_paths,
     item_archive_media_paths,
@@ -51,7 +56,7 @@ def _clear_stale_archive_media(
     item: Item,
     update_fields: list[str] | None = None,
 ) -> None:
-    stale_paths = item_archive_media_paths(item)
+    stale_paths = item_archive_media_paths(item, fields=ARCHIVED_SOURCE_MEDIA_PATH_FIELDS)
     if not stale_paths:
         return
 
@@ -466,6 +471,14 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
         return _mark_article_audio_failure(item, str(exc))
 
     if update.is_complete:
+        stale_article_audio_path = ""
+        if item.article_audio_artifact_path.strip() != update.artifact_path:
+            # A stored local copy belongs to the previous artifact; never serve it
+            # for the new one, and remove it once nothing references it.
+            stale_article_audio_path = item.article_audio_storage_path.strip()
+            item.article_audio_storage_path = ""
+            item.article_audio_content_type = ""
+            item.article_audio_size_bytes = 0
         item.article_audio_job_id = update.job_id
         item.article_audio_artifact_path = update.artifact_path
         item.article_audio_generated = True
@@ -480,8 +493,16 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
                 "article_audio_status",
                 "article_audio_error",
                 "article_audio_poll_at",
+                "article_audio_storage_path",
+                "article_audio_content_type",
+                "article_audio_size_bytes",
             ]
         )
+        if stale_article_audio_path:
+            _delete_unreferenced_archive_media_on_commit(
+                item=item, paths=(stale_article_audio_path,)
+            )
+        _store_generated_article_audio_best_effort(item=item, timeout=timeout)
         return True
 
     if update.is_pending:
@@ -500,6 +521,37 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
         return True
 
     return _mark_article_audio_failure(item, update.error_message)
+
+
+def _delete_unreferenced_archive_media_on_commit(*, item: Item, paths: tuple[str, ...]) -> None:
+    using = item._state.db or "default"
+
+    def delete_unreferenced_paths() -> None:
+        # Cleanup is best effort: a storage failure must not abort enrichment.
+        # Anything left behind is picked up by cleanup_archive_media_orphans.
+        try:
+            delete_archive_media_paths(
+                [path for path in paths if not archive_media_path_is_referenced(path, using=using)]
+            )
+        except Exception:
+            logger.warning(
+                "Deleting stale article audio for item %s failed", item.pk, exc_info=True
+            )
+
+    transaction.on_commit(delete_unreferenced_paths, using=using)
+
+
+def _store_generated_article_audio_best_effort(*, item: Item, timeout: int) -> None:
+    # Copy the finished MP3 into archive_media once so playback never proxies
+    # Voxhelm. A failure here is not fatal: the public audio view backfills lazily.
+    try:
+        store_generated_article_audio(item=item, timeout=timeout)
+    except Exception:
+        logger.warning(
+            "Storing generated article audio failed for item %s; will backfill on first play",
+            item.pk,
+            exc_info=True,
+        )
 
 
 def recover_processing_items() -> int:

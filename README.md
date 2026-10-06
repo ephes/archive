@@ -21,6 +21,10 @@ Public endpoints:
 - `/feeds/rss.xml` canonical general RSS feed
 - `/feeds/rss/page/<n>.xml` older feed pages when more than 50 eligible items exist
 - `/feeds/week/<YYYY-Wnn>.json` read-only JSON feed of public items shared in an ISO week
+- `/items/<id>/audio/` (archived source audio) and `/items/<id>/article-audio/` (generated article audio)
+  served from archive-media storage; both answer single `Range: bytes=...` requests with `206 Partial Content`
+  (`Accept-Ranges: bytes`, `Content-Range`, `416` for unsatisfiable ranges) and support `HEAD`, so podcast
+  apps and browsers can seek and resume
 - `/feeds/podcast.xml` podcast-style feed for items with stable local audio enclosures
 - `/feeds/podcast/page/<n>.xml` older podcast feed pages when more than 50 eligible items exist
 
@@ -244,9 +248,12 @@ text as the TTS input when it can fetch it and falls back to stored summary/note
 currently reuses the summary-source extractor, so it still inherits the 1 MiB raw source download cap and
 falls back to stored summary/notes text for oversized, blocked, or otherwise unreadable pages. The final
 submitted script is capped by `ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS` before submission. Archive stores the
-private artifact reference and exposes the finished audio through a public item-scoped proxy URL on the
-detail page. Podcast episodes with a direct remote audio source are also archived asynchronously into the
-configured archive-media storage backend and then served through a stable item-scoped Archive URL for
+private artifact reference, copies the finished MP3 once into archive-media storage
+(`items/<id>/audio/article-<artifact hash>.mp3`, streamed in chunks and bounded by `ARCHIVE_ARTICLE_AUDIO_MAX_BYTES`), and
+serves that local copy through a public item-scoped URL on the detail page and in the podcast feed. Items whose
+audio finished before local copies existed are backfilled lazily: the first request fetches the Voxhelm
+artifact once, and later requests never contact Voxhelm. Podcast episodes with a direct remote audio source
+are also archived asynchronously into the configured archive-media storage backend and then served through a stable item-scoped Archive URL for
 playback and podcast enclosures.
 Video items with a direct downloadable media URL (`.mp4`, `.m4v`, `.mov`, or `.webm`) are archived into the
 same storage backend, then processed with `ffmpeg` to produce a stable local MP3 enclosure under
@@ -334,6 +341,8 @@ Current automatic policy:
   looks substantial and coherent rather than like a short note or mixed-topic link dump
 - if both source-derived archived audio and generated article audio exist, the source-derived archived audio
   wins for the feed enclosure
+- feed enclosures carry the real byte length of the stored file; generated article audio reports `0` only
+  until its one-time local copy exists
 
 Operator workflow in Django admin:
 
@@ -348,7 +357,8 @@ Operator workflow in Django admin:
 The reprocess action is intentionally per-item or small-batch in this slice. It does not trigger any implicit
 bulk historical replay. It also does not currently clear an existing generated article-audio artifact or job
 reference on its own, so a true article-audio regeneration still requires clearing the stored article-audio
-state first and then reprocessing the item. It now does clear stale archived source media when the current
+state first and then reprocessing the item; when the new job finishes, the old local article-audio copy is
+dropped and replaced. It now does clear stale archived source media when the current
 classification/media-resolution policy no longer supports that stored enclosure, so a previously misclassified
 embedded-video page can move back onto the article-audio path without manual database edits. Because this
 first pass uses only currently stored fields, an item that depends on fresh metadata hints can briefly fall

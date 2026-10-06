@@ -6,15 +6,16 @@ from django.core.files.storage import storages
 from django.db.models import Q
 
 ARCHIVE_MEDIA_STORAGE_ALIAS = "archive_media"
-ARCHIVE_MEDIA_PATH_FIELDS = ("archived_audio_path", "archived_video_path")
+ARCHIVED_SOURCE_MEDIA_PATH_FIELDS = ("archived_audio_path", "archived_video_path")
+ARCHIVE_MEDIA_PATH_FIELDS = (*ARCHIVED_SOURCE_MEDIA_PATH_FIELDS, "article_audio_storage_path")
 
 
-def item_archive_media_paths(item) -> tuple[str, ...]:
-    return tuple(
-        _normalized_unique_paths(
-            getattr(item, field_name) for field_name in ARCHIVE_MEDIA_PATH_FIELDS
-        )
-    )
+def item_archive_media_paths(
+    item,
+    *,
+    fields: tuple[str, ...] = ARCHIVE_MEDIA_PATH_FIELDS,
+) -> tuple[str, ...]:
+    return tuple(_normalized_unique_paths(getattr(item, field_name) for field_name in fields))
 
 
 def delete_archive_media_paths(paths: Iterable[str]) -> list[str]:
@@ -43,9 +44,10 @@ def archive_media_path_is_referenced(path: str, *, using: str = "default") -> bo
     normalized_path = path.strip()
     if not normalized_path:
         return False
-    return Item.objects.using(using).filter(
-        Q(archived_audio_path=normalized_path) | Q(archived_video_path=normalized_path)
-    ).exists()
+    query = Q()
+    for field_name in ARCHIVE_MEDIA_PATH_FIELDS:
+        query |= Q(**{field_name: normalized_path})
+    return Item.objects.using(using).filter(query).exists()
 
 
 def iter_archive_media_object_names(prefix: str = "") -> Iterator[str]:

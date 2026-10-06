@@ -13,7 +13,6 @@ from django.db import connection
 from django.db.models import Q
 from django.db.models.functions import Trim
 from django.http import (
-    FileResponse,
     Http404,
     HttpRequest,
     HttpResponse,
@@ -29,10 +28,20 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods
 from django.views.generic.edit import CreateView
 
-from archive.article_audio import ArticleAudioGenerationError, download_generated_article_audio
-from archive.classification import CURRENT_CLASSIFICATION_ENGINE_VERSION, classify_item, podcast_feed_decision_for_item
+from archive.article_audio import (
+    DEFAULT_AUDIO_CONTENT_TYPE,
+    ArticleAudioGenerationError,
+    open_stored_article_audio,
+    store_generated_article_audio,
+)
+from archive.classification import (
+    CURRENT_CLASSIFICATION_ENGINE_VERSION,
+    classify_item,
+    podcast_feed_decision_for_item,
+)
 from archive.forms import ArchiveAuthenticationForm, ItemForm
 from archive.media_archival import MediaArchivalError, open_archived_audio
+from archive.media_responses import ranged_file_response
 from archive.models import Item, ItemKind
 from archive.services import (
     apply_operator_kind_override,
@@ -49,6 +58,7 @@ url_validator = URLValidator()
 FEED_PAGE_SIZE = 50
 SEARCH_PAGE_SIZE = 20
 SEARCH_TOKEN_RE = re.compile(r"\w+")
+AUDIO_CACHE_CONTROL = "public, max-age=3600"
 
 
 class ArchiveLoginView(LoginView):
@@ -346,7 +356,7 @@ def weekly_items_json(request: HttpRequest, week: str) -> JsonResponse:
     )
 
 
-@require_GET
+@require_http_methods(["GET", "HEAD"])
 def item_archived_audio(request: HttpRequest, pk: int) -> HttpResponse:
     item = get_object_or_404(Item, pk=pk, is_public=True)
     if not item.has_archived_audio:
@@ -357,14 +367,13 @@ def item_archived_audio(request: HttpRequest, pk: int) -> HttpResponse:
     except MediaArchivalError:
         return HttpResponse("Archived audio is temporarily unavailable.", status=502)
 
-    response = FileResponse(
-        audio_file,
+    return ranged_file_response(
+        request,
+        file_handle=audio_file,
+        size=item.archived_audio_size_bytes,
         content_type=item.archived_audio_content_type or "audio/mpeg",
+        cache_control=AUDIO_CACHE_CONTROL,
     )
-    if item.archived_audio_size_bytes:
-        response["Content-Length"] = str(item.archived_audio_size_bytes)
-    response["Cache-Control"] = "public, max-age=3600"
-    return response
 
 
 @require_GET
@@ -380,20 +389,44 @@ def item_detail(request: HttpRequest, pk: int) -> HttpResponse:
     )
 
 
-@require_GET
+@require_http_methods(["GET", "HEAD"])
 def item_article_audio(request: HttpRequest, pk: int) -> HttpResponse:
     item = get_object_or_404(Item, pk=pk, is_public=True)
     if not item.has_generated_article_audio:
         raise Http404("Article audio is not available")
 
     try:
-        audio = download_generated_article_audio(item=item)
+        audio_file = _open_or_backfill_article_audio(item)
     except ArticleAudioGenerationError:
         return HttpResponse("Article audio is temporarily unavailable.", status=502)
 
-    response = HttpResponse(audio.payload, content_type=audio.content_type)
-    response["Cache-Control"] = "public, max-age=3600"
-    return response
+    return ranged_file_response(
+        request,
+        file_handle=audio_file,
+        size=item.article_audio_size_bytes,
+        content_type=item.article_audio_content_type or DEFAULT_AUDIO_CONTENT_TYPE,
+        cache_control=AUDIO_CACHE_CONTROL,
+    )
+
+
+def _open_or_backfill_article_audio(item: Item):
+    if item.has_stored_article_audio:
+        try:
+            return open_stored_article_audio(item)
+        except ArticleAudioGenerationError:
+            pass
+    # Items generated before local storage existed only know the Voxhelm artifact
+    # path. Copy it into archive_media once; later requests are served locally.
+    store_generated_article_audio(item=item)
+    try:
+        return open_stored_article_audio(item)
+    except ArticleAudioGenerationError:
+        # A concurrent backfill may have published its own copy and removed ours;
+        # serve whatever copy the row references now.
+        item.refresh_from_db()
+        if not item.has_stored_article_audio:
+            raise
+        return open_stored_article_audio(item)
 
 
 class ItemCreateView(CreateView):
@@ -554,7 +587,9 @@ def _apply_api_quote_classifier_kind(*, item: Item) -> list[str]:
     if item.classification_engine_version != CURRENT_CLASSIFICATION_ENGINE_VERSION:
         item.classification_engine_version = CURRENT_CLASSIFICATION_ENGINE_VERSION
         update_fields.append("classification_engine_version")
-    evidence = item.classification_evidence if isinstance(item.classification_evidence, dict) else {}
+    evidence = (
+        item.classification_evidence if isinstance(item.classification_evidence, dict) else {}
+    )
     next_evidence = {**evidence, "quote_classifier": {"kind": ItemKind.QUOTE}}
     if item.classification_evidence != next_evidence:
         item.classification_evidence = next_evidence
@@ -570,8 +605,8 @@ def _podcast_enclosure_attributes(request: HttpRequest, item: Item) -> dict[str,
             "enclosure_url": request.build_absolute_uri(
                 reverse("archive:item-article-audio", kwargs={"pk": item.pk})
             ),
-            "enclosure_type": "audio/mpeg",
-            "enclosure_length": 0,
+            "enclosure_type": item.article_audio_content_type or DEFAULT_AUDIO_CONTENT_TYPE,
+            "enclosure_length": item.article_audio_size_bytes,
         }
     return {
         "enclosure_url": request.build_absolute_uri(item.stable_audio_enclosure_url),

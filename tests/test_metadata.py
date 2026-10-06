@@ -13,7 +13,7 @@ from django.db import connection
 from django.urls import reverse
 from django.utils import timezone
 
-from archive.article_audio import ArticleAudioJobUpdate
+from archive.article_audio import ArticleAudioGenerationError, ArticleAudioJobUpdate
 from archive.classification import (
     CURRENT_CLASSIFICATION_ENGINE_VERSION,
     build_media_candidates,
@@ -1248,6 +1248,9 @@ def test_enrich_item_metadata_keeps_article_pages_with_embedded_video_on_article
             artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
         ),
     )
+    monkeypatch.setattr(
+        "archive.services.store_generated_article_audio", lambda item, timeout: None
+    )
 
     assert enrich_item_metadata(item) is True
 
@@ -2253,6 +2256,12 @@ def test_enrich_pending_items_completes_generated_article_audio(monkeypatch) -> 
             artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
         ),
     )
+    stored_items: list[tuple[int, str]] = []
+
+    def fake_store(item, timeout):
+        stored_items.append((item.pk, item.article_audio_artifact_path))
+
+    monkeypatch.setattr("archive.services.store_generated_article_audio", fake_store)
 
     assert enrich_pending_items(limit=1) == 1
 
@@ -2260,3 +2269,103 @@ def test_enrich_pending_items_completes_generated_article_audio(monkeypatch) -> 
     assert item.article_audio_status == EnrichmentStatus.COMPLETE
     assert item.article_audio_generated is True
     assert item.article_audio_artifact_path == "/v1/jobs/job-123/artifacts/speech.mp3"
+    assert stored_items == [(item.pk, "/v1/jobs/job-123/artifacts/speech.mp3")]
+
+
+@pytest.mark.django_db
+def test_enrich_pending_items_drops_stale_copy_and_stays_complete_when_storing_fails(
+    monkeypatch, settings, tmp_path, django_capture_on_commit_callbacks
+) -> None:
+    settings.STORAGES = {
+        **settings.STORAGES,
+        "archive_media": {
+            "BACKEND": "django.core.files.storage.FileSystemStorage",
+            "OPTIONS": {"location": str(tmp_path / "archive-media")},
+        },
+    }
+    stale_path = storages["archive_media"].save(
+        "items/1/audio/article-old.mp3", ContentFile(b"old-audio")
+    )
+    item = Item.objects.create(
+        original_url="https://example.com/article",
+        title="Article headline",
+        short_summary="Short summary",
+        long_summary="Long summary for audio.",
+        kind=ItemKind.ARTICLE,
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        transcript_status=EnrichmentStatus.COMPLETE,
+        article_audio_status=EnrichmentStatus.PENDING,
+        # Operator cleared the artifact reference to regenerate; the old copy remains.
+        article_audio_storage_path=stale_path,
+        article_audio_content_type="audio/mpeg",
+        article_audio_size_bytes=4096,
+    )
+    monkeypatch.setattr(
+        "archive.services.generate_item_article_audio",
+        lambda item, timeout: ArticleAudioJobUpdate(
+            job_id="job-123",
+            state="succeeded",
+            artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+        ),
+    )
+
+    def failing_store(item, timeout):
+        raise ArticleAudioGenerationError("Voxhelm unavailable")
+
+    monkeypatch.setattr("archive.services.store_generated_article_audio", failing_store)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        assert enrich_pending_items(limit=1) == 1
+
+    item.refresh_from_db()
+    assert item.article_audio_status == EnrichmentStatus.COMPLETE
+    assert item.article_audio_artifact_path == "/v1/jobs/job-123/artifacts/speech.mp3"
+    # The stale copy of the previous artifact must not be served for the new one.
+    assert item.article_audio_storage_path == ""
+    assert item.article_audio_size_bytes == 0
+    assert storages["archive_media"].exists(stale_path) is False
+
+
+@pytest.mark.django_db
+def test_enrich_article_audio_survives_stale_copy_cleanup_failure(
+    monkeypatch, django_capture_on_commit_callbacks
+) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/article",
+        title="Article headline",
+        short_summary="Short summary",
+        long_summary="Long summary for audio.",
+        kind=ItemKind.ARTICLE,
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        transcript_status=EnrichmentStatus.COMPLETE,
+        article_audio_status=EnrichmentStatus.PENDING,
+        article_audio_storage_path="items/1/audio/article-old.mp3",
+    )
+    monkeypatch.setattr(
+        "archive.services.generate_item_article_audio",
+        lambda item, timeout: ArticleAudioJobUpdate(
+            job_id="job-123",
+            state="succeeded",
+            artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+        ),
+    )
+
+    def failing_delete(paths):
+        raise RuntimeError("AccessDenied")
+
+    stored: list[int] = []
+    monkeypatch.setattr("archive.services.delete_archive_media_paths", failing_delete)
+    monkeypatch.setattr(
+        "archive.services.store_generated_article_audio",
+        lambda item, timeout: stored.append(item.pk),
+    )
+
+    with django_capture_on_commit_callbacks(execute=True):
+        assert enrich_item_article_audio(item) is True
+
+    item.refresh_from_db()
+    assert item.article_audio_status == EnrichmentStatus.COMPLETE
+    assert item.article_audio_storage_path == ""
+    assert stored == [item.pk]

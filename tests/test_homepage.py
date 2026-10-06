@@ -5,12 +5,14 @@ from datetime import timedelta
 
 import pytest
 from django.contrib.admin.sites import AdminSite
+from django.core.files.base import ContentFile
+from django.core.files.storage import storages
 from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
 
 from archive.admin import ItemAdmin
-from archive.article_audio import DownloadedArticleAudio
+from archive.article_audio import ArticleAudioGenerationError
 from archive.classification import CURRENT_CLASSIFICATION_ENGINE_VERSION
 from archive.forms import ItemForm
 from archive.models import EnrichmentStatus, Item, ItemKind, PodcastFeedPolicy
@@ -447,6 +449,39 @@ def test_detail_page_prefers_video_derived_local_audio_enclosure(client) -> None
     assert b"Open local audio enclosure" in response.content
 
 
+AUDIO_PAYLOAD = bytes(range(256)) * 2  # 512 distinct-ish bytes
+
+
+@pytest.fixture
+def isolated_archive_media_storage(settings, tmp_path) -> None:
+    settings.STORAGES = {
+        **settings.STORAGES,
+        "archive_media": {
+            "BACKEND": "django.core.files.storage.FileSystemStorage",
+            "OPTIONS": {"location": str(tmp_path / "archive-media")},
+        },
+    }
+
+
+def _archived_audio_item(payload: bytes = AUDIO_PAYLOAD) -> Item:
+    item = Item.objects.create(
+        original_url="https://example.com/episode",
+        title="Archived episode",
+        kind=ItemKind.PODCAST_EPISODE,
+        archived_audio_content_type="audio/mpeg",
+        archived_audio_size_bytes=len(payload),
+    )
+    item.archived_audio_path = storages["archive_media"].save(
+        f"items/{item.pk}/audio/source.mp3", ContentFile(payload)
+    )
+    item.save(update_fields=["archived_audio_path"])
+    return item
+
+
+def _archived_audio_url(item: Item) -> str:
+    return reverse("archive:item-archived-audio", kwargs={"pk": item.pk})
+
+
 @pytest.mark.django_db
 def test_item_archived_audio_proxy_returns_archived_audio(client, monkeypatch) -> None:
     item = Item.objects.create(
@@ -467,29 +502,257 @@ def test_item_archived_audio_proxy_returns_archived_audio(client, monkeypatch) -
     assert response.status_code == 200
     assert response["Content-Type"] == "audio/mpeg"
     assert response["Content-Length"] == "9"
+    assert response["Accept-Ranges"] == "bytes"
+    assert response["Cache-Control"] == "public, max-age=3600"
     assert b"".join(response.streaming_content) == b"ID3-audio"
 
 
 @pytest.mark.django_db
-def test_item_article_audio_proxy_returns_generated_audio(client, monkeypatch) -> None:
-    item = Item.objects.create(
-        original_url="https://example.com/article",
-        title="Generated article audio",
-        kind=ItemKind.ARTICLE,
-        article_audio_status="complete",
-        article_audio_generated=True,
-        article_audio_artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+@pytest.mark.parametrize(
+    ("range_header", "start", "end"),
+    [
+        ("bytes=0-1", 0, 1),
+        ("bytes=100-", 100, 511),
+        ("bytes=-10", 502, 511),
+        ("bytes=500-9999", 500, 511),
+        ("bytes=-9999", 0, 511),
+    ],
+)
+def test_item_archived_audio_serves_single_byte_range(
+    client, isolated_archive_media_storage, range_header: str, start: int, end: int
+) -> None:
+    item = _archived_audio_item()
+
+    response = client.get(_archived_audio_url(item), headers={"Range": range_header})
+
+    assert response.status_code == 206
+    assert response["Content-Range"] == f"bytes {start}-{end}/{len(AUDIO_PAYLOAD)}"
+    assert response["Content-Length"] == str(end - start + 1)
+    assert response["Accept-Ranges"] == "bytes"
+    assert response["Content-Type"] == "audio/mpeg"
+    assert b"".join(response.streaming_content) == AUDIO_PAYLOAD[start : end + 1]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("range_header", ["bytes=512-", "bytes=600-700", "bytes=-0"])
+def test_item_archived_audio_rejects_unsatisfiable_range(
+    client, isolated_archive_media_storage, range_header: str
+) -> None:
+    item = _archived_audio_item()
+
+    response = client.get(_archived_audio_url(item), headers={"Range": range_header})
+
+    assert response.status_code == 416
+    assert response["Content-Range"] == f"bytes */{len(AUDIO_PAYLOAD)}"
+    assert response["Accept-Ranges"] == "bytes"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Range": "bytes=0-1,4-5"},
+        {"Range": "items=0-1"},
+        {"Range": "bytes=5-1"},
+        {"Range": "bytes=0-1", "If-Range": '"some-etag"'},
+    ],
+)
+def test_item_archived_audio_ignores_unsupported_range_requests(
+    client, isolated_archive_media_storage, headers: dict[str, str]
+) -> None:
+    item = _archived_audio_item()
+
+    response = client.get(_archived_audio_url(item), headers=headers)
+
+    assert response.status_code == 200
+    assert response["Content-Length"] == str(len(AUDIO_PAYLOAD))
+    assert b"".join(response.streaming_content) == AUDIO_PAYLOAD
+
+
+@pytest.mark.django_db
+def test_item_archived_audio_handles_oversized_range_numerals(
+    client, isolated_archive_media_storage
+) -> None:
+    item = _archived_audio_item()
+    huge = "9" * 4500
+    padded_one = "0" * 4500 + "1"
+    padded_two = "0" * 4500 + "2"
+    size = len(AUDIO_PAYLOAD)
+
+    start_past_end = client.get(_archived_audio_url(item), headers={"Range": f"bytes={huge}-"})
+    huge_end = client.get(_archived_audio_url(item), headers={"Range": f"bytes=0-{huge}"})
+    huge_suffix = client.get(_archived_audio_url(item), headers={"Range": f"bytes=-{huge}"})
+    leading_zeros = client.get(
+        _archived_audio_url(item), headers={"Range": f"bytes={padded_one}-{padded_two}"}
     )
-    monkeypatch.setattr(
-        "archive.views.download_generated_article_audio",
-        lambda item: DownloadedArticleAudio(content_type="audio/mpeg", payload=b"ID3-audio"),
+
+    assert start_past_end.status_code == 416
+    assert start_past_end["Content-Range"] == f"bytes */{size}"
+    assert huge_end.status_code == 206
+    assert huge_end["Content-Range"] == f"bytes 0-{size - 1}/{size}"
+    assert huge_suffix.status_code == 206
+    assert huge_suffix["Content-Range"] == f"bytes 0-{size - 1}/{size}"
+    assert leading_zeros.status_code == 206
+    assert leading_zeros["Content-Range"] == f"bytes 1-2/{size}"
+    assert b"".join(leading_zeros.streaming_content) == AUDIO_PAYLOAD[1:3]
+
+
+@pytest.mark.django_db
+def test_item_archived_audio_head_returns_headers_without_body(
+    client, isolated_archive_media_storage
+) -> None:
+    item = _archived_audio_item()
+
+    response = client.head(_archived_audio_url(item), headers={"Range": "bytes=0-9"})
+
+    assert response.status_code == 206
+    assert response["Content-Range"] == f"bytes 0-9/{len(AUDIO_PAYLOAD)}"
+    assert response["Content-Length"] == "10"
+    assert response.content == b""
+
+
+def _generated_article_audio_item(**overrides) -> Item:
+    fields = {
+        "original_url": "https://example.com/article",
+        "title": "Generated article audio",
+        "kind": ItemKind.ARTICLE,
+        "article_audio_status": "complete",
+        "article_audio_generated": True,
+        "article_audio_artifact_path": "/v1/jobs/job-123/artifacts/speech.mp3",
+    }
+    fields.update(overrides)
+    return Item.objects.create(**fields)
+
+
+class _FakeArtifactResponse:
+    def __init__(self, payload: bytes) -> None:
+        self._stream = io.BytesIO(payload)
+
+        class _Headers:
+            @staticmethod
+            def get_content_type() -> str:
+                return "audio/mpeg"
+
+        self.headers = _Headers()
+
+    def read(self, size: int | None = None) -> bytes:
+        return self._stream.read(size)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        return None
+
+
+@pytest.mark.django_db
+def test_item_article_audio_backfills_from_voxhelm_once(
+    client, monkeypatch, settings, isolated_archive_media_storage
+) -> None:
+    settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = "tts-token"
+    settings.ARCHIVE_ARTICLE_AUDIO_API_BASE = "https://voxhelm.example.test/v1"
+    item = _generated_article_audio_item()
+    calls: list[str] = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(request.full_url)
+        return _FakeArtifactResponse(AUDIO_PAYLOAD)
+
+    monkeypatch.setattr("archive.article_audio.urlopen", fake_urlopen)
+    url = reverse("archive:item-article-audio", kwargs={"pk": item.pk})
+
+    first = client.get(url)
+
+    assert first.status_code == 200
+    assert first["Content-Type"] == "audio/mpeg"
+    assert first["Content-Length"] == str(len(AUDIO_PAYLOAD))
+    assert first["Accept-Ranges"] == "bytes"
+    assert b"".join(first.streaming_content) == AUDIO_PAYLOAD
+    assert calls == ["https://voxhelm.example.test/v1/jobs/job-123/artifacts/speech.mp3"]
+    item.refresh_from_db()
+    assert item.article_audio_storage_path.startswith(f"items/{item.pk}/audio/article-")
+    assert item.article_audio_size_bytes == len(AUDIO_PAYLOAD)
+
+    def fail_urlopen(request, timeout):
+        raise AssertionError("stored article audio must not be fetched from Voxhelm again")
+
+    monkeypatch.setattr("archive.article_audio.urlopen", fail_urlopen)
+
+    second = client.get(url, headers={"Range": "bytes=100-199"})
+
+    assert second.status_code == 206
+    assert second["Content-Range"] == f"bytes 100-199/{len(AUDIO_PAYLOAD)}"
+    assert b"".join(second.streaming_content) == AUDIO_PAYLOAD[100:200]
+
+
+@pytest.mark.django_db
+def test_item_article_audio_serves_stored_copy_without_voxhelm(
+    client, monkeypatch, isolated_archive_media_storage
+) -> None:
+    item = _generated_article_audio_item(
+        article_audio_content_type="audio/mpeg",
+        article_audio_size_bytes=len(AUDIO_PAYLOAD),
     )
+    item.article_audio_storage_path = storages["archive_media"].save(
+        f"items/{item.pk}/audio/article.mp3", ContentFile(AUDIO_PAYLOAD)
+    )
+    item.save(update_fields=["article_audio_storage_path"])
+
+    def fail_urlopen(request, timeout):
+        raise AssertionError("stored article audio must not be fetched from Voxhelm")
+
+    monkeypatch.setattr("archive.article_audio.urlopen", fail_urlopen)
+
+    response = client.get(
+        reverse("archive:item-article-audio", kwargs={"pk": item.pk}),
+        headers={"Range": "bytes=-2"},
+    )
+
+    assert response.status_code == 206
+    assert response["Content-Range"] == f"bytes 510-511/{len(AUDIO_PAYLOAD)}"
+    assert b"".join(response.streaming_content) == AUDIO_PAYLOAD[-2:]
+
+
+@pytest.mark.django_db
+def test_item_article_audio_serves_concurrent_winner_when_own_copy_was_replaced(
+    client, monkeypatch, isolated_archive_media_storage
+) -> None:
+    item = _generated_article_audio_item()
+    winner_name = f"items/{item.pk}/audio/article-winner.mp3"
+
+    def racing_store(item, timeout=30):
+        # Our copy is published, then a concurrent backfill replaces and deletes it.
+        storages["archive_media"].save(winner_name, ContentFile(AUDIO_PAYLOAD))
+        Item.objects.filter(pk=item.pk).update(
+            article_audio_storage_path=winner_name,
+            article_audio_content_type="audio/mpeg",
+            article_audio_size_bytes=len(AUDIO_PAYLOAD),
+        )
+        item.article_audio_storage_path = f"items/{item.pk}/audio/article-deleted.mp3"
+
+    monkeypatch.setattr("archive.views.store_generated_article_audio", racing_store)
 
     response = client.get(reverse("archive:item-article-audio", kwargs={"pk": item.pk}))
 
     assert response.status_code == 200
-    assert response["Content-Type"] == "audio/mpeg"
-    assert response.content == b"ID3-audio"
+    assert response["Content-Length"] == str(len(AUDIO_PAYLOAD))
+    assert b"".join(response.streaming_content) == AUDIO_PAYLOAD
+
+
+@pytest.mark.django_db
+def test_item_article_audio_returns_502_when_backfill_fails(
+    client, monkeypatch, isolated_archive_media_storage
+) -> None:
+    item = _generated_article_audio_item()
+
+    def fail_store(item, timeout=30):
+        raise ArticleAudioGenerationError("Voxhelm unavailable")
+
+    monkeypatch.setattr("archive.views.store_generated_article_audio", fail_store)
+
+    response = client.get(reverse("archive:item-article-audio", kwargs={"pk": item.pk}))
+
+    assert response.status_code == 502
 
 
 @pytest.mark.django_db

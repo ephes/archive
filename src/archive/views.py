@@ -424,7 +424,9 @@ def _api_request_is_authorized(request: HttpRequest) -> bool:
     auth_header = request.headers.get("Authorization", "")
     expected_header = f"Bearer {settings.ARCHIVE_API_TOKEN}"
     return bool(
-        settings.ARCHIVE_API_TOKEN and hmac.compare_digest(auth_header, expected_header)
+        settings.ARCHIVE_API_TOKEN
+        # Compare bytes: compare_digest raises TypeError on non-ASCII str.
+        and hmac.compare_digest(auth_header.encode("utf-8"), expected_header.encode("utf-8"))
     )
 
 

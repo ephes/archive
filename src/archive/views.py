@@ -30,7 +30,11 @@ from django.views.decorators.http import require_GET, require_http_methods
 from django.views.generic.edit import CreateView
 
 from archive.article_audio import ArticleAudioGenerationError, download_generated_article_audio
-from archive.classification import CURRENT_CLASSIFICATION_ENGINE_VERSION, classify_item, podcast_feed_decision_for_item
+from archive.classification import (
+    CURRENT_CLASSIFICATION_ENGINE_VERSION,
+    classify_item,
+    podcast_feed_decision_for_item,
+)
 from archive.forms import ArchiveAuthenticationForm, ItemForm
 from archive.media_archival import MediaArchivalError, open_archived_audio
 from archive.models import Item, ItemKind
@@ -554,7 +558,9 @@ def _apply_api_quote_classifier_kind(*, item: Item) -> list[str]:
     if item.classification_engine_version != CURRENT_CLASSIFICATION_ENGINE_VERSION:
         item.classification_engine_version = CURRENT_CLASSIFICATION_ENGINE_VERSION
         update_fields.append("classification_engine_version")
-    evidence = item.classification_evidence if isinstance(item.classification_evidence, dict) else {}
+    evidence = (
+        item.classification_evidence if isinstance(item.classification_evidence, dict) else {}
+    )
     next_evidence = {**evidence, "quote_classifier": {"kind": ItemKind.QUOTE}}
     if item.classification_evidence != next_evidence:
         item.classification_evidence = next_evidence

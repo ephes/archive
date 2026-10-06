@@ -471,3 +471,55 @@ def test_resaving_after_url_edit_keeps_new_capture_key(client, api_url: str) -> 
     assert to_b.status_code == 200
     assert to_b.json()["id"] == item.pk
     assert to_a.status_code == 201
+
+
+@pytest.mark.django_db
+def test_partial_saves_do_not_skip_url_hand_over(client, api_url: str) -> None:
+    item = Item.objects.get(
+        pk=_post(client, api_url, {"url": "https://example.com/a"}).json()["id"]
+    )
+    item.original_url = "https://example.com/b"
+    item.save(update_fields=["title"])
+    item.save(update_fields=["original_url"])
+
+    item.refresh_from_db()
+    assert item.url_key == capture_key_for_url("https://example.com/b")
+    assert item.capture_key == capture_key_for_url("https://example.com/b")
+    assert _post(client, api_url, {"url": "https://example.com/a"}).status_code == 201
+
+
+@pytest.mark.django_db
+def test_url_edit_with_deferred_fields_restores_previous_holder(client, api_url: str) -> None:
+    older = Item.objects.create(
+        original_url="https://example.com/a", shared_at=timezone.now() - timedelta(hours=1)
+    )
+    newer = Item.objects.create(original_url="https://example.com/a")
+    loaded = Item.objects.only("id", "original_url").get(pk=newer.pk)
+    loaded.original_url = "https://example.com/b"
+    loaded.save()
+
+    again = _post(client, api_url, {"url": "https://example.com/a"})
+
+    assert again.status_code == 200
+    assert again.json()["id"] == older.pk
+
+
+@pytest.mark.django_db
+def test_deleting_stale_instance_still_hands_over_holder(client, api_url: str) -> None:
+    now = timezone.now()
+    oldest = Item.objects.create(
+        original_url="https://example.com/a", shared_at=now - timedelta(hours=2)
+    )
+    middle = Item.objects.create(
+        original_url="https://example.com/a", shared_at=now - timedelta(hours=1)
+    )
+    newest = Item.objects.create(original_url="https://example.com/a", shared_at=now)
+    stale_middle = Item.objects.get(pk=middle.pk)
+    assert stale_middle.capture_key is None
+
+    newest.delete()
+    stale_middle.delete()
+
+    again = _post(client, api_url, {"url": "https://example.com/a"})
+    assert again.status_code == 200
+    assert again.json()["id"] == oldest.pk

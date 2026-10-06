@@ -34,6 +34,7 @@ __all__ = [
     "find_recent_capture",
     "normalize_capture_url",
     "sync_capture_holder",
+    "take_capture_write_lock",
 ]
 
 IDEMPOTENCY_KEY_MAX_LENGTH = 255
@@ -97,7 +98,7 @@ def capture_item(
             time.sleep(_RETRY_BACKOFF_SECONDS * attempt)
         try:
             with transaction.atomic():
-                _take_write_lock()
+                take_capture_write_lock()
                 return _capture_once(
                     item,
                     key=key,
@@ -117,7 +118,7 @@ def capture_item(
     raise last_error
 
 
-def _take_write_lock() -> None:
+def take_capture_write_lock() -> None:
     """Serialise captures on SQLite before the duplicate lookup.
 
     A deferred SQLite transaction that reads first cannot upgrade to a writer once another
@@ -182,7 +183,7 @@ def sync_capture_holder(url_key: str) -> None:
     if not url_key:
         return
     with transaction.atomic():
-        _take_write_lock()
+        take_capture_write_lock()
         newest = (
             Item.objects.filter(url_key=url_key)
             .order_by("-shared_at", "-id")

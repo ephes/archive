@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from django.db import models
+from django.db import models, transaction
 from django.urls import reverse
 from django.utils import timezone
 
@@ -139,12 +139,6 @@ class Item(models.Model):
     def __str__(self) -> str:
         return self.display_title
 
-    @classmethod
-    def from_db(cls, db, field_names, values):
-        instance = super().from_db(db, field_names, values)
-        instance._loaded_url_key = instance.__dict__.get("url_key")
-        return instance
-
     @property
     def display_title(self) -> str:
         return self.title or self.original_url
@@ -241,7 +235,7 @@ class Item(models.Model):
 
         if not getattr(self, "_capture_managed", False):
             # capture_key is owned by archive.capture: ordinary saves must not write a stale
-            # in-memory value over it. New items get it from the post_save signal.
+            # in-memory value over it. New items get it from _save_and_sync_capture_holder.
             if self._state.adding:
                 self.capture_key = None
             elif kwargs.get("update_fields") is None:
@@ -270,7 +264,35 @@ class Item(models.Model):
         self.url_key = capture_key_for_url(self.original_url)
         if update_fields is not None and "original_url" in update_fields:
             kwargs["update_fields"] = sorted({*update_fields, "url_key"})
-        super().save(*args, **kwargs)
+            update_fields = kwargs["update_fields"]
+        writes_url = update_fields is None or "url_key" in update_fields
+        if getattr(self, "_capture_managed", False) or not writes_url:
+            super().save(*args, **kwargs)
+            return
+        self._save_and_sync_capture_holder(*args, **kwargs)
+
+    def _save_and_sync_capture_holder(self, *args, **kwargs) -> None:
+        """Persist a URL write and move capture holders in the same transaction.
+
+        The previous fingerprint is read from the database (not from instance state), so
+        partial saves, deferred fields and stale instances cannot skip the hand-over.
+        """
+        from archive.capture import sync_capture_holder, take_capture_write_lock
+
+        with transaction.atomic():
+            take_capture_write_lock()
+            previous = None
+            if not self._state.adding and self.pk is not None:
+                previous = (
+                    Item.objects.filter(pk=self.pk).values_list("url_key", flat=True).first()
+                )
+            super().save(*args, **kwargs)
+            if previous and previous != self.url_key:
+                sync_capture_holder(previous)
+            sync_capture_holder(self.url_key)
+            self.capture_key = (
+                Item.objects.filter(pk=self.pk).values_list("capture_key", flat=True).first()
+            )
 
     def _processing_started_at_value(self):
         if self._has_processing_status():

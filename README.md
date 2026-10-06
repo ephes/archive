@@ -175,6 +175,21 @@ CI (`.github/workflows/ci.yml`) runs `ruff check .` and the test suite on Python
 deployed version) for every push and pull request. It uses the locked dependencies
 (`UV_FROZEN`), read-only permissions and no secrets.
 
+## Admin user
+
+`ensure_admin_user` creates or updates the admin/editor account. It reads the password from the
+`ARCHIVE_ADMIN_PASSWORD` environment variable, or from the first line of standard input with
+`--password-stdin`, so the password never appears in the process list or in deploy logs:
+
+```bash
+ARCHIVE_ADMIN_PASSWORD=... just manage ensure_admin_user --username owner --email owner@example.com
+printf '%s\n' "$PASSWORD" | just manage ensure_admin_user --username owner --password-stdin
+```
+
+The password is only re-hashed when it differs from the stored one, so re-running the command on
+every deploy no longer logs the user out. `--password` still works for compatibility but is
+deprecated and prints a warning.
+
 ## Configuration
 
 The app reads its runtime configuration from environment variables.

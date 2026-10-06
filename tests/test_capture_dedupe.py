@@ -523,3 +523,11 @@ def test_deleting_stale_instance_still_hands_over_holder(client, api_url: str) -
     again = _post(client, api_url, {"url": "https://example.com/a"})
     assert again.status_code == 200
     assert again.json()["id"] == oldest.pk
+
+
+def test_sqlite_transactions_take_the_write_lock_up_front() -> None:
+    from django.conf import settings
+
+    database = settings.DATABASES["default"]
+    if database["ENGINE"] == "django.db.backends.sqlite3":
+        assert database["OPTIONS"]["transaction_mode"] == "IMMEDIATE"

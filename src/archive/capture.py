@@ -6,9 +6,10 @@ same URL within ``ARCHIVE_CAPTURE_DEDUPE_SECONDS`` return the existing item inst
 
 Every item stores ``url_key``, the hash of its normalised URL. The newest item per ``url_key``
 also holds ``capture_key`` (a partial unique index), and client ``Idempotency-Key`` values live
-in ``CaptureIdempotencyKey`` (unique). On SQLite captures take the write lock before looking
-anything up, so they run one after another; the unique indexes plus the retry loop keep other
-databases, and any path that skips the lock, from creating a second capture.
+in ``CaptureIdempotencyKey`` (unique). The SQLite connection uses ``BEGIN IMMEDIATE``
+(settings), so each capture transaction holds the write lock before it looks anything up and
+concurrent captures run one after another; the unique indexes plus the retry loop keep other
+databases from creating a second capture.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from django.conf import settings
-from django.db import IntegrityError, OperationalError, connection, transaction
+from django.db import IntegrityError, OperationalError, transaction
 from django.utils import timezone
 
 from archive.models import CaptureIdempotencyKey, Item
@@ -34,7 +35,6 @@ __all__ = [
     "find_recent_capture",
     "normalize_capture_url",
     "sync_capture_holder",
-    "take_capture_write_lock",
 ]
 
 IDEMPOTENCY_KEY_MAX_LENGTH = 255
@@ -98,7 +98,6 @@ def capture_item(
             time.sleep(_RETRY_BACKOFF_SECONDS * attempt)
         try:
             with transaction.atomic():
-                take_capture_write_lock()
                 return _capture_once(
                     item,
                     key=key,
@@ -116,20 +115,6 @@ def capture_item(
     if isinstance(last_error, _CaptureRetry):
         raise RuntimeError("Capture did not settle after concurrent updates") from last_error
     raise last_error
-
-
-def take_capture_write_lock() -> None:
-    """Serialise captures on SQLite before the duplicate lookup.
-
-    A deferred SQLite transaction that reads first cannot upgrade to a writer once another
-    connection has written, and fails immediately instead of waiting. A no-op write as the
-    first statement takes the write lock up front, so concurrent captures wait for each other
-    (up to the connection's busy timeout) and then see the winner.
-    """
-    if connection.vendor != "sqlite":
-        return
-    with connection.cursor() as cursor:
-        cursor.execute(f"UPDATE {Item._meta.db_table} SET id = id WHERE 0")
 
 
 def _capture_once(
@@ -183,7 +168,6 @@ def sync_capture_holder(url_key: str) -> None:
     if not url_key:
         return
     with transaction.atomic():
-        take_capture_write_lock()
         newest = (
             Item.objects.filter(url_key=url_key)
             .order_by("-shared_at", "-id")

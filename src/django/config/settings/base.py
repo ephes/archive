@@ -65,6 +65,10 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": os.getenv("DJANGO_DB_PATH", str(PROJECT_ROOT / "db.sqlite3")),
+        # BEGIN IMMEDIATE: transactions take the write lock up front and wait for it (busy
+        # timeout) instead of failing with "database is locked" when a read must upgrade to a
+        # write. Capture deduplication relies on this to serialise concurrent captures.
+        "OPTIONS": {"transaction_mode": "IMMEDIATE"},
     }
 }
 

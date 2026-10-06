@@ -163,7 +163,7 @@ A new item returns `201` with `{"id", "detail_url", "duplicate": false}`. Repeat
 - If the same URL was captured within `ARCHIVE_CAPTURE_DEDUPE_SECONDS` (default 24 hours), the API returns `200` with the existing item's `{"id", "detail_url", "duplicate": true}` and creates nothing. URLs are compared after lower-casing scheme and host, dropping default ports, the `#fragment`, and tracking parameters (`utm_*`, `fbclid`, `gclid`, `mc_cid`, `mc_eid`). Path case and other query parameters still distinguish URLs.
 - Sharing the URL again after the window creates a new item on purpose. Later shares are compared against the newest item with that URL; editing an item's URL or deleting the newest copy moves that role to the newest remaining copy. `ARCHIVE_CAPTURE_DEDUPE_SECONDS=0` turns URL deduplication off.
 - Clients that can send an `Idempotency-Key` header (up to 255 characters) get the item their first request with that key resolved to, whatever the window and even if that request was itself deduplicated. Reusing a key with a different URL than that first request returns `409`.
-- The check is race-safe: on SQLite each capture takes the database write lock before looking for duplicates, and unique indexes on the newest copy's URL fingerprint and on idempotency keys make a losing concurrent request retry and return the winner as a duplicate.
+- The check is race-safe: the SQLite connection uses `BEGIN IMMEDIATE` transactions, so each capture holds the database write lock before looking for duplicates, and unique indexes on the newest copy's URL fingerprint and on idempotency keys make a losing concurrent request retry and return the winner as a duplicate.
 
 The authenticated `/items/new/` form warns when the URL was captured within the window and offers **Save duplicate anyway** to create a second item deliberately.
 
@@ -187,7 +187,7 @@ Important values:
 - `DJANGO_SECRET_KEY`
 - `DJANGO_ALLOWED_HOSTS`
 - `DJANGO_CSRF_TRUSTED_ORIGINS`
-- `DJANGO_DB_PATH`
+- `DJANGO_DB_PATH` (SQLite; transactions use `BEGIN IMMEDIATE` so concurrent writers wait for the lock instead of failing)
 - `ARCHIVE_API_TOKEN`
 - `ARCHIVE_CAPTURE_DEDUPE_SECONDS` defaults to `86400` (24 hours); repeated captures of the same normalised URL within this window return the existing item, `0` disables it (see [API](#api))
 - `ARCHIVE_SUMMARY_API_KEY`

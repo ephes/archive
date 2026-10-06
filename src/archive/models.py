@@ -277,10 +277,9 @@ class Item(models.Model):
         The previous fingerprint is read from the database (not from instance state), so
         partial saves, deferred fields and stale instances cannot skip the hand-over.
         """
-        from archive.capture import sync_capture_holder, take_capture_write_lock
+        from archive.capture import sync_capture_holder
 
         with transaction.atomic():
-            take_capture_write_lock()
             previous = None
             if not self._state.adding and self.pk is not None:
                 previous = (

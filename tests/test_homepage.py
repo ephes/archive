@@ -604,11 +604,14 @@ def test_item_archived_audio_head_returns_headers_without_body(
     item = _archived_audio_item()
 
     response = client.head(_archived_audio_url(item), headers={"Range": "bytes=0-9"})
+    unsatisfiable = client.head(_archived_audio_url(item), headers={"Range": "bytes=9999-"})
 
-    assert response.status_code == 206
-    assert response["Content-Range"] == f"bytes 0-9/{len(AUDIO_PAYLOAD)}"
-    assert response["Content-Length"] == "10"
+    assert response.status_code == 200
+    assert response.has_header("Content-Range") is False
+    assert response["Content-Length"] == str(len(AUDIO_PAYLOAD))
+    assert response["Accept-Ranges"] == "bytes"
     assert response.content == b""
+    assert unsatisfiable.status_code == 200
 
 
 def _generated_article_audio_item(**overrides) -> Item:
@@ -1294,3 +1297,79 @@ def test_admin_downstream_state_diagnostic_does_not_mutate_item() -> None:
 )
 def test_infer_kind(url: str, explicit_kind: str, audio_url: str, expected: str) -> None:
     assert infer_kind(url=url, explicit_kind=explicit_kind, audio_url=audio_url) == expected
+
+
+class _FakeS3Body:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+        self.closed = False
+
+    def iter_chunks(self, chunk_size: int):
+        for offset in range(0, len(self._payload), chunk_size):
+            yield self._payload[offset : offset + chunk_size]
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeS3Object:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+        self.get_calls: list[str] = []
+        self.bodies: list[_FakeS3Body] = []
+
+    def get(self, Range: str):  # noqa: N803 - boto3 parameter name
+        self.get_calls.append(Range)
+        start, end = (int(part) for part in Range.removeprefix("bytes=").split("-"))
+        body = _FakeS3Body(self._payload[start : end + 1])
+        self.bodies.append(body)
+        return {"Body": body}
+
+    def download_fileobj(self, *args, **kwargs):
+        raise AssertionError("ranged playback must not download the whole S3 object")
+
+
+def _fake_s3_file(payload: bytes):
+    from storages.backends.s3 import S3File
+
+    s3_file = S3File.__new__(S3File)
+    s3_file.name = "items/1/audio/source.mp3"
+    s3_file._mode = "rb"
+    s3_file._file = None
+    s3_file._closed = False
+    s3_file._reset_file_properties()
+    s3_file.obj = _FakeS3Object(payload)
+    return s3_file
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("headers", "status", "expected_range"),
+    [
+        ({"Range": "bytes=0-1"}, 206, "bytes=0-1"),
+        ({}, 200, f"bytes=0-{len(AUDIO_PAYLOAD) - 1}"),
+    ],
+)
+def test_item_archived_audio_streams_s3_objects_with_ranged_get(
+    client, monkeypatch, headers: dict[str, str], status: int, expected_range: str
+) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/episode",
+        title="Archived episode",
+        kind=ItemKind.PODCAST_EPISODE,
+        archived_audio_path="items/1/audio/source.mp3",
+        archived_audio_content_type="audio/mpeg",
+        archived_audio_size_bytes=len(AUDIO_PAYLOAD),
+    )
+    s3_file = _fake_s3_file(AUDIO_PAYLOAD)
+    monkeypatch.setattr("archive.views.open_archived_audio", lambda item: s3_file)
+
+    response = client.get(_archived_audio_url(item), headers=headers)
+    body = b"".join(response.streaming_content)
+
+    assert response.status_code == status
+    assert s3_file.obj.get_calls == [expected_range]
+    start, end = (int(part) for part in expected_range.removeprefix("bytes=").split("-"))
+    assert body == AUDIO_PAYLOAD[start : end + 1]
+    assert s3_file.obj.bodies[0].closed is True
+    assert s3_file.closed is True

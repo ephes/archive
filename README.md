@@ -23,8 +23,9 @@ Public endpoints:
 - `/feeds/week/<YYYY-Wnn>.json` read-only JSON feed of public items shared in an ISO week
 - `/items/<id>/audio/` (archived source audio) and `/items/<id>/article-audio/` (generated article audio)
   served from archive-media storage; both answer single `Range: bytes=...` requests with `206 Partial Content`
-  (`Accept-Ranges: bytes`, `Content-Range`, `416` for unsatisfiable ranges) and support `HEAD`, so podcast
-  apps and browsers can seek and resume
+  (`Accept-Ranges: bytes`, `Content-Range`, `416` for unsatisfiable ranges) and answer `HEAD` with the full
+  length, so podcast apps and browsers can seek and resume; with S3 storage each request fetches only the
+  requested bytes via a ranged `GetObject` instead of downloading the whole object
 - `/feeds/podcast.xml` podcast-style feed for items with stable local audio enclosures
 - `/feeds/podcast/page/<n>.xml` older podcast feed pages when more than 50 eligible items exist
 

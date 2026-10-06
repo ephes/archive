@@ -167,6 +167,14 @@ just check
 just dev
 ```
 
+`just check` runs lint, type checks and tests. `just audit` checks the locked dependencies
+against known vulnerabilities with `pip-audit`; refresh a flagged package with
+`uv lock --upgrade-package <name>`.
+
+CI (`.github/workflows/ci.yml`) runs `ruff check .` and the test suite on Python 3.12 (the
+deployed version) for pushes to `main` and for pull requests. It uses the locked dependencies
+(`UV_FROZEN`), read-only permissions and no secrets.
+
 ## Configuration
 
 The app reads its runtime configuration from environment variables.

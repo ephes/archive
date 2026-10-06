@@ -10,6 +10,10 @@ test *args:
 lint:
     uv run ruff check .
 
+# Audit the locked runtime and dev dependencies for known vulnerabilities.
+audit:
+    uv export --frozen --no-hashes --no-emit-project | uvx pip-audit --disable-pip --no-deps -r /dev/stdin
+
 format:
     uv run ruff format .
     uv run ruff check --fix .

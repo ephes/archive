@@ -1,0 +1,52 @@
+name: CI
+
+# Same commands as `just lint` and `just test`, run through uv directly. The
+# test settings (config.settings.test) use SQLite, filesystem storage and a
+# fixed secret, so no secrets or services are needed. Python 3.12 matches the
+# version the archive_deploy role installs in production.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'supersedable' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  PYTHONUNBUFFERED: "1"
+  UV_FROZEN: "1"
+  UV_NO_PROGRESS: "1"
+  UV_PYTHON: "3.12"
+
+jobs:
+  check:
+    name: Lint and tests (Python 3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Sync locked dependencies
+        run: uv sync --all-groups
+      - name: Lint (just lint)
+        run: uv run ruff check .
+      - name: Tests (just test)
+        run: uv run pytest -q

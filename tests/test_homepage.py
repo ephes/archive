@@ -547,6 +547,25 @@ def test_api_rejects_invalid_token(client, api_url: str, settings) -> None:
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("post", "/api/items/"), ("patch", "/api/items/1/")],
+)
+def test_api_rejects_non_ascii_token(client, settings, method: str, path: str) -> None:
+    settings.ARCHIVE_API_TOKEN = "right-token"
+
+    response = getattr(client, method)(
+        path,
+        data='{"url":"https://example.com/shared"}',
+        content_type="application/json",
+        headers={"Authorization": "Bearer t\u00e9-\u00fcber"},
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {"error": "Unauthorized"}
+
+
+@pytest.mark.django_db
 def test_api_accepts_token_auth_without_csrf(settings) -> None:
     settings.ARCHIVE_API_TOKEN = "test-token"
     client = Client(enforce_csrf_checks=True)

@@ -4,6 +4,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from functools import partial
 
 from django.conf import settings
 from django.db import transaction
@@ -22,8 +23,7 @@ from archive.classification import (
 )
 from archive.media_archival import archive_item_audio, can_archive_audio
 from archive.media_storage import (
-    archive_media_path_is_referenced,
-    delete_archive_media_paths,
+    delete_unreferenced_archive_media_paths,
     item_archive_media_paths,
     release_pending_archive_media_paths,
 )
@@ -77,13 +77,10 @@ def _clear_stale_archive_media(
 
     using = item._state.db or "default"
 
-    def delete_unreferenced_paths() -> None:
-        paths_to_delete = [
-            path for path in stale_paths if not archive_media_path_is_referenced(path, using=using)
-        ]
-        delete_archive_media_paths(paths_to_delete)
-
-    transaction.on_commit(delete_unreferenced_paths, using=using)
+    transaction.on_commit(
+        partial(delete_unreferenced_archive_media_paths, stale_paths, using=using),
+        using=using,
+    )
 
 
 @dataclass(frozen=True)
@@ -385,18 +382,21 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
         logger.exception("Audio archival failed for item %s", item.pk)
         return _mark_media_archive_failure(item, str(exc))
 
-    old_values = {
-        field: getattr(item, field)
-        for field in (
-            "archived_audio_path",
-            "archived_audio_content_type",
-            "archived_audio_size_bytes",
-            "archived_video_path",
-            "archived_video_content_type",
-            "archived_video_size_bytes",
-        )
-    }
+    published_fields = [
+        "archived_audio_path",
+        "archived_audio_content_type",
+        "archived_audio_size_bytes",
+        "archived_video_path",
+        "archived_video_content_type",
+        "archived_video_size_bytes",
+        "media_archive_status",
+        "media_archive_error",
+        "media_archive_retry_count",
+        "media_archive_retry_at",
+    ]
+    old_values = {field: getattr(item, field) for field in published_fields}
     old_paths = item_archive_media_paths(item)
+    new_paths = (archived_audio.object_name, archived_audio.source_object_name)
     using = item._state.db or "default"
     try:
         # A durable boundary prevents a caller from rolling back after publication.
@@ -411,40 +411,31 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
             item.media_archive_error = ""
             item.media_archive_retry_count = 0
             item.media_archive_retry_at = None
-            item.save(
-                update_fields=[
-                    "archived_audio_path",
-                    "archived_audio_content_type",
-                    "archived_audio_size_bytes",
-                    "archived_video_path",
-                    "archived_video_content_type",
-                    "archived_video_size_bytes",
-                    "media_archive_status",
-                    "media_archive_error",
-                    "media_archive_retry_count",
-                    "media_archive_retry_at",
-                ]
+            item.save(update_fields=published_fields)
+            # The reservations end in the transaction that commits the references,
+            # so the new objects are never both unreserved and unreferenced.
+            release_pending_archive_media_paths(new_paths, using=using)
+            transaction.on_commit(
+                partial(delete_unreferenced_archive_media_paths, old_paths, using=using),
+                using=using,
+                robust=True,
             )
     except BaseException:
-        for field, value in old_values.items():
-            setattr(item, field, value)
+        # The commit may have completed before the failure surfaced (for example a
+        # processing alarm during or after COMMIT), so nothing here may assume the
+        # new objects are unpublished: only objects verified unreferenced go away.
         try:
-            delete_archive_media_paths(
-                (archived_audio.object_name, archived_audio.source_object_name)
-            )
+            delete_unreferenced_archive_media_paths(new_paths, using=using, owns_reservation=True)
         except Exception:
-            logger.exception("Failed to compensate unpublished media for item %s", item.pk)
+            logger.exception("Failed to discard unpublished media for item %s", item.pk)
+        # Leave the caller's instance matching whatever was actually committed.
+        try:
+            item.refresh_from_db(fields=published_fields)
+        except Exception:
+            for field, value in old_values.items():
+                setattr(item, field, value)
         raise
 
-    def remove_superseded() -> None:
-        release_pending_archive_media_paths(
-            (archived_audio.object_name, archived_audio.source_object_name)
-        )
-        delete_archive_media_paths(
-            path for path in old_paths if not archive_media_path_is_referenced(path, using=using)
-        )
-
-    transaction.on_commit(remove_superseded, using=using, robust=True)
     return True
 
 
@@ -1295,7 +1286,8 @@ def _set_normalized_attr(
     if current_value == value:
         return
     changes.append(
-        f"{label}: {_display_normalized_value(current_value)} -> {_display_normalized_value(value)}"
+        f"{label}: {_display_normalized_value(current_value)} -> "
+        f"{_display_normalized_value(value)}"
     )
     if update_fields is not None:
         setattr(item, field_name, value)
@@ -1378,7 +1370,9 @@ def apply_operator_kind_override(
         pending_fields.append("classification_engine_version")
 
     evidence = (
-        item.classification_evidence if isinstance(item.classification_evidence, dict) else {}
+        item.classification_evidence
+        if isinstance(item.classification_evidence, dict)
+        else {}
     )
     override_evidence = {
         **evidence,
@@ -1411,7 +1405,9 @@ def _normalize_article_audio_status_for_kind(
     update_fields: list[str],
 ) -> None:
     status = (
-        EnrichmentStatus.PENDING if item.kind == ItemKind.ARTICLE else EnrichmentStatus.COMPLETE
+        EnrichmentStatus.PENDING
+        if item.kind == ItemKind.ARTICLE
+        else EnrichmentStatus.COMPLETE
     )
     if item.has_generated_article_audio:
         status = EnrichmentStatus.COMPLETE

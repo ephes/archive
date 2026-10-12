@@ -5,9 +5,8 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from archive.media_storage import (
-    archive_media_path_is_pending,
-    archive_media_path_is_referenced,
-    delete_archive_media_paths,
+    ARCHIVE_MEDIA_STORAGE_ALIAS,
+    delete_unreferenced_archive_media_paths,
     iter_archive_media_object_names,
     referenced_archive_media_paths,
 )
@@ -52,20 +51,11 @@ class Command(BaseCommand):
         deleted_paths: list[str] = []
         if delete_mode and orphaned_paths:
             for path in orphaned_paths:
-                if archive_media_path_is_pending(path) or archive_media_path_is_referenced(path):
+                if not self._is_old_enough(path, options["min_age_seconds"]):
                     continue
-                if options["min_age_seconds"] > 0:
-                    try:
-                        age = timezone.now() - storages["archive_media"].get_modified_time(path)
-                    except (NotImplementedError, OSError):
-                        continue
-                    if age.total_seconds() < options["min_age_seconds"]:
-                        continue
-                # Recheck after storage metadata work and immediately before deletion.
-                if not archive_media_path_is_referenced(path) and not archive_media_path_is_pending(
-                    path
-                ):
-                    deleted_paths.extend(delete_archive_media_paths((path,)))
+                # The snapshot above only selects candidates. Reservations and
+                # references are verified again, transactionally, per object.
+                deleted_paths.extend(delete_unreferenced_archive_media_paths((path,)))
             deleted_label = "object" if len(deleted_paths) == 1 else "objects"
             self.stdout.write(
                 self.style.SUCCESS(
@@ -83,3 +73,12 @@ class Command(BaseCommand):
             f"deleted={len(deleted_paths)} "
             f"mode={mode_label}"
         )
+
+    def _is_old_enough(self, path: str, min_age_seconds: int) -> bool:
+        if min_age_seconds <= 0:
+            return True
+        try:
+            modified = storages[ARCHIVE_MEDIA_STORAGE_ALIAS].get_modified_time(path)
+        except (NotImplementedError, OSError):
+            return False
+        return (timezone.now() - modified).total_seconds() >= min_age_seconds

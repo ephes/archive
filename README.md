@@ -419,25 +419,39 @@ Migration note:
 
 ## Media publication and orphan recovery
 
+Invariant: an archive media object is deleted only after it has been verified,
+in its own durable database transaction, that no committed item references it.
+All deletions (replacement, item deletion, stale-media clearing, failed-upload
+discard and orphan cleanup) go through that single check; whenever the check
+cannot run or is in doubt, the object is kept and left for a later sweep.
+
 Media replacements use fresh object namespaces. Existing audio/video and database
-references survive failed uploads or database publication; failed new uploads are
-compensated. Publication uses a durable database transaction and cannot be nested
-inside an application transaction. Superseded objects are deleted only after commit,
-with a reference recheck so shared objects survive. Cleanup failures leave objects
-for operator recovery rather than undoing successful publication.
+references survive failed uploads and failed database publication. Publication uses
+a durable database transaction and cannot be nested inside an application
+transaction. Superseded objects are deleted only after commit. A failure that
+surfaces during or after the commit (for example the worker's processing alarm)
+never deletes the new objects when their references were committed; at worst the
+superseded objects stay behind as ordinary orphans.
 
 A `PendingArchiveMediaUpload` reservation commits before each storage write and
-protects its entire namespace until publication or successful compensation.
-Orphan cleanup rechecks both reservations and item references immediately before
-deletion. `--min-age-seconds` adds an age grace (default 3600); even zero never
-bypasses pending reservations. Backends without modification times are skipped when
-the grace is enabled. Dry-run lists snapshot candidates without deleting anything;
-subsequent delete mode may skip candidates that have become referenced or protected.
-Apply database migrations before running updated workers or cleanup.
+protects its namespace. Publication removes the reservation in the same transaction
+that commits the item references, so an uploaded object is always either reserved
+or referenced. Orphan cleanup treats its initial listing only as a candidate list:
+for each candidate it checks the reservation first and the item references second,
+inside one transaction, and deletes only when both are absent. `--min-age-seconds`
+adds an age grace (default 3600); even zero never bypasses reservations or
+references. Backends without modification times are skipped when the grace is
+enabled. Dry-run lists snapshot candidates without deleting anything; delete mode
+may skip candidates that are reserved or have become referenced. Cleanup can run
+while workers are archiving. Apply database migrations before running updated
+workers or cleanup.
 
-After an unclean worker crash or failed compensation, pending reservations deliberately remain protected indefinitely.
-Stop the affected worker and confirm no upload/publication is active before removing
-its reservation in the Django shell; then rerun orphan cleanup. Do not expire pending
-records solely by age. Direct callers of `archive_item_audio` receive staged objects
-and must publish them and release reservations, or compensate them through
-`delete_archive_media_paths`; the worker service handles this lifecycle automatically.
+After an unclean worker crash, or when discarding a failed upload could not be
+verified, reservations deliberately remain and keep their objects protected
+indefinitely. Stop the affected worker and confirm no upload/publication is active
+before removing the reservation in the Django shell; then rerun orphan cleanup. Do
+not expire reservations solely by age. Direct callers of `archive_item_audio`
+receive staged, reserved objects and must either publish them (releasing the
+reservations in the publishing transaction) or discard them with
+`delete_unreferenced_archive_media_paths(..., owns_reservation=True)`; the worker
+service handles this lifecycle automatically.

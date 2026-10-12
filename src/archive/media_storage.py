@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 
 from django.core.files.storage import storages
+from django.db import transaction
 from django.db.models import Q
 
 ARCHIVE_MEDIA_STORAGE_ALIAS = "archive_media"
@@ -17,13 +18,47 @@ def item_archive_media_paths(item) -> tuple[str, ...]:
     )
 
 
-def delete_archive_media_paths(paths: Iterable[str]) -> list[str]:
+def delete_unreferenced_archive_media_paths(
+    paths: Iterable[str],
+    *,
+    using: str = "default",
+    owns_reservation: bool = False,
+) -> list[str]:
+    """Delete objects that no committed item references; keep everything else.
+
+    This is the only archive media deletion path. Each object is verified in its
+    own durable transaction, so the checks never observe a caller's uncommitted
+    changes and a caller's later rollback cannot revive a reference to a deleted
+    object. The upload reservation is examined before the item references:
+    publication removes the reservation in the same transaction that commits the
+    reference, so an object seen without a reservation already has its committed
+    reference visible to the second check. Callers that created the reservation
+    pass ``owns_reservation`` to discard their own unpublished upload.
+    """
+    from archive.models import Item, PendingArchiveMediaUpload
+
     storage = storages[ARCHIVE_MEDIA_STORAGE_ALIAS]
     deleted_paths: list[str] = []
     for path in _normalized_unique_paths(paths):
-        storage.delete(path)
+        with transaction.atomic(using=using, durable=True):
+            reservations = (
+                PendingArchiveMediaUpload.objects.using(using)
+                .select_for_update()
+                .filter(prefix=_reservation_prefix(path))
+            )
+            if not owns_reservation and reservations.exists():
+                continue
+            if (
+                Item.objects.using(using)
+                .select_for_update()
+                .filter(Q(archived_audio_path=path) | Q(archived_video_path=path))
+                .exists()
+            ):
+                continue
+            storage.delete(path)
+            if owns_reservation:
+                reservations.delete()
         deleted_paths.append(path)
-        release_pending_archive_media_paths((path,))
     return deleted_paths
 
 
@@ -36,19 +71,6 @@ def referenced_archive_media_paths() -> set[str]:
             _normalized_unique_paths(Item.objects.values_list(field_name, flat=True).iterator())
         )
     return referenced_paths
-
-
-def archive_media_path_is_referenced(path: str, *, using: str = "default") -> bool:
-    from archive.models import Item
-
-    normalized_path = path.strip()
-    if not normalized_path:
-        return False
-    return (
-        Item.objects.using(using)
-        .filter(Q(archived_audio_path=normalized_path) | Q(archived_video_path=normalized_path))
-        .exists()
-    )
 
 
 def iter_archive_media_object_names(prefix: str = "") -> Iterator[str]:
@@ -83,17 +105,13 @@ def _normalized_unique_paths(paths: Iterable[str]) -> Iterator[str]:
         yield normalized_path
 
 
-def archive_media_path_is_pending(path: str) -> bool:
+def release_pending_archive_media_paths(paths: Iterable[str], *, using: str = "default") -> None:
+    """Drop upload reservations; call inside the transaction publishing the paths."""
     from archive.models import PendingArchiveMediaUpload
 
-    return any(
-        path.startswith(prefix)
-        for prefix in PendingArchiveMediaUpload.objects.values_list("prefix", flat=True)
-    )
+    prefixes = {_reservation_prefix(path) for path in _normalized_unique_paths(paths)}
+    PendingArchiveMediaUpload.objects.using(using).filter(prefix__in=prefixes).delete()
 
 
-def release_pending_archive_media_paths(paths: Iterable[str]) -> None:
-    from archive.models import PendingArchiveMediaUpload
-
-    prefixes = {path.rsplit("/", 1)[0] + "/" for path in paths if path}
-    PendingArchiveMediaUpload.objects.filter(prefix__in=prefixes).delete()
+def _reservation_prefix(path: str) -> str:
+    return path.rsplit("/", 1)[0] + "/"

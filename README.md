@@ -194,6 +194,13 @@ deprecated and prints a warning.
 
 The app reads its runtime configuration from environment variables.
 
+For production, set `DJANGO_SETTINGS_MODULE=config.settings.production` and provide a
+unique `DJANGO_SECRET_KEY`. Production startup raises `ImproperlyConfigured` if the key
+is missing, empty, whitespace-only, or the built-in `dev-only-secret-key`. Valid keys
+are used exactly as supplied. Local and test settings continue to work without an
+environment key. Production session and CSRF cookies require HTTPS (`Secure`); the
+reverse proxy must serve HTTPS and set `X-Forwarded-Proto` correctly.
+
 Important values:
 
 - `DJANGO_SETTINGS_MODULE` defaults to `config.settings.local`

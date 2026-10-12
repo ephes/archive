@@ -30,6 +30,7 @@ from urllib.request import (
 MAX_REDIRECTS = 5
 PRIVATE_HOSTS_ENV_VAR = "ARCHIVE_FETCH_PRIVATE_HOSTS"
 ALLOWED_SCHEMES = frozenset({"http", "https"})
+_NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
 
 
 class BlockedFetchError(OSError):
@@ -52,11 +53,17 @@ def check_resolved_address(host: str, address: str) -> None:
         ip = ipaddress.ip_address(address.split("%", 1)[0])
     except ValueError as exc:
         raise BlockedFetchError("Host resolved to an invalid address") from exc
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
+    if isinstance(ip, ipaddress.IPv6Address):
+        # Judge IPv4 addresses carried inside IPv6 ones by the IPv4 rules.
+        if ip in _NAT64_NETWORK:
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        else:
+            ip = ip.ipv4_mapped or ip.sixtofour or ip
     if ip.is_link_local or ip.is_multicast or ip.is_unspecified:
         raise BlockedFetchError("Host resolved to a blocked network address")
-    if not ip.is_global and host.lower() not in private_hosts():
+    # The deprecated site-local range fec0::/10 is not flagged by is_global.
+    public = ip.is_global and not getattr(ip, "is_site_local", False)
+    if not public and host.lower() not in private_hosts():
         raise BlockedFetchError("Host resolved to a non-public network address")
 
 
@@ -116,15 +123,20 @@ class _CheckedHTTPSHandler(HTTPSHandler):
 
 
 class _CheckedRedirectHandler(HTTPRedirectHandler):
-    max_redirections = MAX_REDIRECTS
-
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # urllib's own limit counts distinct destinations; count every hop.
+        hops = getattr(req, "archive_redirect_hops", 0) + 1
         try:
+            if hops > MAX_REDIRECTS:
+                raise BlockedFetchError(f"URL fetch exceeded {MAX_REDIRECTS} redirects")
             require_http_url(newurl)
         except BlockedFetchError:
             fp.close()
             raise
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        new_request = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_request is not None:
+            new_request.archive_redirect_hops = hops  # type: ignore[attr-defined]
+        return new_request
 
 
 def open_public_url(request: Request, *, timeout: float) -> Any:

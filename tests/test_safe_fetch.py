@@ -34,6 +34,12 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Location", f"/loop{len(self.hits)}")
             self.end_headers()
             return
+        if self.path.startswith("/ping") and len(self.hits) <= 6:
+            # Alternates between two URLs, then would answer 200 on the 7th request.
+            self.send_response(302)
+            self.send_header("Location", "/ping-a" if self.path == "/ping-b" else "/ping-b")
+            self.end_headers()
+            return
         body = b"<html><head><title>Internal admin</title></head><body>secret</body></html>"
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
@@ -84,6 +90,9 @@ def public_name_for_loopback(monkeypatch, loopback_server):
         "fd12:3456::1",
         "fe80::1%eth0",
         "::ffff:10.0.0.1",
+        "fec0::1",
+        "2002:c0a8:0101::1",
+        "64:ff9b::a00:1",
     ],
 )
 def test_non_public_addresses_are_refused(address, monkeypatch):
@@ -96,6 +105,7 @@ def test_public_addresses_are_accepted(monkeypatch):
     monkeypatch.delenv("ARCHIVE_FETCH_PRIVATE_HOSTS", raising=False)
     check_resolved_address("media.example.com", "93.184.216.34")
     check_resolved_address("media.example.com", "2606:2800:220:1:248:1893:25c8:1946")
+    check_resolved_address("media.example.com", "64:ff9b::5db8:d822")
 
 
 def test_listed_private_host_may_resolve_privately_but_never_link_local(monkeypatch):
@@ -144,11 +154,19 @@ def test_redirect_to_other_scheme_is_refused(loopback_server, monkeypatch):
         open_public_url(Request(loopback_server + "/redirect-to-ftp"), timeout=2)
 
 
-def test_redirects_are_capped(loopback_server, monkeypatch):
+@pytest.mark.parametrize("path", ["/loop", "/ping-a"])
+def test_redirects_are_capped_even_for_revisited_urls(loopback_server, monkeypatch, path):
     monkeypatch.setenv("ARCHIVE_FETCH_PRIVATE_HOSTS", "127.0.0.1")
-    with pytest.raises(OSError):
-        open_public_url(Request(loopback_server + "/loop"), timeout=2)
-    assert len(_Handler.hits) <= safe_fetch.MAX_REDIRECTS + 1
+    with pytest.raises(BlockedFetchError, match="exceeded 5 redirects"):
+        open_public_url(Request(loopback_server + path), timeout=2)
+    assert len(_Handler.hits) == safe_fetch.MAX_REDIRECTS + 1
+
+
+def test_redirects_within_the_limit_are_followed(loopback_server, monkeypatch):
+    monkeypatch.setenv("ARCHIVE_FETCH_PRIVATE_HOSTS", "127.0.0.1")
+    _Handler.hits = ["earlier"] * 2
+    with open_public_url(Request(loopback_server + "/ping-a"), timeout=2) as response:
+        assert response.status == 200
 
 
 def test_metadata_fetch_refuses_internal_page(loopback_server, monkeypatch):

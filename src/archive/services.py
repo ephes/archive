@@ -25,6 +25,7 @@ from archive.media_storage import (
     archive_media_path_is_referenced,
     delete_archive_media_paths,
     item_archive_media_paths,
+    release_pending_archive_media_paths,
 )
 from archive.metadata import extract_metadata_from_url
 from archive.models import EnrichmentStatus, Item, ItemKind
@@ -78,9 +79,7 @@ def _clear_stale_archive_media(
 
     def delete_unreferenced_paths() -> None:
         paths_to_delete = [
-            path
-            for path in stale_paths
-            if not archive_media_path_is_referenced(path, using=using)
+            path for path in stale_paths if not archive_media_path_is_referenced(path, using=using)
         ]
         delete_archive_media_paths(paths_to_delete)
 
@@ -386,30 +385,66 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
         logger.exception("Audio archival failed for item %s", item.pk)
         return _mark_media_archive_failure(item, str(exc))
 
-    item.archived_audio_path = archived_audio.object_name
-    item.archived_audio_content_type = archived_audio.content_type
-    item.archived_audio_size_bytes = archived_audio.size_bytes
-    item.archived_video_path = archived_audio.source_object_name
-    item.archived_video_content_type = archived_audio.source_content_type
-    item.archived_video_size_bytes = archived_audio.source_size_bytes
-    item.media_archive_status = EnrichmentStatus.COMPLETE
-    item.media_archive_error = ""
-    item.media_archive_retry_count = 0
-    item.media_archive_retry_at = None
-    item.save(
-        update_fields=[
+    old_values = {
+        field: getattr(item, field)
+        for field in (
             "archived_audio_path",
             "archived_audio_content_type",
             "archived_audio_size_bytes",
             "archived_video_path",
             "archived_video_content_type",
             "archived_video_size_bytes",
-            "media_archive_status",
-            "media_archive_error",
-            "media_archive_retry_count",
-            "media_archive_retry_at",
-        ]
-    )
+        )
+    }
+    old_paths = item_archive_media_paths(item)
+    using = item._state.db or "default"
+    try:
+        # A durable boundary prevents a caller from rolling back after publication.
+        with transaction.atomic(using=using, durable=True):
+            item.archived_audio_path = archived_audio.object_name
+            item.archived_audio_content_type = archived_audio.content_type
+            item.archived_audio_size_bytes = archived_audio.size_bytes
+            item.archived_video_path = archived_audio.source_object_name
+            item.archived_video_content_type = archived_audio.source_content_type
+            item.archived_video_size_bytes = archived_audio.source_size_bytes
+            item.media_archive_status = EnrichmentStatus.COMPLETE
+            item.media_archive_error = ""
+            item.media_archive_retry_count = 0
+            item.media_archive_retry_at = None
+            item.save(
+                update_fields=[
+                    "archived_audio_path",
+                    "archived_audio_content_type",
+                    "archived_audio_size_bytes",
+                    "archived_video_path",
+                    "archived_video_content_type",
+                    "archived_video_size_bytes",
+                    "media_archive_status",
+                    "media_archive_error",
+                    "media_archive_retry_count",
+                    "media_archive_retry_at",
+                ]
+            )
+    except BaseException:
+        for field, value in old_values.items():
+            setattr(item, field, value)
+        try:
+            delete_archive_media_paths(
+                (archived_audio.object_name, archived_audio.source_object_name)
+            )
+        except Exception:
+            logger.exception("Failed to compensate unpublished media for item %s", item.pk)
+        raise
+
+    def remove_superseded() -> None:
+        release_pending_archive_media_paths(
+            (archived_audio.object_name, archived_audio.source_object_name)
+        )
+        delete_archive_media_paths(
+            path for path in old_paths if not archive_media_path_is_referenced(path, using=using)
+        )
+
+    transaction.on_commit(remove_superseded, using=using, robust=True)
     return True
 
 
@@ -736,7 +771,7 @@ def _enrich_item_metadata_fields(item: Item, timeout: int = 15) -> bool:
                     for candidate in metadata.media_candidates
                 ],
                 "kind_hint": metadata.kind_hint,
-            }
+            },
         },
     )
     set_item_classification(item=item, decision=decision, update_fields=update_fields)
@@ -1260,8 +1295,7 @@ def _set_normalized_attr(
     if current_value == value:
         return
     changes.append(
-        f"{label}: {_display_normalized_value(current_value)} -> "
-        f"{_display_normalized_value(value)}"
+        f"{label}: {_display_normalized_value(current_value)} -> {_display_normalized_value(value)}"
     )
     if update_fields is not None:
         setattr(item, field_name, value)
@@ -1344,9 +1378,7 @@ def apply_operator_kind_override(
         pending_fields.append("classification_engine_version")
 
     evidence = (
-        item.classification_evidence
-        if isinstance(item.classification_evidence, dict)
-        else {}
+        item.classification_evidence if isinstance(item.classification_evidence, dict) else {}
     )
     override_evidence = {
         **evidence,
@@ -1379,9 +1411,7 @@ def _normalize_article_audio_status_for_kind(
     update_fields: list[str],
 ) -> None:
     status = (
-        EnrichmentStatus.PENDING
-        if item.kind == ItemKind.ARTICLE
-        else EnrichmentStatus.COMPLETE
+        EnrichmentStatus.PENDING if item.kind == ItemKind.ARTICLE else EnrichmentStatus.COMPLETE
     )
     if item.has_generated_article_audio:
         status = EnrichmentStatus.COMPLETE

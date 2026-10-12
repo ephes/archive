@@ -14,7 +14,19 @@ from archive.media_archival import (
     archive_item_audio,
     can_archive_audio,
 )
-from archive.models import Item, ItemKind
+from archive.media_storage import iter_archive_media_object_names
+from archive.models import Item, ItemKind, PendingArchiveMediaUpload
+
+
+@pytest.fixture(autouse=True)
+def isolated_media_storage(settings, tmp_path):
+    settings.STORAGES = {
+        **settings.STORAGES,
+        "archive_media": {
+            "BACKEND": "django.core.files.storage.FileSystemStorage",
+            "OPTIONS": {"location": str(tmp_path / "media")},
+        },
+    }
 
 
 class _FakeHeaders:
@@ -234,8 +246,8 @@ def test_archive_item_audio_rejects_video_downloads_over_size_limit(
     with pytest.raises(MediaArchivalError, match="Video source exceeded"):
         archive_item_audio(item=item)
 
-    assert storages["archive_media"].exists(f"items/{item.pk}/video/source.mp4") is False
-    assert storages["archive_media"].exists(f"items/{item.pk}/audio/extracted.mp3") is False
+    assert not list(iter_archive_media_object_names())
+    assert not PendingArchiveMediaUpload.objects.exists()
 
 
 @pytest.mark.django_db
@@ -263,10 +275,12 @@ def test_archive_item_audio_extracts_audio_from_direct_video_and_tracks_source(
 
     archived_audio = archive_item_audio(item=item)
 
-    assert archived_audio.object_name == f"items/{item.pk}/audio/extracted.mp3"
+    assert archived_audio.object_name.startswith(f"items/{item.pk}/audio/")
+    assert archived_audio.object_name.endswith("/extracted.mp3")
     assert archived_audio.content_type == "audio/mpeg"
     assert archived_audio.size_bytes == len(b"ID3-derived-audio")
-    assert archived_audio.source_object_name == f"items/{item.pk}/video/source.mp4"
+    assert archived_audio.source_object_name.startswith(f"items/{item.pk}/video/")
+    assert archived_audio.source_object_name.endswith("/source.mp4")
     assert archived_audio.source_content_type == "video/mp4"
     assert archived_audio.source_size_bytes == len(b"video-bytes-1video-bytes-2")
     assert storages["archive_media"].exists(archived_audio.object_name) is True
@@ -296,8 +310,10 @@ def test_archive_item_audio_prefers_video_path_for_webm_video_urls(monkeypatch) 
 
     archived_audio = archive_item_audio(item=item)
 
-    assert archived_audio.object_name == f"items/{item.pk}/audio/extracted.mp3"
-    assert archived_audio.source_object_name == f"items/{item.pk}/video/source.webm"
+    assert archived_audio.object_name.startswith(f"items/{item.pk}/audio/")
+    assert archived_audio.object_name.endswith("/extracted.mp3")
+    assert archived_audio.source_object_name.startswith(f"items/{item.pk}/video/")
+    assert archived_audio.source_object_name.endswith("/source.webm")
 
 
 @pytest.mark.django_db
@@ -326,7 +342,8 @@ def test_archive_item_audio_downloads_supported_youtube_page_audio_directly(
 
     archived_audio = archive_item_audio(item=item)
 
-    assert archived_audio.object_name == f"items/{item.pk}/audio/source.mp3"
+    assert archived_audio.object_name.startswith(f"items/{item.pk}/audio/")
+    assert archived_audio.object_name.endswith("/source.mp3")
     assert archived_audio.content_type == "audio/mpeg"
     assert archived_audio.size_bytes == len(b"youtube-page-audio")
     assert archived_audio.source_object_name == ""
@@ -370,7 +387,7 @@ def test_archive_item_audio_reports_supported_youtube_page_download_failures(mon
 
 
 @pytest.mark.django_db
-def test_archive_item_audio_cleans_up_stale_archived_video_when_switching_to_direct_audio(
+def test_archive_item_audio_preserves_stale_video_until_publication(
     monkeypatch,
 ) -> None:
     item = Item.objects.create(
@@ -391,8 +408,9 @@ def test_archive_item_audio_cleans_up_stale_archived_video_when_switching_to_dir
 
     archived_audio = archive_item_audio(item=item)
 
-    assert archived_audio.object_name == f"items/{item.pk}/audio/source.mp3"
-    assert storages["archive_media"].exists(item.archived_video_path) is False
+    assert archived_audio.object_name.startswith(f"items/{item.pk}/audio/")
+    assert archived_audio.object_name.endswith("/source.mp3")
+    assert storages["archive_media"].exists(item.archived_video_path) is True
 
 
 @pytest.mark.django_db
@@ -421,5 +439,5 @@ def test_archive_item_audio_cleans_up_failed_video_archival_before_persisting_ob
     with pytest.raises(MediaArchivalError, match="Video audio extraction failed"):
         archive_item_audio(item=item)
 
-    assert storages["archive_media"].exists(f"items/{item.pk}/video/source.mp4") is False
-    assert storages["archive_media"].exists(f"items/{item.pk}/audio/extracted.mp3") is False
+    assert not list(iter_archive_media_object_names())
+    assert not PendingArchiveMediaUpload.objects.exists()

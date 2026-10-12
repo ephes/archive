@@ -416,3 +416,28 @@ Migration note:
 - the Milestone 6 schema migrations re-queue existing eligible podcast/audio items, and later eligible
   direct-video items, by setting `media_archive_status` back to `pending` when they do not have a stable
   local audio copy yet
+
+## Media publication and orphan recovery
+
+Media replacements use fresh object namespaces. Existing audio/video and database
+references survive failed uploads or database publication; failed new uploads are
+compensated. Publication uses a durable database transaction and cannot be nested
+inside an application transaction. Superseded objects are deleted only after commit,
+with a reference recheck so shared objects survive. Cleanup failures leave objects
+for operator recovery rather than undoing successful publication.
+
+A `PendingArchiveMediaUpload` reservation commits before each storage write and
+protects its entire namespace until publication or successful compensation.
+Orphan cleanup rechecks both reservations and item references immediately before
+deletion. `--min-age-seconds` adds an age grace (default 3600); even zero never
+bypasses pending reservations. Backends without modification times are skipped when
+the grace is enabled. Dry-run lists snapshot candidates without deleting anything;
+subsequent delete mode may skip candidates that have become referenced or protected.
+Apply database migrations before running updated workers or cleanup.
+
+After an unclean worker crash or failed compensation, pending reservations deliberately remain protected indefinitely.
+Stop the affected worker and confirm no upload/publication is active before removing
+its reservation in the Django shell; then rerun orphan cleanup. Do not expire pending
+records solely by age. Direct callers of `archive_item_audio` receive staged objects
+and must publish them and release reservations, or compensate them through
+`delete_archive_media_paths`; the worker service handles this lifecycle automatically.

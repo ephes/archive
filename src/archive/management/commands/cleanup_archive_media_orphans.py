@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from django.core.files.storage import storages
 from django.core.management.base import BaseCommand
+from django.utils import timezone
 
 from archive.media_storage import (
+    archive_media_path_is_pending,
+    archive_media_path_is_referenced,
     delete_archive_media_paths,
     iter_archive_media_object_names,
     referenced_archive_media_paths,
@@ -13,6 +17,12 @@ class Command(BaseCommand):
     help = "Find and optionally delete orphaned archive_media storage objects."
 
     def add_arguments(self, parser) -> None:
+        parser.add_argument(
+            "--min-age-seconds",
+            type=int,
+            default=3600,
+            help="Additional age grace (default: one hour); pending uploads are always protected.",
+        )
         parser.add_argument(
             "--delete",
             action="store_true",
@@ -41,7 +51,21 @@ class Command(BaseCommand):
 
         deleted_paths: list[str] = []
         if delete_mode and orphaned_paths:
-            deleted_paths = delete_archive_media_paths(orphaned_paths)
+            for path in orphaned_paths:
+                if archive_media_path_is_pending(path) or archive_media_path_is_referenced(path):
+                    continue
+                if options["min_age_seconds"] > 0:
+                    try:
+                        age = timezone.now() - storages["archive_media"].get_modified_time(path)
+                    except (NotImplementedError, OSError):
+                        continue
+                    if age.total_seconds() < options["min_age_seconds"]:
+                        continue
+                # Recheck after storage metadata work and immediately before deletion.
+                if not archive_media_path_is_referenced(path) and not archive_media_path_is_pending(
+                    path
+                ):
+                    deleted_paths.extend(delete_archive_media_paths((path,)))
             deleted_label = "object" if len(deleted_paths) == 1 else "objects"
             self.stdout.write(
                 self.style.SUCCESS(

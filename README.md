@@ -225,6 +225,8 @@ Important values:
 - `ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS` defaults to `5000` (matching the currently observed Voxhelm `synthesize` input limit)
 - `ARCHIVE_ARTICLE_AUDIO_MAX_BYTES` defaults to `52428800` (50 MiB)
 - `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` defaults to `262144000` (250 MiB)
+- `ARCHIVE_FETCH_PRIVATE_HOSTS` is an optional comma-separated list of hostnames that page,
+  summary-source, and media fetches may reach on private or loopback addresses; empty by default
 - `ARCHIVE_MEDIA_EXTRACTION_FFMPEG_BIN` defaults to `ffmpeg`
 - `ARCHIVE_MEDIA_YTDLP_JS_RUNTIMES` defaults to `node`
 - `ARCHIVE_MEDIA_STORAGE_BACKEND` defaults to local filesystem storage; set to `storages.backends.s3.S3Storage` for MinIO/S3-compatible object storage
@@ -269,6 +271,15 @@ temporary files before any storage upload. Only HTTP/HTTPS sources and redirects
 are accepted; the configured byte limit still applies. Video extraction has its
 own timeout; the download budget does not include extraction or storage writes.
 The existing yt-dlp socket timeout behavior is unchanged.
+
+Fetches of shared links and of the media URLs their pages announce (metadata, summary source,
+transcription media, direct media downloads) only use `http`/`https`, ignore proxy environment
+variables, follow at most five redirects, and only connect to public addresses. The hostname is
+resolved once, every answer is checked, and the connection goes to the checked address, so a
+redirect or a changing DNS answer cannot point the worker at loopback, private, CGNAT, or
+link-local services. List a hostname in `ARCHIVE_FETCH_PRIVATE_HOSTS` when a source on the home
+network must be archived; link-local addresses stay blocked. The summary, transcription, and
+article-audio API endpoints configured through `ARCHIVE_*_API_BASE` are not affected.
 
 Summary generation is asynchronous and does not block capture or immediate publication. Audio/video
 transcription is also asynchronous and writes transcript text back onto the item when a transcribable media

@@ -16,7 +16,10 @@ from archive.models import Item, ItemKind
 
 
 @pytest.fixture
-def media_server():
+def media_server(monkeypatch):
+    # The test server listens on loopback, which the fetch guard refuses by default.
+    monkeypatch.setenv("ARCHIVE_FETCH_PRIVATE_HOSTS", "127.0.0.1")
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -144,5 +147,16 @@ def test_http_failure_is_an_archival_error(media_server):
         kind=ItemKind.PODCAST_EPISODE,
     )
     with pytest.raises(MediaArchivalError, match="HTTP Error 404"):
+        archive_item_audio(item, timeout=2)
+    assert not list(iter_archive_media_object_names())
+
+
+@pytest.mark.django_db(transaction=True)
+def test_direct_download_refuses_loopback_source_by_default(media_server, monkeypatch):
+    monkeypatch.delenv("ARCHIVE_FETCH_PRIVATE_HOSTS")
+    item = Item.objects.create(
+        original_url=media_server + "/fast.mp3", kind=ItemKind.PODCAST_EPISODE
+    )
+    with pytest.raises(MediaArchivalError, match="non-public network address"):
         archive_item_audio(item, timeout=2)
     assert not list(iter_archive_media_object_names())

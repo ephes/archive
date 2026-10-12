@@ -112,6 +112,7 @@ def test_generate_item_transcript_downloads_media_and_parses_response(
         )
 
     monkeypatch.setattr("archive.transcriptions.urlopen", fake_urlopen)
+    monkeypatch.setattr("archive.transcriptions.open_public_url", fake_urlopen)
 
     transcript = generate_item_transcript(item=item)
 
@@ -128,7 +129,7 @@ def test_generate_item_transcript_rejects_oversized_media(monkeypatch, settings)
     settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
 
     monkeypatch.setattr(
-        "archive.transcriptions.urlopen",
+        "archive.transcriptions.open_public_url",
         lambda request, timeout: _FakeResponse(
             b"x" * (MAX_TRANSCRIPTION_BYTES + 1),
             content_type="audio/mpeg",

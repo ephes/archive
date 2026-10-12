@@ -264,7 +264,7 @@ def test_extract_metadata_from_url_extracts_title_from_normal_page(monkeypatch) 
     </head><body><p>content</p></body></html>"""
 
     monkeypatch.setattr(
-        "archive.metadata.urlopen",
+        "archive.metadata.open_public_url",
         lambda request, timeout: _FakeHTTPResponse(html),
     )
 
@@ -292,7 +292,7 @@ def test_extract_metadata_from_url_succeeds_on_page_larger_than_1mib(monkeypatch
     html = head + body
 
     monkeypatch.setattr(
-        "archive.metadata.urlopen",
+        "archive.metadata.open_public_url",
         lambda request, timeout: _FakeHTTPResponse(html),
     )
 
@@ -344,7 +344,7 @@ def test_extract_metadata_from_url_handles_head_tag_split_across_chunk_boundary(
             return chunk
 
     monkeypatch.setattr(
-        "archive.metadata.urlopen",
+        "archive.metadata.open_public_url",
         lambda request, timeout: _StreamingResponse(b""),
     )
 
@@ -368,7 +368,7 @@ def test_extract_metadata_from_url_ignores_head_close_tag_inside_script(monkeypa
     )
 
     monkeypatch.setattr(
-        "archive.metadata.urlopen",
+        "archive.metadata.open_public_url",
         lambda request, timeout: _FakeHTTPResponse(html),
     )
 
@@ -391,7 +391,7 @@ def test_extract_metadata_from_url_raises_when_cap_reached_without_closing_head(
     html = b"<html><head>" + b"x" * (MAX_METADATA_BYTES + 1)
 
     monkeypatch.setattr(
-        "archive.metadata.urlopen",
+        "archive.metadata.open_public_url",
         lambda request, timeout: _FakeHTTPResponse(html),
     )
 
@@ -411,7 +411,7 @@ def test_extract_metadata_from_url_raises_on_http_error(monkeypatch) -> None:
             fp=None,
         )
 
-    monkeypatch.setattr("archive.metadata.urlopen", _raise)
+    monkeypatch.setattr("archive.metadata.open_public_url", _raise)
 
     with pytest.raises(MetadataExtractionError, match="HTTP 404"):
         extract_metadata_from_url("https://example.com/404")
@@ -419,7 +419,7 @@ def test_extract_metadata_from_url_raises_on_http_error(monkeypatch) -> None:
 
 def test_extract_metadata_from_url_raises_on_unsupported_content_type(monkeypatch) -> None:
     monkeypatch.setattr(
-        "archive.metadata.urlopen",
+        "archive.metadata.open_public_url",
         lambda request, timeout: _FakeHTTPResponse(b"binary", content_type="application/pdf"),
     )
 
@@ -444,7 +444,7 @@ def test_extract_metadata_from_url_captures_body_media_past_head_close(monkeypat
     html = head + pad + audio
 
     monkeypatch.setattr(
-        "archive.metadata.urlopen",
+        "archive.metadata.open_public_url",
         lambda request, timeout: _FakeHTTPResponse(html),
     )
 
@@ -486,7 +486,7 @@ def test_extract_metadata_from_url_handles_multibyte_char_split_across_chunk_bou
     assert html[target + 1 : target + 3] == euro[1:]
 
     monkeypatch.setattr(
-        "archive.metadata.urlopen",
+        "archive.metadata.open_public_url",
         lambda request, timeout: _FakeHTTPResponse(html),
     )
 

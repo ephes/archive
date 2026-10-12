@@ -2,29 +2,31 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 from pathlib import Path
-from urllib.parse import urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request
 
 
-class HTTPOnlyRedirects(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if urlparse(newurl).scheme not in {"http", "https"}:
-            raise ValueError("Unsupported media redirect scheme")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+def _load_safe_fetch():
+    # Isolated mode keeps this script's directory off sys.path, so load the
+    # stdlib-only guard module by file path.
+    spec = importlib.util.spec_from_file_location(
+        "archive_safe_fetch", Path(__file__).with_name("safe_fetch.py")
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError("Cannot load the fetch guard")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def main() -> int:
     try:
         options = json.load(sys.stdin)
-        if urlparse(options["url"]).scheme not in {"http", "https"}:
-            raise ValueError("Unsupported media URL scheme")
         request = Request(options["url"], headers=options["headers"])
-        with build_opener(HTTPOnlyRedirects()).open(
-            request, timeout=options["timeout"]
-        ) as response:
+        with _load_safe_fetch().open_public_url(request, timeout=options["timeout"]) as response:
             size = 0
             with Path(options["path"]).open("wb") as output:
                 while chunk := response.read(1024 * 1024):

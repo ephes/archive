@@ -232,3 +232,10 @@ class Item(models.Model):
                 self.article_audio_status,
             )
         )
+
+
+class PendingArchiveMediaUpload(models.Model):
+    """A durable reservation protecting an upload until publication or compensation."""
+
+    prefix = models.CharField(max_length=512, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)

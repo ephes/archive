@@ -23,6 +23,7 @@ def delete_archive_media_paths(paths: Iterable[str]) -> list[str]:
     for path in _normalized_unique_paths(paths):
         storage.delete(path)
         deleted_paths.append(path)
+        release_pending_archive_media_paths((path,))
     return deleted_paths
 
 
@@ -43,9 +44,11 @@ def archive_media_path_is_referenced(path: str, *, using: str = "default") -> bo
     normalized_path = path.strip()
     if not normalized_path:
         return False
-    return Item.objects.using(using).filter(
-        Q(archived_audio_path=normalized_path) | Q(archived_video_path=normalized_path)
-    ).exists()
+    return (
+        Item.objects.using(using)
+        .filter(Q(archived_audio_path=normalized_path) | Q(archived_video_path=normalized_path))
+        .exists()
+    )
 
 
 def iter_archive_media_object_names(prefix: str = "") -> Iterator[str]:
@@ -78,3 +81,19 @@ def _normalized_unique_paths(paths: Iterable[str]) -> Iterator[str]:
             continue
         seen_paths.add(normalized_path)
         yield normalized_path
+
+
+def archive_media_path_is_pending(path: str) -> bool:
+    from archive.models import PendingArchiveMediaUpload
+
+    return any(
+        path.startswith(prefix)
+        for prefix in PendingArchiveMediaUpload.objects.values_list("prefix", flat=True)
+    )
+
+
+def release_pending_archive_media_paths(paths: Iterable[str]) -> None:
+    from archive.models import PendingArchiveMediaUpload
+
+    prefixes = {path.rsplit("/", 1)[0] + "/" for path in paths if path}
+    PendingArchiveMediaUpload.objects.filter(prefix__in=prefixes).delete()

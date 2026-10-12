@@ -9,14 +9,16 @@ from tempfile import SpooledTemporaryFile, TemporaryDirectory
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 from django.conf import settings
 from django.core.files.base import File
 from django.core.files.storage import storages
+from django.db import transaction
 
 from archive.classification import resolve_media_sources_for_item
 from archive.metadata import REQUEST_HEADERS
-from archive.models import Item
+from archive.models import Item, PendingArchiveMediaUpload
 
 try:
     import yt_dlp
@@ -130,9 +132,7 @@ def _archive_direct_audio(item: Item, source_url: str, timeout: int) -> Archived
                     target_name=object_name,
                     upload_name=f"source{suffix}",
                     file_handle=spool,
-                    existing_name=item.archived_audio_path,
                 )
-                _delete_stored_object(item.archived_video_path)
             finally:
                 spool.close()
     except HTTPError as exc:
@@ -187,14 +187,12 @@ def _archive_video_audio(item: Item, source_url: str, timeout: int) -> ArchivedA
                 saved_source_name = _save_storage_path(
                     target_name=source_object_name,
                     file_path=source_path,
-                    existing_name=item.archived_video_path,
                 )
                 saved_audio_name = _save_storage_path(
                     target_name=audio_object_name,
                     file_path=extracted_audio_path,
-                    existing_name=item.archived_audio_path,
                 )
-            except Exception:
+            except BaseException:
                 _delete_stored_object(saved_audio_name)
                 _delete_stored_object(saved_source_name)
                 raise
@@ -232,9 +230,7 @@ def _archive_supported_video_page_audio(
             saved_name = _save_storage_path(
                 target_name=object_name,
                 file_path=source_path,
-                existing_name=item.archived_audio_path,
             )
-            _delete_stored_object(item.archived_video_path)
     except OSError as exc:
         raise MediaArchivalError(f"Video archival failed: {exc}") from exc
 
@@ -420,13 +416,12 @@ def _extract_audio_with_ffmpeg(*, source_path: Path, output_path: Path, timeout:
         raise MediaArchivalError(f"Video audio extraction failed: {detail}") from exc
 
 
-def _save_storage_path(*, target_name: str, file_path: Path, existing_name: str) -> str:
+def _save_storage_path(*, target_name: str, file_path: Path) -> str:
     with file_path.open("rb") as file_handle:
         return _save_storage_file(
             target_name=target_name,
             upload_name=file_path.name,
             file_handle=file_handle,
-            existing_name=existing_name,
         )
 
 
@@ -435,14 +430,25 @@ def _save_storage_file(
     target_name: str,
     upload_name: str,
     file_handle,
-    existing_name: str,
 ) -> str:
     storage = storages["archive_media"]
-    if existing_name and existing_name != target_name:
-        storage.delete(existing_name)
-    if storage.exists(target_name):
-        storage.delete(target_name)
-    return storage.save(target_name, File(file_handle, name=upload_name))
+    target = Path(target_name)
+    prefix = f"{target.parent}/{uuid4().hex}/"
+    # Commit the reservation before the first storage write. Outer application
+    # transactions are rejected: their rollback could erase the protection.
+    with transaction.atomic(durable=True):
+        PendingArchiveMediaUpload.objects.create(prefix=prefix)
+    fresh_name = prefix + target.name
+    try:
+        return storage.save(fresh_name, File(file_handle, name=upload_name))
+    except BaseException:
+        try:
+            storage.delete(fresh_name)
+            PendingArchiveMediaUpload.objects.filter(prefix=prefix).delete()
+        except Exception:
+            # Keep the durable reservation when compensation cannot finish.
+            pass
+        raise
 
 
 def _open_archived_file(path: str, *, label: str):
@@ -457,7 +463,9 @@ def _open_archived_file(path: str, *, label: str):
 
 def _delete_stored_object(object_name: str) -> None:
     if object_name.strip():
-        storages["archive_media"].delete(object_name)
+        from archive.media_storage import delete_archive_media_paths
+
+        delete_archive_media_paths((object_name,))
 
 
 def _select_audio_archive_source_url(item: Item) -> str | None:

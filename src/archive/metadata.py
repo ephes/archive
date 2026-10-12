@@ -9,10 +9,12 @@ from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
+
+from archive.safe_fetch import open_public_url
 
 AUDIO_SUFFIXES = (".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav")
 VIDEO_SUFFIXES = (".mp4", ".m4v", ".mov", ".webm", ".m3u8")
@@ -200,7 +202,7 @@ class _MetadataHTMLParser(HTMLParser):
 def extract_metadata_from_url(url: str, timeout: int = 15) -> ExtractedMetadata:
     request = Request(url, headers=REQUEST_HEADERS)
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with open_public_url(request, timeout=timeout) as response:
             content_type = response.headers.get_content_type()
             if content_type and "html" not in content_type and "xml" not in content_type:
                 raise MetadataExtractionError(f"Unsupported content type: {content_type}")

@@ -18,6 +18,7 @@ from archive.classification import resolve_media_sources_for_item
 from archive.media_archival import MediaArchivalError, open_archived_audio, open_archived_video
 from archive.metadata import REQUEST_HEADERS
 from archive.models import Item
+from archive.safe_fetch import open_public_url
 
 MAX_TRANSCRIPTION_BYTES = 25 * 1024 * 1024
 SUPPORTED_SUFFIXES = {
@@ -181,7 +182,7 @@ def _download_remote_media(source_url: str, timeout: int) -> DownloadedMedia:
         },
     )
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with open_public_url(request, timeout=timeout) as response:
             content_type = (response.headers.get_content_type() or "").lower()
             final_url = response.geturl() or source_url
             suffix = _detect_suffix(url=final_url, content_type=content_type)

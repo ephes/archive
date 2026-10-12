@@ -12,6 +12,7 @@ from django.conf import settings
 
 from archive.metadata import REQUEST_HEADERS
 from archive.models import Item
+from archive.safe_fetch import open_public_url
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +131,7 @@ def extract_summary_source_from_url(
 ) -> SummarySource:
     request = Request(url, headers=REQUEST_HEADERS)
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with open_public_url(request, timeout=timeout) as response:
             content_type = response.headers.get_content_type()
             charset = response.headers.get_content_charset() or "utf-8"
             payload = response.read(MAX_SUMMARY_SOURCE_BYTES + 1)

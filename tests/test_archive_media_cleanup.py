@@ -150,7 +150,9 @@ def test_cleanup_archive_media_orphans_delete_removes_only_orphans() -> None:
     _save_archive_media(orphaned_path, b"orphaned-video")
 
     stdout = StringIO()
-    call_command("cleanup_archive_media_orphans", "--delete", stdout=stdout)
+    call_command(
+        "cleanup_archive_media_orphans", "--delete", "--min-age-seconds", "0", stdout=stdout
+    )
     output = stdout.getvalue()
 
     assert f"ORPHAN {orphaned_path}" in output

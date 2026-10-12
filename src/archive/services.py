@@ -4,6 +4,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from functools import partial
 
 from django.conf import settings
 from django.db import transaction
@@ -22,9 +23,9 @@ from archive.classification import (
 )
 from archive.media_archival import archive_item_audio, can_archive_audio
 from archive.media_storage import (
-    archive_media_path_is_referenced,
-    delete_archive_media_paths,
+    delete_unreferenced_archive_media_paths,
     item_archive_media_paths,
+    release_pending_archive_media_paths,
 )
 from archive.metadata import extract_metadata_from_url
 from archive.models import EnrichmentStatus, Item, ItemKind
@@ -76,15 +77,10 @@ def _clear_stale_archive_media(
 
     using = item._state.db or "default"
 
-    def delete_unreferenced_paths() -> None:
-        paths_to_delete = [
-            path
-            for path in stale_paths
-            if not archive_media_path_is_referenced(path, using=using)
-        ]
-        delete_archive_media_paths(paths_to_delete)
-
-    transaction.on_commit(delete_unreferenced_paths, using=using)
+    transaction.on_commit(
+        partial(delete_unreferenced_archive_media_paths, stale_paths, using=using),
+        using=using,
+    )
 
 
 @dataclass(frozen=True)
@@ -386,30 +382,60 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
         logger.exception("Audio archival failed for item %s", item.pk)
         return _mark_media_archive_failure(item, str(exc))
 
-    item.archived_audio_path = archived_audio.object_name
-    item.archived_audio_content_type = archived_audio.content_type
-    item.archived_audio_size_bytes = archived_audio.size_bytes
-    item.archived_video_path = archived_audio.source_object_name
-    item.archived_video_content_type = archived_audio.source_content_type
-    item.archived_video_size_bytes = archived_audio.source_size_bytes
-    item.media_archive_status = EnrichmentStatus.COMPLETE
-    item.media_archive_error = ""
-    item.media_archive_retry_count = 0
-    item.media_archive_retry_at = None
-    item.save(
-        update_fields=[
-            "archived_audio_path",
-            "archived_audio_content_type",
-            "archived_audio_size_bytes",
-            "archived_video_path",
-            "archived_video_content_type",
-            "archived_video_size_bytes",
-            "media_archive_status",
-            "media_archive_error",
-            "media_archive_retry_count",
-            "media_archive_retry_at",
-        ]
-    )
+    published_fields = [
+        "archived_audio_path",
+        "archived_audio_content_type",
+        "archived_audio_size_bytes",
+        "archived_video_path",
+        "archived_video_content_type",
+        "archived_video_size_bytes",
+        "media_archive_status",
+        "media_archive_error",
+        "media_archive_retry_count",
+        "media_archive_retry_at",
+    ]
+    old_values = {field: getattr(item, field) for field in published_fields}
+    old_paths = item_archive_media_paths(item)
+    new_paths = (archived_audio.object_name, archived_audio.source_object_name)
+    using = item._state.db or "default"
+    try:
+        # A durable boundary prevents a caller from rolling back after publication.
+        with transaction.atomic(using=using, durable=True):
+            item.archived_audio_path = archived_audio.object_name
+            item.archived_audio_content_type = archived_audio.content_type
+            item.archived_audio_size_bytes = archived_audio.size_bytes
+            item.archived_video_path = archived_audio.source_object_name
+            item.archived_video_content_type = archived_audio.source_content_type
+            item.archived_video_size_bytes = archived_audio.source_size_bytes
+            item.media_archive_status = EnrichmentStatus.COMPLETE
+            item.media_archive_error = ""
+            item.media_archive_retry_count = 0
+            item.media_archive_retry_at = None
+            item.save(update_fields=published_fields)
+            # The reservations end in the transaction that commits the references,
+            # so the new objects are never both unreserved and unreferenced.
+            release_pending_archive_media_paths(new_paths, using=using)
+            transaction.on_commit(
+                partial(delete_unreferenced_archive_media_paths, old_paths, using=using),
+                using=using,
+                robust=True,
+            )
+    except BaseException:
+        # The commit may have completed before the failure surfaced (for example a
+        # processing alarm during or after COMMIT), so nothing here may assume the
+        # new objects are unpublished: only objects verified unreferenced go away.
+        try:
+            delete_unreferenced_archive_media_paths(new_paths, using=using, owns_reservation=True)
+        except Exception:
+            logger.exception("Failed to discard unpublished media for item %s", item.pk)
+        # Leave the caller's instance matching whatever was actually committed.
+        try:
+            item.refresh_from_db(fields=published_fields)
+        except Exception:
+            for field, value in old_values.items():
+                setattr(item, field, value)
+        raise
+
     return True
 
 
@@ -736,7 +762,7 @@ def _enrich_item_metadata_fields(item: Item, timeout: int = 15) -> bool:
                     for candidate in metadata.media_candidates
                 ],
                 "kind_hint": metadata.kind_hint,
-            }
+            },
         },
     )
     set_item_classification(item=item, decision=decision, update_fields=update_fields)

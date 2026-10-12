@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import json
 import mimetypes
 import shutil
 import subprocess
+import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
+from email.message import Message
 from pathlib import Path
+from subprocess import run as run_download
 from tempfile import SpooledTemporaryFile, TemporaryDirectory
-from urllib.error import HTTPError, URLError
+from time import monotonic
 from urllib.parse import parse_qs, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
+from urllib.response import addinfourl
 
 from django.conf import settings
 from django.core.files.base import File
@@ -90,6 +96,59 @@ def open_archived_video(item: Item):
     return _open_archived_file(item.archived_video_path, label="video")
 
 
+@contextmanager
+def _open_direct_media(request: Request, *, timeout: int):
+    # subprocess.run kills and reaps the urllib process at the elapsed deadline,
+    # including DNS, redirects and reads that keep resetting socket timeouts.
+    deadline = monotonic() + timeout
+    with TemporaryDirectory(prefix="archive-download-") as temp_dir:
+        path = Path(temp_dir) / "source"
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise MediaArchivalError("Media source exceeded the elapsed download budget")
+        options = {
+            "url": request.full_url,
+            "headers": dict(request.header_items()),
+            "path": str(path),
+            "timeout": remaining,
+            "max_bytes": settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES,
+        }
+        try:
+            result = run_download(
+                [sys.executable, "-I", str(Path(__file__).with_name("direct_media_download.py"))],
+                input=json.dumps(options),
+                capture_output=True,
+                text=True,
+                timeout=remaining,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise MediaArchivalError("Media source exceeded the elapsed download budget") from exc
+        if monotonic() >= deadline:
+            raise MediaArchivalError("Media source exceeded the elapsed download budget")
+        stderr_tail = result.stderr.strip().splitlines()[-1:] or ["no diagnostic output"]
+        invalid_result = (
+            f"Media downloader exited with code {result.returncode} without a valid result: "
+            f"{stderr_tail[0][-500:]}"
+        )
+        try:
+            metadata = json.loads(result.stdout)
+        except (ValueError, TypeError) as exc:
+            raise MediaArchivalError(invalid_result) from exc
+        if not isinstance(metadata, dict):
+            raise MediaArchivalError(invalid_result)
+        if result.returncode:
+            detail = metadata.get("error")
+            if not isinstance(detail, str) or not detail.strip():
+                raise MediaArchivalError(invalid_result)
+            raise MediaArchivalError(f"Media download failed: {detail}")
+        if not all(isinstance(metadata.get(key), str) for key in ("url", "content_type")):
+            raise MediaArchivalError(invalid_result)
+        headers = Message()
+        headers["Content-Type"] = metadata["content_type"]
+        with path.open("rb") as source:
+            yield addinfourl(source, headers, metadata["url"])
+
+
 def _archive_direct_audio(item: Item, source_url: str, timeout: int) -> ArchivedAudio:
     request = Request(
         source_url,
@@ -99,7 +158,7 @@ def _archive_direct_audio(item: Item, source_url: str, timeout: int) -> Archived
         },
     )
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with _open_direct_media(request, timeout=timeout) as response:
             final_url = response.geturl() or source_url
             content_type = (response.headers.get_content_type() or "").lower()
             suffix = _detect_audio_suffix(url=final_url, content_type=content_type)
@@ -135,10 +194,6 @@ def _archive_direct_audio(item: Item, source_url: str, timeout: int) -> Archived
                 _delete_stored_object(item.archived_video_path)
             finally:
                 spool.close()
-    except HTTPError as exc:
-        raise MediaArchivalError(f"Audio archival download failed: HTTP {exc.code}") from exc
-    except URLError as exc:
-        raise MediaArchivalError(f"Audio archival download failed: {exc.reason}") from exc
     except OSError as exc:
         raise MediaArchivalError(f"Audio archival download failed: {exc}") from exc
 
@@ -198,10 +253,6 @@ def _archive_video_audio(item: Item, source_url: str, timeout: int) -> ArchivedA
                 _delete_stored_object(saved_audio_name)
                 _delete_stored_object(saved_source_name)
                 raise
-    except HTTPError as exc:
-        raise MediaArchivalError(f"Video archival download failed: HTTP {exc.code}") from exc
-    except URLError as exc:
-        raise MediaArchivalError(f"Video archival download failed: {exc.reason}") from exc
     except OSError as exc:
         raise MediaArchivalError(f"Video archival failed: {exc}") from exc
 
@@ -273,7 +324,7 @@ def _download_direct_video_source(
             "Accept": "video/*;q=1.0,application/octet-stream;q=0.8,*/*;q=0.1",
         },
     )
-    with urlopen(request, timeout=timeout) as response:
+    with _open_direct_media(request, timeout=timeout) as response:
         final_url = response.geturl() or source_url
         content_type = (response.headers.get_content_type() or "").lower()
         suffix = _detect_video_suffix(url=final_url, content_type=content_type)

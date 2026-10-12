@@ -79,6 +79,8 @@ class Command(BaseCommand):
             return True
         try:
             modified = storages[ARCHIVE_MEDIA_STORAGE_ALIAS].get_modified_time(path)
-        except (NotImplementedError, OSError):
+        except Exception:
+            # Unknown age (unsupported backend, object already gone, backend
+            # error such as an S3 404): keep the object and continue the sweep.
             return False
         return (timezone.now() - modified).total_seconds() >= min_age_seconds

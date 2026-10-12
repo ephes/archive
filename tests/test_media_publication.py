@@ -337,3 +337,26 @@ def test_publication_during_cleanup_verification_keeps_object(table, publish_whe
     assert published
     assert storage.exists(path)
     assert Item.objects.get(pk=item.pk).archived_audio_path == path
+
+
+@pytest.mark.django_db(transaction=True)
+def test_cleanup_continues_when_object_age_is_unavailable(monkeypatch):
+    class BackendError(Exception):
+        """Stands in for a storage client error such as an S3 404."""
+
+    storage = storages["archive_media"]
+    vanished = "items/3/audio/gone.mp3"
+    orphan = "items/3/audio/orphan.mp3"
+    storage.save(vanished, ContentFile(b"vanishing"))
+    storage.save(orphan, ContentFile(b"orphan"))
+
+    def modified_time(path):
+        if path == vanished:
+            raise BackendError("404")
+        return datetime(2000, 1, 1, tzinfo=UTC)
+
+    monkeypatch.setattr(storage, "get_modified_time", modified_time)
+    call_command("cleanup_archive_media_orphans", "--delete")
+
+    assert storage.exists(vanished)
+    assert not storage.exists(orphan)

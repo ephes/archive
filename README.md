@@ -351,6 +351,8 @@ Current first-slice behavior:
 - `https://castro.fm/episode/...` classifies as `podcast_episode`
 - supported YouTube page URLs classify as `video`
 - generic metadata extraction still parses OG, Twitter, JSON-LD, and HTML title fields
+- media references found in a page are only kept when they resolve to an `http`/`https` URL;
+  `javascript:`, `data:`, `file:` and other schemes are dropped before they can be stored or linked
 - generic page-media extraction now also parses HTML `<audio>` / `<source>` and `<video>` / `<source>`
 - WDR/ARD mediathek pages embed the real enclosure in an inline (non-JSON-LD) script as
   `mediaResource.dflt.audioURL` while their `og:audio` deceptively points back at the HTML page;

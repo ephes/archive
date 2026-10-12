@@ -536,10 +536,22 @@ def _ensure_aware(value: datetime) -> datetime:
 
 
 def _normalize_url(value: str, base_url: str) -> str:
+    """Absolute http(s) URL for a media reference found in a page, or ``""``.
+
+    Pages are untrusted: a ``javascript:``, ``data:`` or ``file:`` reference must
+    not end up in a stored media URL that is later linked or fetched.
+    """
     cleaned = value.strip()
     if not cleaned:
         return ""
-    return urljoin(base_url, cleaned)
+    try:
+        normalized = urljoin(base_url, cleaned)
+        parsed = urlparse(normalized)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return normalized
 
 
 def _first_nonempty(*values: str | None) -> str:

@@ -195,7 +195,7 @@ def test_archive_item_audio_closes_spool_when_download_exceeds_size_limit(
     settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES = 6
     _TrackingSpool.instances.clear()
     monkeypatch.setattr(
-        "archive.media_archival.urlopen",
+        "archive.media_archival._open_direct_media",
         lambda request, timeout: _FakeResponse([b"1234", b"5678"]),
     )
     monkeypatch.setattr("archive.media_archival.SpooledTemporaryFile", _TrackingSpool)
@@ -223,7 +223,7 @@ def test_archive_item_audio_rejects_video_downloads_over_size_limit(
     )
     settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES = 6
     monkeypatch.setattr(
-        "archive.media_archival.urlopen",
+        "archive.media_archival._open_direct_media",
         lambda request, timeout: _FakeResponse(
             [b"1234", b"5678"],
             content_type="video/mp4",
@@ -252,7 +252,7 @@ def test_archive_item_audio_extracts_audio_from_direct_video_and_tracks_source(
         f"items/{item.pk}/audio/extracted.mp3",
     )
     monkeypatch.setattr(
-        "archive.media_archival.urlopen",
+        "archive.media_archival._open_direct_media",
         lambda request, timeout: _FakeResponse(
             [b"video-bytes-1", b"video-bytes-2"],
             content_type="video/mp4",
@@ -285,7 +285,7 @@ def test_archive_item_audio_prefers_video_path_for_webm_video_urls(monkeypatch) 
         f"items/{item.pk}/audio/extracted.mp3",
     )
     monkeypatch.setattr(
-        "archive.media_archival.urlopen",
+        "archive.media_archival._open_direct_media",
         lambda request, timeout: _FakeResponse(
             [b"video-webm"],
             content_type="video/webm",
@@ -381,7 +381,7 @@ def test_archive_item_audio_cleans_up_stale_archived_video_when_switching_to_dir
     )
     storages["archive_media"].save(item.archived_video_path, ContentFile(b"old-video"))
     monkeypatch.setattr(
-        "archive.media_archival.urlopen",
+        "archive.media_archival._open_direct_media",
         lambda request, timeout: _FakeResponse(
             [b"fresh-audio"],
             content_type="audio/mpeg",
@@ -409,7 +409,7 @@ def test_archive_item_audio_cleans_up_failed_video_archival_before_persisting_ob
         f"items/{item.pk}/audio/extracted.mp3",
     )
     monkeypatch.setattr(
-        "archive.media_archival.urlopen",
+        "archive.media_archival._open_direct_media",
         lambda request, timeout: _FakeResponse(
             [b"video-bytes"],
             content_type="video/mp4",

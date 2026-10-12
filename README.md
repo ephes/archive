@@ -256,11 +256,19 @@ just manage rebuild_search_index
 
 Optional worker flags for the Milestone 6 slice:
 
-- `--media-archive-timeout` controls the per-item remote media download timeout and is also used for
-  video-to-audio extraction work
+- `--media-archive-timeout` gives each direct audio/video download one elapsed budget across
+  connection setup, redirects, and streaming; it is also used for video-to-audio extraction work
 - `--stale-processing-after` controls how old an in-flight `processing` lease must be before the worker
   re-queues it during normal runtime and also acts as the worker's hard cap for a single in-flight item;
   by default Archive uses the larger of 1 hour or 2x the combined per-item stage timeouts
+
+Direct media downloads run urllib in a small isolated subprocess, which is killed
+and reaped when its elapsed budget runs out. Trickle responses cannot extend the
+budget by resetting socket timeouts. Failed or timed-out downloads remove their
+temporary files before any storage upload. Only HTTP/HTTPS sources and redirects
+are accepted; the configured byte limit still applies. Video extraction has its
+own timeout; the download budget does not include extraction or storage writes.
+The existing yt-dlp socket timeout behavior is unchanged.
 
 Summary generation is asynchronous and does not block capture or immediate publication. Audio/video
 transcription is also asynchronous and writes transcript text back onto the item when a transcribable media

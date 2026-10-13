@@ -29,6 +29,7 @@ from django.views.decorators.http import require_GET, require_http_methods
 from django.views.generic.edit import CreateView
 
 from archive.article_audio import ArticleAudioGenerationError, download_generated_article_audio
+from archive.capture import capture_item
 from archive.classification import (
     CURRENT_CLASSIFICATION_ENGINE_VERSION,
     classify_item,
@@ -41,7 +42,6 @@ from archive.models import Item, ItemKind
 from archive.services import (
     apply_operator_kind_override,
     normalize_item_kind_dependent_statuses,
-    prepare_item_for_enrichment,
     set_item_classification,
     to_week_page,
     week_bounds,
@@ -418,8 +418,9 @@ class ItemCreateView(CreateView):
             media_url=item.media_url,
         )
         set_item_classification(item=item, decision=decision)
-        prepare_item_for_enrichment(item)
-        item.save()
+        item, created = capture_item(item)
+        if not created:
+            return self.render_to_response(self.get_context_data(form=form, duplicate_item=item))
         return redirect(item.get_absolute_url())
 
 
@@ -493,14 +494,14 @@ def api_create_item(request: HttpRequest) -> JsonResponse:
         media_url=media_url,
     )
     set_item_classification(item=item, decision=decision)
-    prepare_item_for_enrichment(item)
-    item.save()
+    item, created = capture_item(item)
     return JsonResponse(
         {
             "id": item.pk,
             "detail_url": request.build_absolute_uri(item.get_absolute_url()),
+            "duplicate": not created,
         },
-        status=201,
+        status=201 if created else 200,
     )
 
 

@@ -162,6 +162,22 @@ Reference docs:
 
 `POST /api/items/` captures a new item with `Authorization: Bearer <ARCHIVE_API_TOKEN>` and a JSON body containing `url`. Optional fields include `title`, `notes`, `kind`, `audio_url`, `media_url`, `source`, `author`, and `original_published_at`. `kind="quote"` is accepted through the same explicit-kind path as the other item kinds.
 
+Repeated shares through the API or authenticated web form resolve to the newest existing
+item with the same URL within `ARCHIVE_CAPTURE_DEDUPE_SECONDS` (default `86400`, 24 hours).
+The API returns `201` with `duplicate: false` for a new item and `200` with `duplicate: true`
+and the existing `id` / `detail_url` for a repeat. The web form shows a duplicate notice
+with a link to the public existing item (or a private-item notice), preserving submitted
+form values and explaining that those changes were not saved.
+Repeats leave all existing fields and enrichment states untouched, including failed or
+completed jobs: they do not queue summary, transcription, or audio work again. The window
+starts at the item's `shared_at` and is not extended by repeats. After it expires, sharing
+the URL deliberately creates a new item. A non-positive setting disables deduplication.
+Comparison ignores only scheme/host case, default HTTP/HTTPS ports, and fragments. Paths,
+credentials, and every query parameter (including tracking parameters, order, and encoding)
+are preserved. Existing and admin-created items participate without a migration; capture
+compares recent URLs using the existing `shared_at` index, so lookup cost grows with the
+number of shares in the configured window. Direct admin creation still allows duplicates.
+
 `PATCH /api/items/<id>/` uses the same bearer token authentication and currently supports minimal kind updates, for example `{"kind":"quote"}`. Invalid kind values are rejected with `400`; valid updates are recorded as an operator classification override.
 
 ## Development
@@ -223,6 +239,7 @@ Important values:
 - `DJANGO_CSRF_TRUSTED_ORIGINS`
 - `DJANGO_DB_PATH`
 - `ARCHIVE_API_TOKEN`
+- `ARCHIVE_CAPTURE_DEDUPE_SECONDS` defaults to `86400` (24 hours)
 - `ARCHIVE_SUMMARY_API_KEY`
 - `ARCHIVE_SUMMARY_API_BASE` defaults to `https://api.openai.com/v1`
 - `ARCHIVE_SUMMARY_MODEL` defaults to `gpt-4o-mini`
@@ -253,6 +270,24 @@ Important values:
 - `ARCHIVE_MEDIA_STORAGE_ADDRESSING_STYLE` defaults to `path` for MinIO-friendly bucket addressing
 
 ## Background processing
+
+All app settings (local, production, and test) inherit SQLite `transaction_mode: "IMMEDIATE"`
+and a five-second busy timeout from the base settings. Each outer `transaction.atomic()`
+starts with `BEGIN IMMEDIATE`: writers queue for the lock before reading instead of failing
+late when upgrading a deferred read transaction to a write. This serializes the capture
+lookup and insert across connections, preventing simultaneous shares from inserting twice.
+Lock waits exceeding five seconds still raise `database is locked`; callers may retry.
+Ordinary autocommit reads remain reads; `ATOMIC_REQUESTS` is not enabled.
+
+The transaction audit found no reliance on deferred transactions or long explicit read
+transactions. Worker claims, upload reservations, and media publication use short database
+transactions; fetching, paid enrichment, and uploads run outside them. Management commands
+do not wrap processing loops in transactions. Media cleanup deliberately holds a transaction
+across each storage deletion to preserve its reference/reservation safety check: slow storage
+can hold up other writers and exhaust their busy timeout. Database migrations and bulk admin
+deletions can also hold the writer lock longer; schedule long maintenance accordingly. Keep
+future explicit transactions short, since even read-only atomic blocks acquire the writer lock.
+See [Django's SQLite transaction documentation](https://docs.djangoproject.com/en/6.0/ref/databases/#transactions-behavior).
 
 Metadata extraction plus transcription plus summary/tag generation runs in a separate worker process:
 

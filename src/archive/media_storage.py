@@ -7,13 +7,13 @@ from django.db import transaction
 from django.db.models import Q
 
 ARCHIVE_MEDIA_STORAGE_ALIAS = "archive_media"
-ARCHIVE_MEDIA_PATH_FIELDS = ("archived_audio_path", "archived_video_path")
+ARCHIVE_MEDIA_PATH_FIELDS = ("archived_audio_path", "archived_video_path", "article_audio_file")
 
 
 def item_archive_media_paths(item) -> tuple[str, ...]:
     return tuple(
         _normalized_unique_paths(
-            getattr(item, field_name) for field_name in ARCHIVE_MEDIA_PATH_FIELDS
+            str(getattr(item, field_name) or "") for field_name in ARCHIVE_MEDIA_PATH_FIELDS
         )
     )
 
@@ -51,7 +51,11 @@ def delete_unreferenced_archive_media_paths(
             if (
                 Item.objects.using(using)
                 .select_for_update()
-                .filter(Q(archived_audio_path=path) | Q(archived_video_path=path))
+                .filter(
+                    Q(archived_audio_path=path)
+                    | Q(archived_video_path=path)
+                    | Q(article_audio_file=path)
+                )
                 .exists()
             ):
                 continue
@@ -98,7 +102,7 @@ def _iter_storage_object_names(*, storage, prefix: str) -> Iterator[str]:
 def _normalized_unique_paths(paths: Iterable[str]) -> Iterator[str]:
     seen_paths: set[str] = set()
     for raw_path in paths:
-        normalized_path = raw_path.strip()
+        normalized_path = (raw_path or "").strip()
         if not normalized_path or normalized_path in seen_paths:
             continue
         seen_paths.add(normalized_path)

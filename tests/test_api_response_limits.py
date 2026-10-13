@@ -89,6 +89,6 @@ def test_audio_artifact_error_body_limit(monkeypatch, settings):
 
     item = Item(article_audio_artifact_path="/artifact")
     with pytest.raises(article_audio.ArticleAudioGenerationError, match="HTTP 500"):
-        article_audio.download_generated_article_audio(item)
+        article_audio.store_generated_article_audio(item)
     assert response.sizes == [MAX_API_ERROR_BYTES]
     assert response.closed

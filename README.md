@@ -24,8 +24,9 @@ Public endpoints:
 - `/items/<id>/audio/` archived source audio from archive-media storage; a `GET` with a single
   `Range: bytes=...` is answered with `206 Partial Content` (`Content-Range`, `Accept-Ranges: bytes`) and an
   unsatisfiable range with `416`, so podcast apps and browsers can seek and resume. Multiple ranges, `If-Range`
-  and anything malformed get the whole file. `/items/<id>/article-audio/` (generated article audio) does not
-  support ranges yet
+  and anything malformed get the whole file. `/items/<id>/article-audio/` (generated article audio)
+  supports the same ranges. Both endpoints accept `HEAD` with whole-file GET headers and no body;
+  Range is ignored on HEAD.
 - `/feeds/podcast.xml` podcast-style feed for items with stable local audio enclosures
 - `/feeds/podcast/page/<n>.xml` older podcast feed pages when more than 50 eligible items exist
 
@@ -548,3 +549,37 @@ or invalid headers fall back to `REMOTE_ADDR`. The value must match the deployme
 too few hops all visitors share the proxy's address bucket, so one client could lock out
 the owner; with too many, clients can choose their own address. The backend must be
 reachable only through those proxies.
+
+
+## Stored generated article audio
+
+Apply migration `0015_item_article_audio_content_type_and_more` before running the new
+app or workers. It adds three nullable columns (file, byte size and content type), so
+old code continues to work with the migrated database. The schema migration is
+reversible; reversing it removes references but leaves stored objects for later
+orphan cleanup. No historical downloads run during migration.
+
+When Voxhelm generation completes, the worker downloads the MP3 into a temporary disk
+file in 64 KiB chunks, then saves it in the configured `archive_media` storage under
+`article-audio/`. Older generated items are lazily copied on their first GET or HEAD.
+Subsequent requests use storage without contacting Voxhelm. Downloads use a 30-second
+socket timeout (the worker uses its article-audio timeout) and the existing
+`ARCHIVE_ARTICLE_AUDIO_MAX_BYTES` cap. Empty, oversized, truncated or non-MP3 responses
+are rejected without publishing a partial copy. Backfill failure returns `503` with
+`Retry-After: 60`; retrying can create the copy later. Generation is complete once
+the Voxhelm artifact exists. Worker copy failures are logged; the completed artifact
+and generated flag are retained, and the next GET/HEAD retries the copy. No new
+synthesis job is submitted.
+
+Podcast feed eligibility is unchanged: older generated items remain in the feed with
+length 0 until their stored copy exists. Feed rendering never fetches Voxhelm. After
+publication, enclosure length and type come from the stored metadata. Source audio
+still takes precedence when both versions exist.
+
+Article copies use the same upload reservations and reference-aware deletion guards
+as source media: item deletion and `cleanup_archive_media_orphans` cover both. Concurrent
+backfills may download independently, but only one copy is published and redundant
+uploads are discarded. Failed uploads are discarded through the reference-aware guard, even if publication
+was interrupted. If compensation cannot verify the database, or the process is killed,
+a protected reservation can remain; follow the reservation recovery procedure above. To intentionally regenerate
+article audio, clear its stored file/size/type as well as its artifact/job state first.

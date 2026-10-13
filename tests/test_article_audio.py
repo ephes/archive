@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 
 import pytest
@@ -7,11 +8,10 @@ import pytest
 from archive.article_audio import (
     DEFAULT_AUDIO_FORMAT,
     ArticleAudioGenerationError,
-    DownloadedArticleAudio,
     _task_ref_for_script,
     build_article_audio_script,
-    download_generated_article_audio,
     generate_item_article_audio,
+    store_generated_article_audio,
 )
 from archive.models import Item, ItemKind
 from archive.summaries import SummarySource
@@ -21,18 +21,21 @@ class _FakeHeaders:
     def __init__(self, content_type: str) -> None:
         self._content_type = content_type
 
+    def get(self, name):
+        return None
+
     def get_content_type(self) -> str:
         return self._content_type
 
 
 class _FakeResponse:
     def __init__(self, payload: bytes, *, content_type: str, url: str) -> None:
-        self._payload = payload
+        self._payload = io.BytesIO(payload)
         self.headers = _FakeHeaders(content_type=content_type)
         self._url = url
 
     def read(self, _size: int | None = None) -> bytes:
-        return self._payload
+        return self._payload.read(_size)
 
     def geturl(self) -> str:
         return self._url
@@ -257,9 +260,7 @@ def test_generate_item_article_audio_polls_existing_job(monkeypatch, settings) -
                     "id": "job-123",
                     "state": "succeeded",
                     "result": {
-                        "artifacts": {
-                            DEFAULT_AUDIO_FORMAT: "/v1/jobs/job-123/artifacts/speech.mp3"
-                        }
+                        "artifacts": {DEFAULT_AUDIO_FORMAT: "/v1/jobs/job-123/artifacts/speech.mp3"}
                     },
                 }
             ).encode("utf-8"),
@@ -276,7 +277,7 @@ def test_generate_item_article_audio_polls_existing_job(monkeypatch, settings) -
 
 
 @pytest.mark.django_db
-def test_download_generated_article_audio_fetches_artifact(monkeypatch, settings) -> None:
+def test_store_generated_article_audio_fetches_artifact(monkeypatch, settings) -> None:
     item = Item.objects.create(
         original_url="https://example.com/article",
         kind=ItemKind.ARTICLE,
@@ -287,7 +288,9 @@ def test_download_generated_article_audio_fetches_artifact(monkeypatch, settings
 
     def fake_urlopen(request, timeout):
         assert timeout == 30
-        assert request.full_url == "https://voxhelm.example.test/v1/jobs/job-123/artifacts/speech.mp3"
+        assert (
+            request.full_url == "https://voxhelm.example.test/v1/jobs/job-123/artifacts/speech.mp3"
+        )
         return _FakeResponse(
             b"ID3-audio",
             content_type="audio/mpeg",
@@ -296,15 +299,16 @@ def test_download_generated_article_audio_fetches_artifact(monkeypatch, settings
 
     monkeypatch.setattr("archive.article_audio.urlopen", fake_urlopen)
 
-    audio = download_generated_article_audio(item=item)
-
-    assert audio == DownloadedArticleAudio(content_type="audio/mpeg", payload=b"ID3-audio")
+    store_generated_article_audio(item=item)
+    item.refresh_from_db()
+    assert item.article_audio_size_bytes == 9
+    assert item.article_audio_content_type == "audio/mpeg"
+    with item.article_audio_file.open("rb") as stored:
+        assert stored.read() == b"ID3-audio"
 
 
 @pytest.mark.django_db
-def test_download_generated_article_audio_rejects_oversized_artifact(
-    monkeypatch, settings
-) -> None:
+def test_store_generated_article_audio_rejects_oversized_artifact(monkeypatch, settings) -> None:
     item = Item.objects.create(
         original_url="https://example.com/article",
         kind=ItemKind.ARTICLE,
@@ -325,7 +329,7 @@ def test_download_generated_article_audio_rejects_oversized_artifact(
     monkeypatch.setattr("archive.article_audio.urlopen", fake_urlopen)
 
     with pytest.raises(ArticleAudioGenerationError, match="download limit"):
-        download_generated_article_audio(item=item)
+        store_generated_article_audio(item=item)
 
 
 @pytest.mark.django_db

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import re
 
 from django.conf import settings
@@ -28,7 +29,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods
 from django.views.generic.edit import CreateView
 
-from archive.article_audio import ArticleAudioGenerationError, download_generated_article_audio
+from archive.article_audio import store_generated_article_audio
 from archive.capture import capture_item
 from archive.classification import (
     CURRENT_CLASSIFICATION_ENGINE_VERSION,
@@ -48,6 +49,8 @@ from archive.services import (
     week_page_from_token,
 )
 from archive.transcript_display import split_transcript_for_display
+
+logger = logging.getLogger(__name__)
 
 url_validator = URLValidator()
 FEED_PAGE_SIZE = 50
@@ -99,11 +102,7 @@ def _public_podcast_feed_items():
     )
     # Feed policy currently depends on per-item application logic, so this first
     # slice filters in Python after a bounded candidate query.
-    return [
-        item
-        for item in candidates
-        if podcast_feed_decision_for_item(item).eligible
-    ]
+    return [item for item in candidates if podcast_feed_decision_for_item(item).eligible]
 
 
 def _build_search_match_query(raw_query: str) -> str:
@@ -350,7 +349,7 @@ def weekly_items_json(request: HttpRequest, week: str) -> JsonResponse:
     )
 
 
-@require_GET
+@require_http_methods(["GET", "HEAD"])
 def item_archived_audio(request: HttpRequest, pk: int) -> HttpResponse:
     item = get_object_or_404(Item, pk=pk, is_public=True)
     if not item.has_archived_audio:
@@ -383,20 +382,28 @@ def item_detail(request: HttpRequest, pk: int) -> HttpResponse:
     )
 
 
-@require_GET
+@require_http_methods(["GET", "HEAD"])
 def item_article_audio(request: HttpRequest, pk: int) -> HttpResponse:
     item = get_object_or_404(Item, pk=pk, is_public=True)
     if not item.has_generated_article_audio:
         raise Http404("Article audio is not available")
 
     try:
-        audio = download_generated_article_audio(item=item)
-    except ArticleAudioGenerationError:
-        return HttpResponse("Article audio is temporarily unavailable.", status=502)
+        store_generated_article_audio(item=item)
+        audio_file = item.article_audio_file.open("rb")
+    except Exception:
+        logger.exception("Article audio is temporarily unavailable for item %s", item.pk)
+        response = HttpResponse("Article audio is temporarily unavailable.", status=503)
+        response["Retry-After"] = "60"
+        return response
 
-    response = HttpResponse(audio.payload, content_type=audio.content_type)
-    response["Cache-Control"] = "public, max-age=3600"
-    return response
+    return ranged_file_response(
+        request,
+        file_handle=audio_file,
+        size=item.article_audio_size_bytes or 0,
+        content_type=item.article_audio_content_type or "audio/mpeg",
+        cache_control="public, max-age=3600",
+    )
 
 
 class ItemCreateView(CreateView):
@@ -578,8 +585,8 @@ def _podcast_enclosure_attributes(request: HttpRequest, item: Item) -> dict[str,
             "enclosure_url": request.build_absolute_uri(
                 reverse("archive:item-article-audio", kwargs={"pk": item.pk})
             ),
-            "enclosure_type": "audio/mpeg",
-            "enclosure_length": 0,
+            "enclosure_type": item.article_audio_content_type or "audio/mpeg",
+            "enclosure_length": item.article_audio_size_bytes or 0,
         }
     return {
         "enclosure_url": request.build_absolute_uri(item.stable_audio_enclosure_url),

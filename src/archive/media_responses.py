@@ -81,7 +81,7 @@ def ranged_file_response(
     content_type: str,
     cache_control: str,
 ) -> HttpResponse:
-    """Answer a GET for an open file of ``size`` bytes; the response owns and closes the file.
+    """Answer GET/HEAD for an open file of ``size`` bytes; the response owns and closes the file.
 
     ``size`` is the recorded length of the file. When it is unknown (0), the
     file is served whole and ranges are not offered.
@@ -90,7 +90,7 @@ def ranged_file_response(
     byte_range = None
     # Without a validator (ETag/Last-Modified) an If-Range can never match, so
     # such a request gets the whole file (RFC 9110 section 13.1.5).
-    if size > 0 and "If-Range" not in request.headers:
+    if request.method == "GET" and size > 0 and "If-Range" not in request.headers:
         try:
             byte_range = parse_single_byte_range(request.headers.get("Range", ""), size)
         except UnsatisfiableRange:
@@ -122,5 +122,9 @@ def ranged_file_response(
         response["Content-Range"] = f"bytes {start}-{end}/{size}"
         response["Content-Length"] = str(length)
         response["Accept-Ranges"] = "bytes"
+    if request.method == "HEAD":
+        # Keep GET headers, release the file without iterating its body.
+        file_handle.close()
+        response.streaming_content = ()
     response["Cache-Control"] = cache_control
     return response

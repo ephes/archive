@@ -21,6 +21,11 @@ Public endpoints:
 - `/feeds/rss.xml` canonical general RSS feed
 - `/feeds/rss/page/<n>.xml` older feed pages when more than 50 eligible items exist
 - `/feeds/week/<YYYY-Wnn>.json` read-only JSON feed of public items shared in an ISO week
+- `/items/<id>/audio/` archived source audio from archive-media storage; a `GET` with a single
+  `Range: bytes=...` is answered with `206 Partial Content` (`Content-Range`, `Accept-Ranges: bytes`) and an
+  unsatisfiable range with `416`, so podcast apps and browsers can seek and resume. Multiple ranges, `If-Range`
+  and anything malformed get the whole file. `/items/<id>/article-audio/` (generated article audio) does not
+  support ranges yet
 - `/feeds/podcast.xml` podcast-style feed for items with stable local audio enclosures
 - `/feeds/podcast/page/<n>.xml` older podcast feed pages when more than 50 eligible items exist
 

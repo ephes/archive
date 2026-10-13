@@ -13,7 +13,6 @@ from django.db import connection
 from django.db.models import Q
 from django.db.models.functions import Trim
 from django.http import (
-    FileResponse,
     Http404,
     HttpRequest,
     HttpResponse,
@@ -37,6 +36,7 @@ from archive.classification import (
 )
 from archive.forms import ArchiveAuthenticationForm, ItemForm
 from archive.media_archival import MediaArchivalError, open_archived_audio
+from archive.media_responses import ranged_file_response
 from archive.models import Item, ItemKind
 from archive.services import (
     apply_operator_kind_override,
@@ -361,14 +361,13 @@ def item_archived_audio(request: HttpRequest, pk: int) -> HttpResponse:
     except MediaArchivalError:
         return HttpResponse("Archived audio is temporarily unavailable.", status=502)
 
-    response = FileResponse(
-        audio_file,
+    return ranged_file_response(
+        request,
+        file_handle=audio_file,
+        size=item.archived_audio_size_bytes,
         content_type=item.archived_audio_content_type or "audio/mpeg",
+        cache_control="public, max-age=3600",
     )
-    if item.archived_audio_size_bytes:
-        response["Content-Length"] = str(item.archived_audio_size_bytes)
-    response["Cache-Control"] = "public, max-age=3600"
-    return response
 
 
 @require_GET

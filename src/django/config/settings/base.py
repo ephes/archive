@@ -68,7 +68,31 @@ DATABASES = {
     }
 }
 
-AUTH_PASSWORD_VALIDATORS: list[dict[str, str]] = []
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": f"django.contrib.auth.password_validation.{name}"}
+    for name in (
+        "UserAttributeSimilarityValidator",
+        "MinimumLengthValidator",
+        "CommonPasswordValidator",
+        "NumericPasswordValidator",
+    )
+]
+AUTHENTICATION_BACKENDS = [
+    "archive.login_throttle.LoginThrottleBackend",
+    "django.contrib.auth.backends.ModelBackend",
+]
+CACHES = {
+    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
+    "login_throttle": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "archive-login-throttle",
+        "OPTIONS": {"MAX_ENTRIES": 10000},
+    },
+}
+LOGIN_FAILURE_LIMIT = int(os.getenv("ARCHIVE_LOGIN_FAILURE_LIMIT", "5"))
+LOGIN_ADDRESS_FAILURE_LIMIT = int(os.getenv("ARCHIVE_LOGIN_ADDRESS_FAILURE_LIMIT", "50"))
+LOGIN_FAILURE_WINDOW_S = int(os.getenv("ARCHIVE_LOGIN_FAILURE_WINDOW_S", "900"))
+LOGIN_THROTTLE_PROXY_HOPS = int(os.getenv("ARCHIVE_LOGIN_THROTTLE_PROXY_HOPS", "0"))
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = os.getenv("DJANGO_TIME_ZONE", "Europe/Berlin")

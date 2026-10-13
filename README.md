@@ -475,3 +475,28 @@ Summary, transcription (including plain-text transcripts), and article-audio JSO
 API responses are capped at 8 MiB. Larger responses fail with the stage's existing
 error and retry behavior. HTTP error diagnostics read at most 64 KiB. Binary
 article-audio downloads retain their separate configured media limit.
+||||||| parent of bec1023 (Throttle failed form logins and enable password validators)
+
+
+## Login protection
+
+The editor and admin logins refuse authentication after 5 failures per username/client
+pair or 50 per client address in a fixed 15-minute window. Locked attempts receive
+the normal invalid-login form response, even with the correct password. Successful
+login clears the pair counter; the address counter expires normally. Bearer-token
+API access is unaffected. Django's four standard password validators apply to password
+forms; programmatic password setters (including `ensure_admin_user`) do not run them.
+
+Configure `ARCHIVE_LOGIN_FAILURE_LIMIT` (5), `ARCHIVE_LOGIN_ADDRESS_FAILURE_LIMIT` (50),
+and `ARCHIVE_LOGIN_FAILURE_WINDOW_S` (900). A non-positive limit disables only its own bucket; set both limits to 0
+to disable throttling. Counters use the `login_throttle` cache, by default local memory per
+worker; multiple workers multiply the effective budget. Configure a shared Redis or Memcached
+cache backend for that alias (atomic increments preserving expiry) when a deployment-wide budget is needed.
+
+`ARCHIVE_LOGIN_THROTTLE_PROXY_HOPS` defaults to 0, ignoring `X-Forwarded-For`.
+Proxied deployments must set the correct hop count: leaving it at 0 shares
+the proxy address bucket across visitors, allowing one client to lock out the
+owner and other users. Only set it when the backend is reachable solely through trusted proxies that append
+client addresses: the configured n-th address from the right is used, ignoring
+client-supplied entries on the left. Missing, short or invalid headers fall back to
+`REMOTE_ADDR`.

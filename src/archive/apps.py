@@ -6,4 +6,4 @@ class ArchiveConfig(AppConfig):
     name = "archive"
 
     def ready(self) -> None:
-        from archive import signals  # noqa: F401
+        from archive import login_throttle, signals  # noqa: F401

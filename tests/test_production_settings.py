@@ -51,3 +51,36 @@ def test_development_and_test_settings_work_without_secret(module):
     assert result.returncode == 0, result.stderr
     expected = "dev-only-secret-key" if module == "local" else "test-secret-key"
     assert result.stdout.strip() == f"'{expected}' True False False"
+
+
+@pytest.mark.parametrize(
+    "module,value,expected",
+    [
+        ("production", None, "1"),
+        ("production", "2", "2"),
+        ("local", None, "0"),
+        ("test", None, "0"),
+    ],
+)
+def test_login_throttle_proxy_hops_default(module, value, expected):
+    env = os.environ.copy()
+    env["DJANGO_SETTINGS_MODULE"] = f"config.settings.{module}"
+    env["DJANGO_SECRET_KEY"] = "configured-test-secret"
+    env.pop("ARCHIVE_LOGIN_THROTTLE_PROXY_HOPS", None)
+    if value is not None:
+        env["ARCHIVE_LOGIN_THROTTLE_PROXY_HOPS"] = value
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from django.conf import settings; print(settings.LOGIN_THROTTLE_PROXY_HOPS)",
+        ],
+        env=env,
+        cwd=Path(__file__).resolve().parents[1] / "src" / "django",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected

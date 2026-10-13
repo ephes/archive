@@ -23,3 +23,6 @@ if SECURE_HSTS_SECONDS < 0:
     raise ImproperlyConfigured("DJANGO_SECURE_HSTS_SECONDS must be a non-negative integer.")
 SECURE_HSTS_INCLUDE_SUBDOMAINS = False
 SECURE_HSTS_PRELOAD = False
+# Production runs behind exactly one trusted reverse proxy (Traefik), which appends the
+# client address to X-Forwarded-For. Without this, all visitors would share one bucket.
+LOGIN_THROTTLE_PROXY_HOPS = int(os.getenv("ARCHIVE_LOGIN_THROTTLE_PROXY_HOPS", "1"))

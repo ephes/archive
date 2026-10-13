@@ -484,8 +484,6 @@ Summary, transcription (including plain-text transcripts), and article-audio JSO
 API responses are capped at 8 MiB. Larger responses fail with the stage's existing
 error and retry behavior. HTTP error diagnostics read at most 64 KiB. Binary
 article-audio downloads retain their separate configured media limit.
-||||||| parent of bec1023 (Throttle failed form logins and enable password validators)
-
 
 ## Login protection
 
@@ -502,10 +500,11 @@ to disable throttling. Counters use the `login_throttle` cache, by default local
 worker; multiple workers multiply the effective budget. Configure a shared Redis or Memcached
 cache backend for that alias (atomic increments preserving expiry) when a deployment-wide budget is needed.
 
-`ARCHIVE_LOGIN_THROTTLE_PROXY_HOPS` defaults to 0, ignoring `X-Forwarded-For`.
-Proxied deployments must set the correct hop count: leaving it at 0 shares
-the proxy address bucket across visitors, allowing one client to lock out the
-owner and other users. Only set it when the backend is reachable solely through trusted proxies that append
-client addresses: the configured n-th address from the right is used, ignoring
-client-supplied entries on the left. Missing, short or invalid headers fall back to
-`REMOTE_ADDR`.
+`ARCHIVE_LOGIN_THROTTLE_PROXY_HOPS` is the number of trusted reverse proxies in front
+of the app. It defaults to 1 with the production settings (one Traefik proxy) and to 0
+otherwise, where `X-Forwarded-For` is ignored. The n-th address from the right of
+`X-Forwarded-For` is used, ignoring client-supplied entries on the left; missing, short
+or invalid headers fall back to `REMOTE_ADDR`. The value must match the deployment: with
+too few hops all visitors share the proxy's address bucket, so one client could lock out
+the owner; with too many, clients can choose their own address. The backend must be
+reachable only through those proxies.

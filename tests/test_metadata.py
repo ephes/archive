@@ -2053,7 +2053,7 @@ def test_youtube_item_transcribes_from_archived_media_after_archival(monkeypatch
         def __exit__(self, exc_type, exc, tb) -> None:
             return None
 
-        def read(self) -> bytes:
+        def read(self, size: int = -1) -> bytes:
             return b'{"text":"Transcript from archived YouTube audio."}'
 
     def fake_urlopen(request, timeout):

@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 from django.conf import settings
 
+from archive.api_responses import read_api_error, read_api_response
 from archive.metadata import REQUEST_HEADERS
 from archive.models import Item
 from archive.safe_fetch import open_public_url
@@ -239,9 +240,9 @@ def _request_summary(prompt: str, timeout: int) -> str:
 
     try:
         with urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            payload = json.loads(read_api_response(response).decode("utf-8"))
     except HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")
+        message = read_api_error(exc)
         raise SummaryGenerationError(
             f"Summary API request failed: HTTP {exc.code}: {message}"
         ) from exc

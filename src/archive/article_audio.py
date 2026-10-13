@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 from django.conf import settings
 
+from archive.api_responses import read_api_error, read_api_response
 from archive.models import Item, ItemKind
 from archive.summaries import MAX_ARTICLE_AUDIO_SOURCE_CHARS, extract_summary_source_from_url
 
@@ -123,7 +124,7 @@ def download_generated_article_audio(item: Item, timeout: int = 30) -> Downloade
                 (response.headers.get_content_type() or "").lower() or DEFAULT_AUDIO_CONTENT_TYPE
             )
     except HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")
+        message = read_api_error(exc)
         raise ArticleAudioGenerationError(
             f"Article audio artifact request failed: HTTP {exc.code}: {message}"
         ) from exc
@@ -227,9 +228,9 @@ def _poll_synthesis_job(job_id: str, timeout: int) -> ArticleAudioJobUpdate:
 def _request_json(request: Request, timeout: int, error_prefix: str) -> dict[str, object]:
     try:
         with urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            payload = json.loads(read_api_response(response).decode("utf-8"))
     except HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")
+        message = read_api_error(exc)
         raise ArticleAudioGenerationError(
             f"{error_prefix}: HTTP {exc.code}: {message}"
         ) from exc

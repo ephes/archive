@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 from django.conf import settings
 
+from archive.api_responses import read_api_error, read_api_response
 from archive.classification import resolve_media_sources_for_item
 from archive.media_archival import MediaArchivalError, open_archived_audio, open_archived_video
 from archive.metadata import REQUEST_HEADERS
@@ -560,10 +561,10 @@ def _request_transcription(media: DownloadedMedia, prompt: str, timeout: int) ->
 
     try:
         with urlopen(request, timeout=timeout) as response:
-            payload = response.read().decode("utf-8", errors="replace")
+            payload = read_api_response(response).decode("utf-8", errors="replace")
             content_type = (response.headers.get_content_type() or "").lower()
     except HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")
+        message = read_api_error(exc)
         raise TranscriptionGenerationError(
             f"Transcription API request failed: HTTP {exc.code}: {message}"
         ) from exc
@@ -621,9 +622,9 @@ def _encode_multipart_formdata(fields: dict[str, str], media: DownloadedMedia) -
 def _request_json(request: Request, timeout: int, error_prefix: str) -> dict[str, object]:
     try:
         with urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            payload = json.loads(read_api_response(response).decode("utf-8"))
     except HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")
+        message = read_api_error(exc)
         raise TranscriptionGenerationError(f"{error_prefix}: HTTP {exc.code}: {message}") from exc
     except URLError as exc:
         raise TranscriptionGenerationError(f"{error_prefix}: {exc.reason}") from exc

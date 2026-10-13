@@ -468,3 +468,10 @@ receive staged, reserved objects and must either publish them (releasing the
 reservations in the publishing transaction) or discard them with
 `delete_unreferenced_archive_media_paths(..., owns_reservation=True)`; the worker
 service handles this lifecycle automatically.
+
+## Upstream API response limits
+
+Summary, transcription (including plain-text transcripts), and article-audio JSON
+API responses are capped at 8 MiB. Larger responses fail with the stage's existing
+error and retry behavior. HTTP error diagnostics read at most 64 KiB. Binary
+article-audio downloads retain their separate configured media limit.

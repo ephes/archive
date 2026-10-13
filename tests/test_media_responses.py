@@ -243,5 +243,22 @@ def test_archived_audio_range_is_read_from_the_archive_media_storage(
 def test_archived_audio_still_rejects_other_methods(client, archived_audio) -> None:
     url, _ = archived_audio()
 
-    assert client.head(url).status_code == 405
+    assert client.head(url).status_code == 200
     assert client.post(url).status_code == 405
+
+
+@pytest.mark.parametrize(
+    "headers,code,length", [({}, 200, "9"), ({"Range": "bytes=2-4"}, 200, "9")]
+)
+def test_archived_head_has_get_headers_closes_file_without_reading(
+    client, archived_audio, headers, code, length, monkeypatch
+):
+    url, handle = archived_audio()
+    monkeypatch.setattr(handle, "read", lambda *args: pytest.fail("HEAD read the audio body"))
+    response = client.head(url, headers=headers)
+    assert response.status_code == code
+    assert response["Content-Length"] == length
+    assert response["Content-Type"] == "audio/mpeg"
+    assert response["Accept-Ranges"] == "bytes"
+    assert b"".join(response.streaming_content) == b""
+    assert handle.closed

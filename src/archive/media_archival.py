@@ -194,7 +194,7 @@ def _archive_direct_audio(item: Item, source_url: str, timeout: int) -> Archived
 
                 spool.seek(0)
                 object_name = f"items/{item.pk}/audio/source{suffix}"
-                saved_name = _save_storage_file(
+                saved_name = save_reserved_media_file(
                     target_name=object_name,
                     upload_name=f"source{suffix}",
                     file_handle=spool,
@@ -480,7 +480,7 @@ def _extract_audio_with_ffmpeg(*, source_path: Path, output_path: Path, timeout:
 
 def _save_storage_path(*, target_name: str, file_path: Path, using: str) -> str:
     with file_path.open("rb") as file_handle:
-        return _save_storage_file(
+        return save_reserved_media_file(
             target_name=target_name,
             upload_name=file_path.name,
             file_handle=file_handle,
@@ -488,7 +488,7 @@ def _save_storage_path(*, target_name: str, file_path: Path, using: str) -> str:
         )
 
 
-def _save_storage_file(
+def save_reserved_media_file(
     *,
     target_name: str,
     upload_name: str,

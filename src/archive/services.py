@@ -11,7 +11,11 @@ from django.db import transaction
 from django.db.models import Case, F, Q, Value, When
 from django.utils import timezone
 
-from archive.article_audio import can_generate_article_audio, generate_item_article_audio
+from archive.article_audio import (
+    can_generate_article_audio,
+    generate_item_article_audio,
+    store_generated_article_audio,
+)
 from archive.classification import (
     CURRENT_CLASSIFICATION_ENGINE_VERSION,
     ClassificationDecision,
@@ -445,7 +449,9 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
             item.article_audio_status != EnrichmentStatus.COMPLETE
             or item.article_audio_error
             or item.article_audio_poll_at is not None
+            or not item.article_audio_generated
         ):
+            item.article_audio_generated = True
             item.article_audio_status = EnrichmentStatus.COMPLETE
             item.article_audio_error = ""
             item.article_audio_poll_at = None
@@ -454,7 +460,14 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
                     "article_audio_status",
                     "article_audio_error",
                     "article_audio_poll_at",
+                    "article_audio_generated",
                 ]
+            )
+        try:
+            store_generated_article_audio(item=item, timeout=timeout)
+        except Exception:
+            logger.exception(
+                "Article audio copy failed for item %s; lazy backfill will retry", item.pk
             )
         return True
 
@@ -508,6 +521,12 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
                 "article_audio_poll_at",
             ]
         )
+        try:
+            store_generated_article_audio(item=item, timeout=timeout)
+        except Exception:
+            logger.exception(
+                "Article audio copy failed for item %s; lazy backfill will retry", item.pk
+            )
         return True
 
     if update.is_pending:
@@ -1286,8 +1305,7 @@ def _set_normalized_attr(
     if current_value == value:
         return
     changes.append(
-        f"{label}: {_display_normalized_value(current_value)} -> "
-        f"{_display_normalized_value(value)}"
+        f"{label}: {_display_normalized_value(current_value)} -> {_display_normalized_value(value)}"
     )
     if update_fields is not None:
         setattr(item, field_name, value)
@@ -1370,9 +1388,7 @@ def apply_operator_kind_override(
         pending_fields.append("classification_engine_version")
 
     evidence = (
-        item.classification_evidence
-        if isinstance(item.classification_evidence, dict)
-        else {}
+        item.classification_evidence if isinstance(item.classification_evidence, dict) else {}
     )
     override_evidence = {
         **evidence,
@@ -1405,9 +1421,7 @@ def _normalize_article_audio_status_for_kind(
     update_fields: list[str],
 ) -> None:
     status = (
-        EnrichmentStatus.PENDING
-        if item.kind == ItemKind.ARTICLE
-        else EnrichmentStatus.COMPLETE
+        EnrichmentStatus.PENDING if item.kind == ItemKind.ARTICLE else EnrichmentStatus.COMPLETE
     )
     if item.has_generated_article_audio:
         status = EnrichmentStatus.COMPLETE

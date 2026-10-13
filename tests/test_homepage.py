@@ -5,12 +5,12 @@ from datetime import timedelta
 
 import pytest
 from django.contrib.admin.sites import AdminSite
+from django.core.files.base import ContentFile
 from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
 
 from archive.admin import ItemAdmin
-from archive.article_audio import DownloadedArticleAudio
 from archive.classification import CURRENT_CLASSIFICATION_ENGINE_VERSION
 from archive.forms import ItemForm
 from archive.models import EnrichmentStatus, Item, ItemKind, PodcastFeedPolicy
@@ -480,16 +480,16 @@ def test_item_article_audio_proxy_returns_generated_audio(client, monkeypatch) -
         article_audio_generated=True,
         article_audio_artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
     )
-    monkeypatch.setattr(
-        "archive.views.download_generated_article_audio",
-        lambda item: DownloadedArticleAudio(content_type="audio/mpeg", payload=b"ID3-audio"),
-    )
+    item.article_audio_file.save("test-speech.mp3", ContentFile(b"ID3-audio"), save=False)
+    item.article_audio_size_bytes = 9
+    item.article_audio_content_type = "audio/mpeg"
+    item.save()
 
     response = client.get(reverse("archive:item-article-audio", kwargs={"pk": item.pk}))
 
     assert response.status_code == 200
     assert response["Content-Type"] == "audio/mpeg"
-    assert response.content == b"ID3-audio"
+    assert b"".join(response.streaming_content) == b"ID3-audio"
 
 
 @pytest.mark.django_db

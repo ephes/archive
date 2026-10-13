@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from django.core.files.storage import storages
 from django.db import models
 from django.urls import reverse
 from django.utils import timezone
@@ -25,6 +26,10 @@ class EnrichmentStatus(models.TextChoices):
     PROCESSING = "processing", "Processing"
     COMPLETE = "complete", "Complete"
     FAILED = "failed", "Failed"
+
+
+def article_audio_storage():
+    return storages["archive_media"]
 
 
 class Item(models.Model):
@@ -104,6 +109,15 @@ class Item(models.Model):
     article_audio_generated = models.BooleanField(default=False)
     article_audio_job_id = models.CharField(max_length=64, blank=True)
     article_audio_artifact_path = models.CharField(max_length=500, blank=True)
+    article_audio_file = models.FileField(
+        storage=article_audio_storage,
+        upload_to="article-audio",
+        max_length=500,
+        blank=True,
+        null=True,
+    )
+    article_audio_size_bytes = models.PositiveBigIntegerField(blank=True, null=True)
+    article_audio_content_type = models.CharField(max_length=100, blank=True, null=True)
     article_audio_poll_at = models.DateTimeField(blank=True, null=True)
 
     class Meta:
@@ -211,9 +225,7 @@ class Item(models.Model):
         if self.processing_started_at != target_processing_started_at:
             self.processing_started_at = target_processing_started_at
             if update_fields is not None:
-                kwargs["update_fields"] = sorted(
-                    {*(update_fields or ()), "processing_started_at"}
-                )
+                kwargs["update_fields"] = sorted({*(update_fields or ()), "processing_started_at"})
         super().save(*args, **kwargs)
 
     def _processing_started_at_value(self):

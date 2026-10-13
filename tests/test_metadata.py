@@ -1240,6 +1240,7 @@ def test_enrich_item_metadata_keeps_article_pages_with_embedded_video_on_article
             tags=("article", "design", "agents"),
         ),
     )
+    monkeypatch.setattr("archive.services.store_generated_article_audio", lambda **kwargs: None)
     monkeypatch.setattr(
         "archive.services.generate_item_article_audio",
         lambda item, timeout: ArticleAudioJobUpdate(
@@ -2245,6 +2246,7 @@ def test_enrich_pending_items_completes_generated_article_audio(monkeypatch) -> 
         article_audio_status=EnrichmentStatus.PENDING,
     )
 
+    monkeypatch.setattr("archive.services.store_generated_article_audio", lambda **kwargs: None)
     monkeypatch.setattr(
         "archive.services.generate_item_article_audio",
         lambda item, timeout: ArticleAudioJobUpdate(

@@ -201,9 +201,18 @@ are used exactly as supplied. Local and test settings continue to work without a
 environment key. Production session and CSRF cookies require HTTPS (`Secure`); the
 reverse proxy must serve HTTPS and set `X-Forwarded-Proto` correctly.
 
+Production HTTPS responses advertise HSTS with a one-year max-age. Set
+`DJANGO_SECURE_HSTS_SECONDS` to a non-negative integer to override it; use a short
+positive value for an initial rollout. `0` stops advertising the header but does
+not revoke policies already cached by browsers. To shorten an existing policy,
+serve a small positive value (such as `1`) over HTTPS, or have the proxy serve
+`max-age=0`. Subdomains and preload are excluded. Local/test settings keep HSTS
+disabled. Django uses the trusted proxy's `X-Forwarded-Proto: https` to emit HSTS.
+
 Important values:
 
 - `DJANGO_SETTINGS_MODULE` defaults to `config.settings.local`
+- `DJANGO_SECURE_HSTS_SECONDS` defaults to `31536000` in production
 - `DJANGO_SECRET_KEY`
 - `DJANGO_ALLOWED_HOSTS`
 - `DJANGO_CSRF_TRUSTED_ORIGINS`

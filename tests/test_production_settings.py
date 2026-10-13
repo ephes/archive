@@ -84,3 +84,29 @@ def test_login_throttle_proxy_hops_default(module, value, expected):
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == expected
+
+
+@pytest.mark.parametrize("module", ["local", "production", "test"])
+def test_runtime_sqlite_capture_settings(module):
+    env = os.environ.copy()
+    env.update(
+        DJANGO_SETTINGS_MODULE=f"config.settings.{module}",
+        DJANGO_SECRET_KEY="configured-test-secret",
+    )
+    env.pop("ARCHIVE_CAPTURE_DEDUPE_SECONDS", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from django.conf import settings; "
+            "print(settings.DATABASES['default']['OPTIONS'], "
+            "settings.ARCHIVE_CAPTURE_DEDUPE_SECONDS)",
+        ],
+        env=env,
+        cwd=Path(__file__).resolve().parents[1] / "src" / "django",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "{'transaction_mode': 'IMMEDIATE', 'timeout': 5} 86400"

@@ -65,6 +65,8 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": os.getenv("DJANGO_DB_PATH", str(PROJECT_ROOT / "db.sqlite3")),
+        # Acquire the writer lock before capture's read, waiting up to the busy timeout.
+        "OPTIONS": {"transaction_mode": "IMMEDIATE", "timeout": 5},
     }
 }
 
@@ -115,6 +117,7 @@ LOGIN_REDIRECT_URL = "archive:item-new"
 LOGOUT_REDIRECT_URL = "archive:overview"
 
 ARCHIVE_API_TOKEN = os.getenv("ARCHIVE_API_TOKEN", "")
+ARCHIVE_CAPTURE_DEDUPE_SECONDS = int(os.getenv("ARCHIVE_CAPTURE_DEDUPE_SECONDS", "86400"))
 ARCHIVE_SUMMARY_API_KEY = os.getenv("ARCHIVE_SUMMARY_API_KEY", "")
 ARCHIVE_SUMMARY_API_BASE = os.getenv("ARCHIVE_SUMMARY_API_BASE", "https://api.openai.com/v1")
 ARCHIVE_SUMMARY_MODEL = os.getenv("ARCHIVE_SUMMARY_MODEL", "gpt-4o-mini")

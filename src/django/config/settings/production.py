@@ -13,3 +13,13 @@ if not SECRET_KEY.strip() or SECRET_KEY == "dev-only-secret-key":
 DEBUG = False
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
+try:
+    SECURE_HSTS_SECONDS = int(os.getenv("DJANGO_SECURE_HSTS_SECONDS", "31536000"))
+except ValueError as exc:
+    raise ImproperlyConfigured(
+        "DJANGO_SECURE_HSTS_SECONDS must be a non-negative integer."
+    ) from exc
+if SECURE_HSTS_SECONDS < 0:
+    raise ImproperlyConfigured("DJANGO_SECURE_HSTS_SECONDS must be a non-negative integer.")
+SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+SECURE_HSTS_PRELOAD = False

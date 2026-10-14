@@ -1,9 +1,10 @@
 name: CI
 
-# Same commands as `just lint` and `just test`, run through uv directly. The
-# test settings (config.settings.test) use SQLite, filesystem storage and a
-# fixed secret, so no secrets or services are needed. Python 3.12 matches the
-# version the archive_deploy role installs in production.
+# Same commands as `just check` (lint, type checks, tests) plus a missing-migration
+# check, run through uv directly. The test settings (config.settings.test) use
+# SQLite, filesystem storage and a fixed secret, so no secrets or services are
+# needed. Python 3.12 matches the version the archive_deploy role installs in
+# production.
 
 on:
   push:
@@ -25,7 +26,7 @@ env:
 
 jobs:
   check:
-    name: Lint and tests (Python 3.12)
+    name: Lint, type checks and tests (Python 3.12)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -47,5 +48,12 @@ jobs:
         run: uv sync --all-groups
       - name: Lint (just lint)
         run: uv run ruff check .
+      - name: Type checks (just typecheck)
+        run: uv run mypy
+      - name: Missing migrations
+        working-directory: src/django
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test
+        run: uv run python manage.py makemigrations --check --dry-run
       - name: Tests (just test)
         run: uv run pytest -q

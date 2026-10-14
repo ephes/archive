@@ -193,9 +193,10 @@ just dev
 against known vulnerabilities with `pip-audit`; refresh a flagged package with
 `uv lock --upgrade-package <name>`.
 
-CI (`.github/workflows/ci.yml`) runs `ruff check .` and the test suite on Python 3.12 (the
-deployed version) for every push and pull request. It uses the locked dependencies
-(`UV_FROZEN`), read-only permissions and no secrets.
+CI (`.github/workflows/ci.yml`) runs `ruff check .`, `mypy`, a missing-migration check
+(`makemigrations --check --dry-run`) and the test suite on Python 3.12 (the deployed
+version) for every push and pull request. It uses the locked dependencies (`UV_FROZEN`),
+read-only permissions and no secrets.
 
 ## Admin user
 

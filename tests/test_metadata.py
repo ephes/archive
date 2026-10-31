@@ -302,6 +302,54 @@ def test_extract_metadata_from_url_succeeds_on_page_larger_than_1mib(monkeypatch
     assert metadata.source == "Big Site"
 
 
+def test_extract_metadata_from_url_parses_buffered_bytes_before_enforcing_cap(
+    monkeypatch,
+) -> None:
+    """Bytes read within the cap must be parsed before the cap check runs.
+
+    YouTube watch pages carry a ~760 KB ``ytcfg`` script in ``<head>`` and close
+    the head around 790 KB into a ~1.4 MB page.  ``HTMLParser`` defers scanning
+    large buffered script bodies, so when the 1 MiB cap is reached ``</head>``
+    can still sit unparsed in its buffer even though it was read in time.  The
+    exact deferral depends on CPython's buffering heuristics, so this test uses a
+    parser that buffers everything until ``close()`` to pin the contract.
+    """
+    from archive import metadata as metadata_module
+
+    class _DeferringParser(metadata_module._MetadataHTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self._pending: list[str] = []
+
+        def feed(self, data: str) -> None:
+            self._pending.append(data)
+
+        def close(self) -> None:
+            super().feed("".join(self._pending))
+            self._pending = []
+            super().close()
+
+    monkeypatch.setattr(metadata_module, "_MetadataHTMLParser", _DeferringParser)
+
+    head = (
+        b"<html><head><script>ytcfg.set({});</script>"
+        b'<meta property="og:title" content="Talk Title">'
+        b'<meta property="og:site_name" content="YouTube">'
+        b"</head>"
+    )
+    body = b"<body>" + b"x" * (2 * 1024 * 1024) + b"</body></html>"
+
+    monkeypatch.setattr(
+        "archive.metadata.open_public_url",
+        lambda request, timeout: _FakeHTTPResponse(head + body),
+    )
+
+    metadata = extract_metadata_from_url("https://www.youtube.com/watch?v=abc")
+
+    assert metadata.title == "Talk Title"
+    assert metadata.source == "YouTube"
+
+
 def test_extract_metadata_from_url_handles_head_tag_split_across_chunk_boundary(
     monkeypatch,
 ) -> None:

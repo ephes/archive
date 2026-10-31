@@ -323,6 +323,11 @@ are accepted; the configured byte limit still applies. Video extraction has its
 own timeout; the download budget does not include extraction or storage writes.
 The existing yt-dlp socket timeout behavior is unchanged.
 
+Metadata extraction reads at most 1 MiB of a page and needs the closing `</head>` within that
+window; the rest of the page is not read. Everything read within the window is parsed before
+the limit is enforced, so pages with very large inline head scripts (YouTube watch pages close
+`<head>` about 790 KB in) still yield their `og:` metadata.
+
 Fetches of shared links and of the media URLs their pages announce (metadata, summary source,
 transcription media, direct media downloads) only use `http`/`https`, ignore proxy environment
 variables, follow at most five redirects, and only connect to public addresses. The hostname is

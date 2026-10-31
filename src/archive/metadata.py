@@ -255,8 +255,15 @@ def _stream_head_from_response(response, charset: str, max_bytes: int) -> _Metad
         parser.feed(dec.decode(chunk))
     else:
         # The while condition became False: max_bytes reached without EOF.
+        # HTMLParser can still hold already-read bytes in its buffer (it defers
+        # scanning large <script> bodies, such as YouTube's ytcfg block), so
+        # finish parsing what was read before deciding whether </head> fell
+        # inside the window.
+        parser.feed(dec.decode(b"", final=True))
+        parser.close()
         if not parser.head_closed:
             raise MetadataExtractionError("Metadata response exceeded 1 MiB limit")
+        return parser
 
     parser.feed(dec.decode(b"", final=True))
     parser.close()

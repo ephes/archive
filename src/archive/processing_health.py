@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from django.db import transaction
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.utils import timezone
 
 from archive.media_archival import uses_supported_video_page_source
@@ -71,7 +71,21 @@ def _record_step_outcome(
         ProcessingEvent.objects.create(
             step=step, succeeded=succeeded, item_id=item_id, occurred_at=occurred_at
         )
-        ProcessingEvent.objects.filter(occurred_at__lt=occurred_at - EVENT_RETENTION).delete()
+        _prune_events(cutoff=occurred_at - EVENT_RETENTION)
+
+
+def _prune_events(*, cutoff: datetime) -> None:
+    """Delete events past retention, except those of a step's ongoing failure streak.
+
+    ``failing_items`` counts the failures since ``failing_since``; pruning them would
+    report a recovery that never happened.
+    """
+    streaks = Q()
+    for step, failing_since in ProcessingStepState.objects.filter(
+        failing_since__isnull=False
+    ).values_list("step", "failing_since"):
+        streaks |= Q(step=step, occurred_at__gte=failing_since)
+    ProcessingEvent.objects.filter(occurred_at__lt=cutoff).exclude(streaks).delete()
 
 
 def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:

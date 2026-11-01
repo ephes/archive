@@ -460,9 +460,9 @@ Per step:
   item count once, so a value of two or more points to a systemic problem rather than one
   broken source.
 
-Outcome events are pruned after 30 days; `failing_items` only sees failures inside that
-retention. The per-step latest timestamps are not pruned. When the migration creating these
-tables runs, it seeds `media_archive_youtube.last_success_at` with the `shared_at` of the newest
+Outcome events are pruned after 30 days, except the failures of a step's ongoing streak (since
+its `failing_since`), so `failing_items` cannot drop to zero without a success. The per-step
+latest timestamps are not pruned. When the migration creating these tables runs, it seeds `media_archive_youtube.last_success_at` with the `shared_at` of the newest
 item that has archived audio from a YouTube URL (the archival happened at or after that time),
 so the YouTube age is meaningful right after the deploy instead of `null`.
 

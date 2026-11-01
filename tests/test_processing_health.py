@@ -122,6 +122,22 @@ def test_events_are_pruned_after_retention_but_state_is_kept() -> None:
 
 
 @pytest.mark.django_db
+def test_pruning_keeps_the_events_of_an_ongoing_failure_streak() -> None:
+    _record(YOUTUBE, True, 1, hours_ago=40 * 24)
+    _record(YOUTUBE, False, 2, hours_ago=39 * 24)
+    _record(YOUTUBE, False, 3, hours_ago=38 * 24)
+    _record(ProcessingStep.METADATA, True, 4, hours_ago=37 * 24)
+    _record(ProcessingStep.METADATA, False, 5, hours_ago=36 * 24)
+    _record(ProcessingStep.METADATA, True, 6, hours_ago=0)
+
+    youtube = processing_health_snapshot(now=NOW)["steps"]["media_archive_youtube"]
+    assert youtube["failing_items"] == 2
+    assert youtube["failing_for_seconds"] == 39 * 24 * 3600
+    # Events before the streak and of recovered steps still age out.
+    assert sorted(ProcessingEvent.objects.values_list("item_id", flat=True)) == [2, 3, 6]
+
+
+@pytest.mark.django_db
 def test_recording_errors_do_not_reach_the_processing_path(monkeypatch, caplog) -> None:
     def broken(*args, **kwargs):
         raise RuntimeError("database is locked")

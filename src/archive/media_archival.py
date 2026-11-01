@@ -85,6 +85,14 @@ def can_archive_audio(item: Item) -> bool:
     )
 
 
+def uses_supported_video_page_source(item: Item) -> bool:
+    """Whether archival would download audio from a YouTube page through yt-dlp."""
+    audio_source_url, video_source_url = resolve_media_sources_for_item(item)
+    if audio_source_url is not None or video_source_url is None:
+        return False
+    return _looks_like_supported_video_page_url(video_source_url)
+
+
 def archive_item_audio(item: Item, timeout: int = 300) -> ArchivedAudio:
     audio_source_url = _select_audio_archive_source_url(item)
     if audio_source_url is not None:

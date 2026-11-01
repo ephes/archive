@@ -29,6 +29,8 @@ Public endpoints:
   Range is ignored on HEAD.
 - `/feeds/podcast.xml` podcast-style feed for items with stable local audio enclosures
 - `/feeds/podcast/page/<n>.xml` older podcast feed pages when more than 50 eligible items exist
+- `/api/health/` unauthenticated JSON processing health for monitoring (step counts and timestamps
+  only, see [Processing health](#processing-health))
 
 ## Week JSON Feed
 
@@ -192,6 +194,12 @@ just dev
 `just check` runs lint, type checks and tests. `just audit` checks the locked dependencies
 against known vulnerabilities with `pip-audit`; refresh a flagged package with
 `uv lock --upgrade-package <name>`.
+
+`just deploy` runs `just deploy-one archive` in the ops-control checkout at
+`~/projects/ops-control` (set `OPS_CONTROL` to use another one). That deploy ships the Archive
+checkout at `$PROJECTS_ROOT/archive` (default `~/projects/archive`), not the current directory,
+so update that checkout first; running `just deploy-one archive` from ops-control directly is
+the same thing.
 
 CI (`.github/workflows/ci.yml`) runs `ruff check .`, `mypy`, a missing-migration check
 (`makemigrations --check --dry-run`) and the test suite on Python 3.12 (the deployed
@@ -395,6 +403,71 @@ Operator note:
   normalization diagnostic, an operator-set podcast feed policy (`auto`, `include`, `exclude`), and a
   `Reprocess selected items` action that re-queues per-item enrichment without any bulk historical replay by
   default
+
+## Processing health
+
+`GET /api/health/` reports whether the background worker's processing steps are working, so a
+monitor (Nyxmon on macmini polls `http://127.0.0.1:10041/api/health/`) can notice when one
+silently stops succeeding. It needs no authentication and exposes only step names, counts and
+timestamps: no item IDs, titles, URLs or error messages. Responses carry
+`Cache-Control: no-store`. A request costs a handful of indexed queries on two small tables,
+independent of the number of items.
+
+```json
+{
+  "generated_at": "2026-11-01T12:00:00+00:00",
+  "window_hours": 24,
+  "steps": {
+    "media_archive_youtube": {
+      "successes": 1,
+      "failures": 4,
+      "last_success_at": "2026-10-28T09:12:03+00:00",
+      "last_success_age_seconds": 355677,
+      "last_failure_at": "2026-11-01T11:40:00+00:00",
+      "failing_since": "2026-10-30T18:02:11+00:00",
+      "failing_for_seconds": 151069,
+      "failing_items": 2
+    },
+    "metadata": {"successes": 6, "failures": 0, "...": "..."},
+    "media_archive_other": {"...": "..."},
+    "transcript": {"...": "..."},
+    "summary": {"...": "..."},
+    "article_audio": {"...": "..."}
+  }
+}
+```
+
+The steps are `metadata` (metadata extraction), `media_archive_youtube` (audio downloaded from
+a YouTube page through `yt-dlp`), `media_archive_other` (every other audio/video archival),
+`transcript`, `summary` (summaries and tags) and `article_audio`. Every step is always present.
+The worker records one outcome per attempted run; skipped work (nothing to archive, an item
+that already has a transcript) is not an attempt. Each retry is its own attempt, so one item
+whose media archival keeps failing produces four failures (the first try plus three retries
+over about two and a half hours).
+
+Per step:
+
+- `successes` / `failures`: attempts in the last `window_hours` (24). Rising failures are the
+  "errors are increasing" signal.
+- `last_success_at` / `last_success_age_seconds`: the latest success, kept indefinitely; `null`
+  if the step never succeeded since the health tables were created.
+- `last_failure_at`: the latest failure, or `null`.
+- `failing_since` / `failing_for_seconds`: the first failure after the latest success, cleared
+  by the next success (`failing_for_seconds` is `0` then). This is the "nothing succeeds
+  anymore" signal: it only grows while attempts keep failing, not when there is simply nothing
+  to process, which matters for low-volume steps such as YouTube archival.
+- `failing_items`: distinct items with a failed attempt since `failing_since`. Retries of one
+  item count once, so a value of two or more points to a systemic problem rather than one
+  broken source.
+
+Outcome events are pruned after 30 days; `failing_items` only sees failures inside that
+retention. The per-step latest timestamps are not pruned. When the migration creating these
+tables runs, it seeds `media_archive_youtube.last_success_at` with the `shared_at` of the newest
+item that has archived audio from a YouTube URL (the archival happened at or after that time),
+so the YouTube age is meaningful right after the deploy instead of `null`.
+
+Known gap: an item that exceeds the worker's stale-processing window is re-queued without a
+recorded outcome, so a step that hangs instead of failing does not show up here.
 
 ## Classification And Feed Policy
 

@@ -251,3 +251,45 @@ class PendingArchiveMediaUpload(models.Model):
 
     prefix = models.CharField(max_length=512, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class ProcessingStep(models.TextChoices):
+    """Worker processing steps reported by the processing health endpoint.
+
+    Media archival is split by source: ``media_archive_youtube`` covers YouTube
+    pages downloaded through yt-dlp, ``media_archive_other`` everything else.
+    """
+
+    METADATA = "metadata"
+    MEDIA_ARCHIVE_YOUTUBE = "media_archive_youtube"
+    MEDIA_ARCHIVE_OTHER = "media_archive_other"
+    TRANSCRIPT = "transcript"
+    SUMMARY = "summary"
+    ARTICLE_AUDIO = "article_audio"
+
+
+class ProcessingStepState(models.Model):
+    """The latest outcome of one processing step, kept for as long as the step exists."""
+
+    step = models.CharField(max_length=32, choices=ProcessingStep.choices, primary_key=True)
+    last_success_at = models.DateTimeField(blank=True, null=True)
+    last_failure_at = models.DateTimeField(blank=True, null=True)
+    # The first failure after the latest success; cleared by the next success.
+    failing_since = models.DateTimeField(blank=True, null=True)
+
+
+class ProcessingEvent(models.Model):
+    """One attempted run of a processing step; pruned after a retention window."""
+
+    step = models.CharField(max_length=32, choices=ProcessingStep.choices)
+    succeeded = models.BooleanField()
+    item_id = models.PositiveIntegerField(blank=True, null=True)
+    occurred_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["occurred_at"], name="archive_proc_event_time"),
+            models.Index(
+                fields=["step", "succeeded", "occurred_at"], name="archive_proc_event_step"
+            ),
+        ]

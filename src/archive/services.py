@@ -32,7 +32,8 @@ from archive.media_storage import (
     release_pending_archive_media_paths,
 )
 from archive.metadata import extract_metadata_from_url
-from archive.models import EnrichmentStatus, Item, ItemKind
+from archive.models import EnrichmentStatus, Item, ItemKind, ProcessingStep
+from archive.processing_health import media_archive_step, record_step_outcome
 from archive.summaries import generate_item_summaries
 from archive.transcriptions import can_transcribe_item, generate_item_transcript
 
@@ -257,6 +258,7 @@ def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
         generated = generate_item_summaries(item=item, timeout=timeout)
     except Exception as exc:
         logger.exception("Summary generation failed for item %s", item.pk)
+        record_step_outcome(ProcessingStep.SUMMARY, succeeded=False, item_id=item.pk)
         return _mark_summary_failure(item, str(exc))
 
     update_fields: list[str] = []
@@ -274,6 +276,7 @@ def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
         update_fields.extend(["tags", "tags_generated"])
 
     if not _has_generated_summaries(item):
+        record_step_outcome(ProcessingStep.SUMMARY, succeeded=False, item_id=item.pk)
         return _mark_summary_failure(item, "Summary response did not produce all required fields")
 
     item.summary_status = EnrichmentStatus.COMPLETE
@@ -284,6 +287,7 @@ def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
         ["summary_status", "summary_error", "summary_retry_count", "summary_retry_at"]
     )
     item.save(update_fields=sorted(set(update_fields)))
+    record_step_outcome(ProcessingStep.SUMMARY, succeeded=True, item_id=item.pk)
     return True
 
 
@@ -306,6 +310,7 @@ def enrich_item_transcript(item: Item, timeout: int = 300) -> bool:
         transcript = generate_item_transcript(item=item, timeout=timeout)
     except Exception as exc:
         logger.exception("Transcript generation failed for item %s", item.pk)
+        record_step_outcome(ProcessingStep.TRANSCRIPT, succeeded=False, item_id=item.pk)
         return _mark_transcript_failure(item, str(exc))
 
     item.transcript = transcript
@@ -334,6 +339,7 @@ def enrich_item_transcript(item: Item, timeout: int = 300) -> bool:
         )
 
     item.save(update_fields=sorted(set(update_fields)))
+    record_step_outcome(ProcessingStep.TRANSCRIPT, succeeded=True, item_id=item.pk)
     return True
 
 
@@ -380,10 +386,12 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
             )
         return True
 
+    health_step = media_archive_step(item)
     try:
         archived_audio = archive_item_audio(item=item, timeout=timeout)
     except Exception as exc:
         logger.exception("Audio archival failed for item %s", item.pk)
+        record_step_outcome(health_step, succeeded=False, item_id=item.pk)
         return _mark_media_archive_failure(item, str(exc))
 
     published_fields = [
@@ -440,6 +448,7 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
                 setattr(item, field, value)
         raise
 
+    record_step_outcome(health_step, succeeded=True, item_id=item.pk)
     return True
 
 
@@ -502,6 +511,7 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
         update = generate_item_article_audio(item=item, timeout=timeout)
     except Exception as exc:
         logger.exception("Article audio generation failed for item %s", item.pk)
+        record_step_outcome(ProcessingStep.ARTICLE_AUDIO, succeeded=False, item_id=item.pk)
         return _mark_article_audio_failure(item, str(exc))
 
     if update.is_complete:
@@ -521,6 +531,7 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
                 "article_audio_poll_at",
             ]
         )
+        record_step_outcome(ProcessingStep.ARTICLE_AUDIO, succeeded=True, item_id=item.pk)
         try:
             store_generated_article_audio(item=item, timeout=timeout)
         except Exception:
@@ -544,6 +555,7 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
         )
         return True
 
+    record_step_outcome(ProcessingStep.ARTICLE_AUDIO, succeeded=False, item_id=item.pk)
     return _mark_article_audio_failure(item, update.error_message)
 
 
@@ -732,6 +744,7 @@ def _enrich_item_metadata_fields(item: Item, timeout: int = 15) -> bool:
         metadata = extract_metadata_from_url(item.original_url, timeout=timeout)
     except Exception as exc:
         logger.exception("Metadata extraction failed for item %s", item.pk)
+        record_step_outcome(ProcessingStep.METADATA, succeeded=False, item_id=item.pk)
         return _mark_metadata_failure(item, str(exc))
 
     update_fields: list[str] = []
@@ -792,6 +805,7 @@ def _enrich_item_metadata_fields(item: Item, timeout: int = 15) -> bool:
     _refresh_article_audio_state(item, update_fields)
     update_fields.extend(["enrichment_status", "enrichment_error"])
     item.save(update_fields=sorted(set(update_fields)))
+    record_step_outcome(ProcessingStep.METADATA, succeeded=True, item_id=item.pk)
     return True
 
 

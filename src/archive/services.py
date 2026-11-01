@@ -499,12 +499,23 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
         return True
 
     if not _article_audio_source_ready(item):
-        item.article_audio_status = EnrichmentStatus.PENDING
-        item.article_audio_error = ""
-        item.article_audio_poll_at = None
-        item.save(
-            update_fields=["article_audio_status", "article_audio_error", "article_audio_poll_at"]
-        )
+        # Only write when something changes: an unchanged save from this (possibly stale)
+        # instance would undo a concurrent `reprocess_items --hold-article-audio`.
+        if (
+            item.article_audio_status != EnrichmentStatus.PENDING
+            or item.article_audio_error
+            or item.article_audio_poll_at is not None
+        ):
+            item.article_audio_status = EnrichmentStatus.PENDING
+            item.article_audio_error = ""
+            item.article_audio_poll_at = None
+            item.save(
+                update_fields=[
+                    "article_audio_status",
+                    "article_audio_error",
+                    "article_audio_poll_at",
+                ]
+            )
         return True
 
     try:

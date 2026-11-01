@@ -40,6 +40,7 @@ from archive.forms import ArchiveAuthenticationForm, ItemForm
 from archive.media_archival import MediaArchivalError, open_archived_audio
 from archive.media_responses import ranged_file_response
 from archive.models import Item, ItemKind
+from archive.processing_health import processing_health_snapshot
 from archive.services import (
     apply_operator_kind_override,
     normalize_item_kind_dependent_statuses,
@@ -274,6 +275,14 @@ def search(request: HttpRequest) -> HttpResponse:
             "result_count": len(item_ids),
         },
     )
+
+
+@require_GET
+def processing_health(request: HttpRequest) -> JsonResponse:
+    """Unauthenticated processing health for monitoring: step counts and timestamps only."""
+    response = JsonResponse(processing_health_snapshot())
+    response["Cache-Control"] = "no-store"
+    return response
 
 
 @require_GET

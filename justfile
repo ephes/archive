@@ -1,3 +1,5 @@
+ops_control := env("OPS_CONTROL", home_directory() / "projects" / "ops-control")
+
 default:
     @just --list
 
@@ -29,8 +31,9 @@ check:
 loc:
     cloc --by-file src/ tests/ --include-lang=Python
 
+# Deploy via ops-control's `just deploy-one archive` (OPS_CONTROL overrides ~/projects/ops-control).
 deploy:
-    cd /Users/jochen/workspaces/ws-archive/ops-control && just deploy-one archive
+    cd "{{ops_control}}" && just deploy-one archive
 
 manage *args:
     cd src/django && uv run python manage.py {{args}}

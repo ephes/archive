@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Add the `reprocess_items` management command to re-queue one failed step (`summary`,
+  `media_archive`, or `article_audio`) for specific item ids or ranges without re-fetching
+  metadata or touching other steps, which the admin "Reprocess selected items" action always
+  does. Only failed steps are re-queued (others are reported as skipped); `--stagger` spaces
+  the retry times to stay below upstream rate limits, `--hold-article-audio` keeps a
+  successful summary from starting paid text-to-speech, and `--dry-run` shows the changes.
+  Items the worker is processing are skipped, and the worker no longer rewrites unchanged
+  waiting article-audio state, so a hold placed during its pass sticks.
 - Add `GET /api/health/`, an unauthenticated JSON processing-health endpoint for monitoring.
   Per worker step (metadata, YouTube media archival, other media archival, transcription,
   summaries, article audio) it reports success and failure counts over the last 24 hours, the

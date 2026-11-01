@@ -404,6 +404,45 @@ Operator note:
   `Reprocess selected items` action that re-queues per-item enrichment without any bulk historical replay by
   default
 
+## Re-queueing failed steps
+
+`reprocess_items` re-queues one failed step for specific items so the running worker retries
+it. Unlike the admin `Reprocess selected items` action, it does not re-fetch metadata and
+does not reset any other step (a failed transcript or pending article audio stays as it is):
+
+```bash
+just manage reprocess_items --ids 318 --only media_archive --dry-run
+just manage reprocess_items --ids 152-176 --only summary --stagger 60 --hold-article-audio
+```
+
+- `--ids` takes ids and inclusive ranges (`318 152-176`, commas also work).
+- `--only` is `summary`, `media_archive`, or `article_audio`. Only items whose step is
+  `failed` are re-queued; every other item is reported as skipped with its current state.
+  `media_archive` also skips items that have archived audio or no archivable source, and
+  `article_audio` skips non-articles, items that already have generated audio, and items
+  with an earlier synthesis job id (releasing those would only re-poll the old job). Items
+  the worker is processing right now (any step `processing`) are skipped; run again later.
+- `summary` and `media_archive` keep the step `failed` (the error stays visible until the
+  worker clears it on claim), reset its retry counter to 0, and set its retry time: the same
+  state the worker uses for its own scheduled retries, so the full 5 min / 30 min / 2 h backoff
+  applies again if the retry fails. `article_audio` sets the step back to `pending`.
+- `--stagger SECONDS` spaces the retry times of consecutive re-queued items, so the worker
+  does not send all of them to an upstream API at once. The first item is due immediately;
+  with `--stagger 60`, 25 items are spread over 24 minutes. The worker claims items one at a
+  time, and a retry that fails again falls back to the normal backoff. Not available for
+  `article_audio`: the worker runs pending article audio whenever it processes the item for
+  another step, so no due time can hold it back.
+- A successful summary immediately starts paid article audio (text-to-speech) for articles
+  whose article audio is `pending`, in the same worker pass. `--hold-article-audio` (with
+  `--only summary`) marks that pending, not yet submitted article audio as `failed` with a
+  "Held by reprocess_items" error instead; release it later with `--only article_audio`
+  (or the admin action).
+- `--dry-run` prints the same per-item lines without writing. Output contains item ids, step
+  names, states, retry counts, and due times only, no titles, URLs, or error messages.
+
+The command only changes database state; the worker must be running to pick the items up.
+In production, ops-control's `just archive-reprocess` runs it on macmini.
+
 ## Processing health
 
 `GET /api/health/` reports whether the background worker's processing steps are working, so a

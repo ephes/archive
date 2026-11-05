@@ -76,6 +76,7 @@ class BatchTranscriptionJobUpdate:
     state: str
     transcript: str = ""
     error_message: str = ""
+    json_artifact_path: str = ""
 
     @property
     def is_complete(self) -> bool:
@@ -267,7 +268,78 @@ def _request_staged_archived_audio_transcription(
         timeout=timeout,
     )
     completed = _wait_for_batch_transcription_job(update=update, timeout=timeout)
+    _check_batch_transcript_coverage(completed=completed, timeout=timeout)
     return completed.transcript
+
+
+def _check_batch_transcript_coverage(
+    *,
+    completed: BatchTranscriptionJobUpdate,
+    timeout: int,
+) -> None:
+    """Reject a batch transcript whose segments leave a long stretch of audio uncovered.
+
+    whisper.cpp splits long audio across processors and ignores a failing worker thread:
+    the job still succeeds, but whole parts of the audio are missing from the text.
+    """
+    max_gap_seconds = settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS
+    if max_gap_seconds <= 0 or not completed.json_artifact_path:
+        return
+
+    request = Request(
+        _api_url(completed.json_artifact_path),
+        headers={"Authorization": f"Bearer {settings.ARCHIVE_TRANSCRIPTION_API_KEY}"},
+    )
+    payload = _request_json(
+        request=request,
+        timeout=timeout,
+        error_prefix="Batch transcription segment download failed",
+    )
+    gaps = find_transcript_gaps(payload.get("segments"), max_gap_seconds=max_gap_seconds)
+    if not gaps:
+        return
+    start, end = max(gaps, key=lambda gap: gap[1] - gap[0])
+    raise TranscriptionGenerationError(
+        f"Batch transcription job {completed.job_id} is incomplete: {len(gaps)} stretch(es) "
+        f"of audio longer than {max_gap_seconds:g} s have no transcript, the longest from "
+        f"{_format_seconds(start)} to {_format_seconds(end)}"
+    )
+
+
+def find_transcript_gaps(
+    segments: object,
+    *,
+    max_gap_seconds: float,
+) -> list[tuple[float, float]]:
+    """Return ``(start, end)`` stretches longer than ``max_gap_seconds`` without a segment.
+
+    Malformed segment lists yield no gaps: the check only rejects what it can read.
+    """
+    if not isinstance(segments, list):
+        return []
+    gaps: list[tuple[float, float]] = []
+    covered_until = 0.0
+    for segment in segments:
+        if not isinstance(segment, dict):
+            return []
+        start, end = _seconds(segment.get("start")), _seconds(segment.get("end"))
+        if start is None or end is None:
+            return []
+        if start - covered_until > max_gap_seconds:
+            gaps.append((covered_until, start))
+        covered_until = max(covered_until, end)
+    return gaps
+
+
+def _seconds(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _format_seconds(seconds: float) -> str:
+    total = int(seconds)
+    return f"{total // 3600}:{total % 3600 // 60:02d}:{total % 60:02d}"
 
 
 def _stage_archived_audio_upload(
@@ -415,7 +487,16 @@ def _parse_batch_transcription_job_update(
             raise TranscriptionGenerationError(
                 "Batch transcription job did not return transcript text"
             )
-        return BatchTranscriptionJobUpdate(job_id=job_id, state=state, transcript=transcript)
+        artifacts = result.get("artifacts")
+        json_artifact_path = ""
+        if isinstance(artifacts, dict):
+            json_artifact_path = str(artifacts.get("json") or "").strip()
+        return BatchTranscriptionJobUpdate(
+            job_id=job_id,
+            state=state,
+            transcript=transcript,
+            json_artifact_path=json_artifact_path,
+        )
 
     if state == "failed":
         error = payload.get("error")

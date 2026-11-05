@@ -11,6 +11,7 @@ from archive.transcriptions import (
     MAX_TRANSCRIPTION_BYTES,
     TranscriptionGenerationError,
     can_transcribe_item,
+    find_transcript_gaps,
     generate_item_transcript,
 )
 
@@ -294,6 +295,151 @@ def test_generate_item_transcript_stages_oversized_archived_audio_for_batch_job(
     monkeypatch.setattr("archive.transcriptions.urlopen", fake_urlopen)
 
     assert generate_item_transcript(item=item) == "Batch staged transcript"
+
+
+def _oversized_archived_audio_item() -> Item:
+    item = Item.objects.create(
+        original_url="https://example.com/episode",
+        audio_url="https://cdn.example.com/episode.mp3",
+        kind=ItemKind.PODCAST_EPISODE,
+        archived_audio_path="items/1/audio/source.mp3",
+        archived_audio_content_type="audio/mpeg",
+        archived_audio_size_bytes=MAX_TRANSCRIPTION_BYTES + 1,
+    )
+    _delete_archived_object(item.archived_audio_path)
+    storages["archive_media"].save(
+        item.archived_audio_path,
+        ContentFile(b"oversized-archived-audio"),
+    )
+    return item
+
+
+def _batch_job_urlopen(*, segments: list[dict[str, object]], requested: list[str]):
+    """Fake Voxhelm: upload, job submission, a succeeded job, and its segment JSON."""
+
+    def fake_urlopen(request, timeout):
+        requested.append(request.full_url)
+        if request.full_url == "https://voxhelm.example.test/v1/uploads":
+            payload: dict[str, object] = {"id": "upload-123"}
+        elif request.full_url == "https://voxhelm.example.test/v1/jobs":
+            payload = {"id": "job-123", "state": "queued"}
+        elif request.full_url == "https://voxhelm.example.test/v1/jobs/job-123":
+            payload = {
+                "id": "job-123",
+                "state": "succeeded",
+                "result": {
+                    "text": "Batch staged transcript",
+                    "artifacts": {
+                        "text": "/v1/jobs/job-123/artifacts/transcript.txt",
+                        "json": "/v1/jobs/job-123/artifacts/transcript.json",
+                    },
+                },
+            }
+        else:
+            assert (
+                request.full_url
+                == "https://voxhelm.example.test/v1/jobs/job-123/artifacts/transcript.json"
+            )
+            assert request.get_header("Authorization") == "Bearer key"
+            payload = {"language": "de", "segments": segments, "text": "..."}
+        return _FakeResponse(
+            json.dumps(payload).encode("utf-8"),
+            content_type="application/json",
+            url=request.full_url,
+        )
+
+    return fake_urlopen
+
+
+def _segments(*spans: tuple[float, float], step: float = 5.0) -> list[dict[str, object]]:
+    segments: list[dict[str, object]] = []
+    for span_start, span_end in spans:
+        start = span_start
+        while start < span_end:
+            segments.append({"start": start, "end": min(start + step, span_end), "text": "x"})
+            start += step
+    return segments
+
+
+@pytest.mark.django_db
+def test_generate_item_transcript_rejects_batch_transcript_with_missing_audio_parts(
+    monkeypatch, settings
+) -> None:
+    # Item 408 (a 3:09 h podcast): whisper.cpp split the audio into four parts and three
+    # of them stopped after about 700 s, yet the job succeeded with a partial transcript.
+    item = _oversized_archived_audio_item()
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
+    settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
+    monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
+    requested: list[str] = []
+    segments = _segments((0, 3536), (5672, 6378), (8508, 9208))
+    monkeypatch.setattr(
+        "archive.transcriptions.urlopen",
+        _batch_job_urlopen(segments=segments, requested=requested),
+    )
+
+    with pytest.raises(
+        TranscriptionGenerationError,
+        match=r"job-123 is incomplete: 2 stretch\(es\) .* from 0:58:56 to 1:34:32",
+    ):
+        generate_item_transcript(item=item)
+    assert requested[-1].endswith("/jobs/job-123/artifacts/transcript.json")
+
+
+@pytest.mark.django_db
+def test_generate_item_transcript_accepts_batch_transcript_covering_the_audio(
+    monkeypatch, settings
+) -> None:
+    item = _oversized_archived_audio_item()
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
+    settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
+    monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
+    requested: list[str] = []
+    # A five-minute music break stays below the default ten-minute limit.
+    segments = _segments((0, 3000), (3300, 11343))
+    monkeypatch.setattr(
+        "archive.transcriptions.urlopen",
+        _batch_job_urlopen(segments=segments, requested=requested),
+    )
+
+    assert generate_item_transcript(item=item) == "Batch staged transcript"
+    assert requested[-1].endswith("/jobs/job-123/artifacts/transcript.json")
+
+
+@pytest.mark.django_db
+def test_generate_item_transcript_skips_coverage_check_when_disabled(monkeypatch, settings) -> None:
+    item = _oversized_archived_audio_item()
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
+    settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
+    settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = 0
+    monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
+    requested: list[str] = []
+    monkeypatch.setattr(
+        "archive.transcriptions.urlopen",
+        _batch_job_urlopen(segments=_segments((0, 60), (5000, 5060)), requested=requested),
+    )
+
+    assert generate_item_transcript(item=item) == "Batch staged transcript"
+    assert not any(url.endswith("transcript.json") for url in requested)
+
+
+def test_find_transcript_gaps_reports_uncovered_stretches_including_the_start() -> None:
+    segments = [
+        {"start": 700.0, "end": 710.0},
+        {"start": 705.0, "end": 900.0},
+        {"start": 950.0, "end": 960.0},
+        {"start": 2000.0, "end": 2010.0},
+    ]
+
+    assert find_transcript_gaps(segments, max_gap_seconds=600) == [(0.0, 700.0), (960.0, 2000.0)]
+
+
+@pytest.mark.parametrize(
+    "segments",
+    [None, "segments", [{"start": "0", "end": 1}], [["0", "1"]], [{"start": True, "end": 9}]],
+)
+def test_find_transcript_gaps_ignores_unreadable_segments(segments) -> None:
+    assert find_transcript_gaps(segments, max_gap_seconds=1) == []
 
 
 @pytest.mark.django_db

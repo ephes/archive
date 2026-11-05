@@ -257,6 +257,8 @@ Important values:
 - `ARCHIVE_TRANSCRIPTION_API_BASE` defaults to `ARCHIVE_SUMMARY_API_BASE`
 - `ARCHIVE_TRANSCRIPTION_MODEL` defaults to `gpt-4o-mini-transcribe`
 - `ARCHIVE_TRANSCRIPTION_POLL_SECONDS` defaults to `30`
+- `ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS` defaults to `600`: a Voxhelm batch transcript whose
+  segments leave a longer stretch of audio uncovered is rejected as incomplete; `0` disables the check
 - `ARCHIVE_ARTICLE_AUDIO_API_KEY` defaults to `ARCHIVE_TRANSCRIPTION_API_KEY`
 - `ARCHIVE_ARTICLE_AUDIO_API_BASE` defaults to `ARCHIVE_TRANSCRIPTION_API_BASE`
 - `ARCHIVE_ARTICLE_AUDIO_MODEL` defaults to `tts-1`
@@ -350,7 +352,13 @@ transcription is also asynchronous and writes transcript text back onto the item
 source is available, preferring archived local audio first, then archived local video, and falling back to
 direct remote media URLs within the sync API size limit. Oversized archived local audio now stages into
 Voxhelm's batch upload path (`POST /v1/uploads` plus `POST /v1/jobs` with `input.kind=upload`) instead of
-trying to chunk/transcode inside Archive. Failed summary jobs retry automatically with bounded backoff
+trying to chunk/transcode inside Archive. Archive then reads the job's segment JSON and rejects the
+transcript as incomplete when a stretch of audio longer than `ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS`
+(10 minutes) has no segment: whisper.cpp splits long audio across processors and ignores a worker
+thread that fails, so a job can succeed with whole parts of the audio missing (item 408, a 3:09 h
+podcast, kept only about 50 % of its text). The transcript step then fails with that error instead of
+storing the partial text; requeue it with `reprocess_items --only transcript`. The check cannot see
+audio missing at the very end, because neither side records the media duration. Failed summary jobs retry automatically with bounded backoff
 (5 minutes, 30 minutes, 2 hours) before remaining in a failed state for operator review. Article items can
 also submit a Voxhelm batch `synthesize` job once a summary exists; Archive prefers extracted article body
 text as the TTS input when it can fetch it and falls back to stored summary/notes text otherwise. That fetch
@@ -407,17 +415,19 @@ Operator note:
 ## Re-queueing failed steps
 
 `reprocess_items` re-queues one failed step for specific items so the running worker retries
-it. Unlike the admin `Reprocess selected items` action, it does not re-fetch metadata and
+it (or, with `--regenerate`, transcribes again). Unlike the admin `Reprocess selected items` action, it does not re-fetch metadata and
 does not reset any other step (a failed transcript or pending article audio stays as it is):
 
 ```bash
 just manage reprocess_items --ids 318 --only media_archive --dry-run
 just manage reprocess_items --ids 152-176 --only summary --stagger 60 --hold-article-audio
+just manage reprocess_items --ids 408 --only transcript --regenerate --dry-run
 ```
 
 - `--ids` takes ids and inclusive ranges (`318 152-176`, commas also work).
-- `--only` is `summary`, `media_archive`, or `article_audio`. Only items whose step is
-  `failed` are re-queued; every other item is reported as skipped with its current state.
+- `--only` is `summary`, `media_archive`, `transcript`, or `article_audio`. Only items whose
+  step is `failed` are re-queued; every other item is reported as skipped with its current
+  state. `transcript` also skips items without a transcribable media source.
   `media_archive` also skips items that have archived audio or no archivable source, and
   `article_audio` skips non-articles, items that already have generated audio, and items
   with an earlier synthesis job id (releasing those would only re-poll the old job). Items
@@ -425,13 +435,20 @@ just manage reprocess_items --ids 152-176 --only summary --stagger 60 --hold-art
 - `summary` and `media_archive` keep the step `failed` (the error stays visible until the
   worker clears it on claim), reset its retry counter to 0, and set its retry time: the same
   state the worker uses for its own scheduled retries, so the full 5 min / 30 min / 2 h backoff
-  applies again if the retry fails. `article_audio` sets the step back to `pending`.
+  applies again if the retry fails. `article_audio` and `transcript` set the step back to
+  `pending`.
+- `--regenerate` (with `--only transcript`) also re-queues complete transcripts the archive
+  generated itself, for example one that is missing parts of the audio. It clears the stored
+  transcript, so the item shows none until the worker has transcribed it again (and none if
+  that fails). Hand-entered transcripts are never touched. A new generated transcript also
+  refreshes generated summaries and tags.
 - `--stagger SECONDS` spaces the retry times of consecutive re-queued items, so the worker
   does not send all of them to an upstream API at once. The first item is due immediately;
   with `--stagger 60`, 25 items are spread over 24 minutes. The worker claims items one at a
   time, and a retry that fails again falls back to the normal backoff. Not available for
   `article_audio`: the worker runs pending article audio whenever it processes the item for
-  another step, so no due time can hold it back.
+  another step, so no due time can hold it back. Not available for `transcript` either: the
+  worker claims every pending transcript right away.
 - A successful summary immediately starts paid article audio (text-to-speech) for articles
   whose article audio is `pending`, in the same worker pass. `--hold-article-audio` (with
   `--only summary`) marks that pending, not yet submitted article audio as `failed` with a

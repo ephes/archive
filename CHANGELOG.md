@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Reject incomplete Voxhelm batch transcripts. whisper.cpp splits long audio across
+  processors and ignores a worker thread that fails, so a batch job could succeed with whole
+  parts of the audio missing: item 408 (a 3:09 h podcast) kept the first hour plus two
+  12-minute stretches, about 50 % of the episode. Archive now reads the job's segment JSON and
+  fails the transcript step when a stretch longer than `ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS`
+  (default 600, `0` disables) has no segment, instead of storing the partial text.
+- `reprocess_items --only transcript` re-queues failed transcripts; `--regenerate` also clears
+  and re-queues complete transcripts the archive generated itself (never hand-entered ones),
+  so a partial transcript like item 408's can be transcribed again.
 - Add the `reprocess_items` management command to re-queue one failed step (`summary`,
   `media_archive`, or `article_audio`) for specific item ids or ranges without re-fetching
   metadata or touching other steps, which the admin "Reprocess selected items" action always

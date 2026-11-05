@@ -356,7 +356,7 @@ trying to chunk/transcode inside Archive. Archive then reads the job's segment J
 transcript as incomplete when a stretch of audio longer than `ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS`
 (10 minutes) has no segment: whisper.cpp splits long audio across processors and ignores a worker
 thread that fails, so a job can succeed with whole parts of the audio missing (item 408, a 3:09 h
-podcast, kept only about 50 % of its text). The transcript step then fails with that error instead of
+podcast, kept text for only 44 % of its audio). The transcript step then fails with that error instead of
 storing the partial text; requeue it with `reprocess_items --only transcript`. The check cannot see
 audio missing at the very end, because neither side records the media duration. Failed summary jobs retry automatically with bounded backoff
 (5 minutes, 30 minutes, 2 hours) before remaining in a failed state for operator review. Article items can

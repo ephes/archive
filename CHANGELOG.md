@@ -5,7 +5,7 @@
 - Reject incomplete Voxhelm batch transcripts. whisper.cpp splits long audio across
   processors and ignores a worker thread that fails, so a batch job could succeed with whole
   parts of the audio missing: item 408 (a 3:09 h podcast) kept the first hour plus two
-  12-minute stretches, about 50 % of the episode. Archive now reads the job's segment JSON and
+  12-minute stretches, 44 % of the audio. Archive now reads the job's segment JSON and
   fails the transcript step when a stretch longer than `ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS`
   (default 600, `0` disables) has no segment, instead of storing the partial text.
 - `reprocess_items --only transcript` re-queues failed transcripts; `--regenerate` also clears

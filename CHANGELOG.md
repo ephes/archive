@@ -7,6 +7,8 @@
   to 2.10.1, and propagate export failures in the local and CI commands.
 - Validate capture API string types and model length limits before classification/capture,
   returning field-specific 400 responses while preserving optional empty values.
+- Return the existing invalid-JSON 400 response for malformed byte encodings on both
+  item creation and updates, retaining authentication before decoding.
 
 - Bound podcast feed materialization to streamed policy batches and one page of full items,
   preserving eligibility, exact archive page counts, enclosure priority, and navigation.

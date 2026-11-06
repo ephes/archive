@@ -180,6 +180,10 @@ with `url` still required. Values are trimmed after validating the model length 
 Wrong types or overlong values return `400` with `{"error":"Invalid <field>"}`
 before classification or capture. Unknown fields are ignored.
 
+Both POST and PATCH authenticate before parsing JSON. Malformed JSON, invalid JSON byte
+encodings, and non-object bodies return `400` with `{"error":"Invalid JSON"}`;
+valid UTF-8, UTF-16, and UTF-32 JSON retain support.
+
 Repeated shares through the API or authenticated web form resolve to the newest existing
 item with the same URL within `ARCHIVE_CAPTURE_DEDUPE_SECONDS` (default `86400`, 24 hours).
 The API returns `201` with `duplicate: false` for a new item and `200` with `duplicate: true`

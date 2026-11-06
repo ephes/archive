@@ -76,6 +76,34 @@ def test_capture_preserves_optional_empty_fields(client, empty):
     assert item.original_published_at is None
 
 
+@pytest.mark.parametrize("method,path", [("post", "/api/items/"), ("patch", "/api/items/1/")])
+@pytest.mark.parametrize("body", [b"\xff", b"\xff\xfe{\x00\x00", b"{", b"[]"])
+def test_api_rejects_invalid_json_encoding(client, no_capture, method, path, body):
+    response = getattr(client, method)(path, body, content_type="application/json", headers=HEADERS)
+    assert response.status_code == 400
+    assert response.json() == {"error": "Invalid JSON"}
+    for call in no_capture:
+        call.assert_not_called()
+
+
+@pytest.mark.parametrize("method,path", [("post", "/api/items/"), ("patch", "/api/items/1/")])
+def test_api_authenticates_before_decoding(client, method, path):
+    response = getattr(client, method)(path, b"\xff", content_type="application/json")
+    assert response.status_code == 401
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("method,path", [("post", "/api/items/"), ("patch", "/api/items/{pk}/")])
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16", "utf-32"])
+def test_api_preserves_valid_json_encodings(client, method, path, encoding):
+    item = Item.objects.create(original_url="https://example.com/existing")
+    body = json.dumps({"url": "https://example.com/story", "kind": "quote"}).encode(encoding)
+    response = getattr(client, method)(
+        path.format(pk=item.pk), body, content_type="application/json", headers=HEADERS
+    )
+    assert response.status_code == (201 if method == "post" else 200)
+
+
 @pytest.mark.django_db
 def test_capture_accepts_model_length_boundaries_and_long_notes(client):
     url = "https://example.com/"

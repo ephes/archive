@@ -504,7 +504,7 @@ def api_create_item(request: HttpRequest) -> JsonResponse:
 
     try:
         payload = json.loads(request.body or b"{}")
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     if not isinstance(payload, dict):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
@@ -598,7 +598,7 @@ def api_update_item(request: HttpRequest, pk: int) -> JsonResponse:
 
     try:
         payload = json.loads(request.body or b"{}")
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     if not isinstance(payload, dict):
         return JsonResponse({"error": "Invalid JSON"}, status=400)

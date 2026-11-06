@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Bound podcast feed materialization to streamed policy batches and one page of full items,
+  preserving eligibility, exact archive page counts, enclosure priority, and navigation.
+
+- Paginate public full-text search in SQLite, counting matches exactly and loading only
+  the requested 20-result page while preserving relevance ordering and page navigation.
+
 - Apply the stale-processing age cutoff at worker startup as well as during polling,
   preserving fresh processing leases when another worker starts.
 - Return a nonzero exit status from `run_metadata_worker --once` after any failed or

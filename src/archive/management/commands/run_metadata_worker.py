@@ -54,7 +54,7 @@ class Command(BaseCommand):
             "--timeout",
             type=int,
             default=15,
-            help="Per-request timeout in seconds for remote metadata fetches.",
+            help="Total metadata fetch budget in seconds (DNS, redirects and body reads included).",
         )
         parser.add_argument(
             "--summary-timeout",

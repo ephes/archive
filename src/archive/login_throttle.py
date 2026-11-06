@@ -1,29 +1,23 @@
-"""Limit failed logins (owner login and admin login).
+"""Reserve per-process login budgets before password verification.
 
-Failures are counted in the ``login_throttle`` cache per (username, client address) and per
-client address.
-Once a counter reaches its limit, further attempts for that key are refused for the rest of the
-window
-without checking the password. A successful login clears the (username, client address) counter.
-
-It hooks into authentication itself (a backend that stops the login, plus the
-``user_login_failed`` and
-``user_logged_in`` signals), so every login form that passes the request is covered. Calls
-without a request
-(management commands, ``Client.login`` in tests) are not limited. Bearer tokens are not affected.
-
-The counters live in each server process (local-memory cache), so with several workers the
-effective limit
-is the configured limit times the number of workers.
+Each fixed window counts failed and in-flight attempts per username/address and
+per address. Successful logins clear pair failures while preserving other pending
+attempts. Request-less authentication and bearer tokens are not limited. Counters
+use the local-memory cache, so multiple server processes have independent budgets.
 """
 
 from __future__ import annotations
 
 import hashlib
 import ipaddress
+from dataclasses import dataclass, field
+from threading import RLock
+from time import time
+from uuid import uuid4
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.contrib.auth.backends import ModelBackend
 from django.contrib.auth.signals import user_logged_in, user_login_failed
 from django.core.cache import caches
 from django.core.exceptions import PermissionDenied
@@ -68,66 +62,121 @@ def _keys(request, username: str) -> tuple[str, str]:
     return f"pair:{pair}", f"addr:{hashlib.sha256(address.encode()).hexdigest()}"
 
 
+@dataclass
+class _Window:
+    expires_at: float
+    failures: int = 0
+    pending: set[str] = field(default_factory=set)
+
+    @property
+    def count(self) -> int:
+        return self.failures + len(self.pending)
+
+
+_lock = RLock()
+
+
+def _window(key: str) -> _Window:
+    value = caches[CACHE_ALIAS].get(key)
+    if isinstance(value, _Window) and value.expires_at > time():
+        return value
+    return _Window(expires_at=time() + settings.LOGIN_FAILURE_WINDOW_S)
+
+
+def _save(key: str, window: _Window) -> None:
+    remaining = window.expires_at - time()
+    if remaining > 0:
+        caches[CACHE_ALIAS].set(key, window, timeout=remaining)
+
+
 def _count(key: str) -> int:
-    value = caches[CACHE_ALIAS].get(key, 0)
-    return value if isinstance(value, int) else 0
+    return _window(key).count
+
+
+def _enabled_keys(request, username: str) -> list[tuple[str, int]]:
+    pair, address = _keys(request, username)
+    return [
+        (key, limit)
+        for key, limit in (
+            (pair, settings.LOGIN_FAILURE_LIMIT),
+            (address, settings.LOGIN_ADDRESS_FAILURE_LIMIT),
+        )
+        if limit > 0
+    ]
 
 
 def is_locked(request, username: str) -> bool:
     if request is None:
         return False
-    pair, address = _keys(request, username)
-    return (settings.LOGIN_FAILURE_LIMIT > 0 and _count(pair) >= settings.LOGIN_FAILURE_LIMIT) or (
-        settings.LOGIN_ADDRESS_FAILURE_LIMIT > 0
-        and _count(address) >= settings.LOGIN_ADDRESS_FAILURE_LIMIT
-    )
-
-
-def _increment(key: str) -> None:
-    cache = caches[CACHE_ALIAS]
-    # add() starts the window; incr() keeps the expiry of the existing entry, so the window
-    # is fixed.
-    if cache.add(key, 1, timeout=settings.LOGIN_FAILURE_WINDOW_S):
-        return
-    try:
-        cache.incr(key)
-    except ValueError:  # expired between add() and incr()
-        cache.add(key, 1, timeout=settings.LOGIN_FAILURE_WINDOW_S)
+    with _lock:
+        return any(_count(key) >= limit for key, limit in _enabled_keys(request, username))
 
 
 def record_failure(request, username: str) -> None:
-    if request is None or is_locked(request, username):
+    if request is None or getattr(request, "_archive_login_accounted", False):
         return
-    pair, address = _keys(request, username)
-    if settings.LOGIN_FAILURE_LIMIT > 0:
-        _increment(pair)
-    if settings.LOGIN_ADDRESS_FAILURE_LIMIT > 0:
-        _increment(address)
+    with _lock:
+        if is_locked(request, username):
+            return
+        for key, _ in _enabled_keys(request, username):
+            window = _window(key)
+            window.failures += 1
+            _save(key, window)
 
 
 def reset(request, username: str) -> None:
-    if request is None:
+    if request is None or settings.LOGIN_FAILURE_LIMIT <= 0:
         return
-    caches[CACHE_ALIAS].delete(_keys(request, username)[0])
+    with _lock:
+        pair = _keys(request, username)[0]
+        window = _window(pair)
+        window.failures = 0
+        _save(pair, window)
 
 
-class LoginThrottleBackend:
-    """First authentication backend: stops a login attempt while its counters are at the limit.
+class LoginThrottleBackend(ModelBackend):
+    """Reserve per-process budgets before running Django's password backend.
 
-    ``PermissionDenied`` ends ``authenticate()`` before the password backends run, so a
-    locked-out attempt
-    costs no password hash and cannot succeed even with the right password.
-
-    It only gates logins and never owns a session: it deliberately has no ``get_user`` (and
-    no permission
-    methods), so Django never records it as the backend a user logged in with."""
+    Request-less authentication delegates to the usual ModelBackend. Keep that
+    backend configured for existing sessions and request-less callers. Failed
+    request authentication stops the chain to avoid running a second password hash.
+    """
 
     def authenticate(self, request, username=None, password=None, **kwargs):
         if username is None:
             username = kwargs.get(get_user_model().USERNAME_FIELD)
-        if request is not None and isinstance(username, str) and is_locked(request, username):
-            raise PermissionDenied("Too many failed login attempts.")
-        return None
+        if request is None or not isinstance(username, str):
+            return None
+        request._archive_login_accounted = True
+        token = uuid4().hex
+        with _lock:
+            if is_locked(request, username):
+                raise PermissionDenied("Too many failed login attempts.")
+            keys = _enabled_keys(request, username)
+            for key, _ in keys:
+                window = _window(key)
+                window.pending.add(token)
+                _save(key, window)
+        user = None
+        try:
+            user = super().authenticate(request, username=username, password=password, **kwargs)
+        finally:
+            with _lock:
+                for key, _ in keys:
+                    window = _window(key)
+                    # The window may have expired while this attempt was running.
+                    # An old result cannot alter a newer window's reservations.
+                    if token not in window.pending:
+                        continue
+                    window.pending.remove(token)
+                    if user is None:
+                        window.failures += 1
+                    elif key == _keys(request, username)[0]:
+                        window.failures = 0
+                    _save(key, window)
+        if user is None:
+            raise PermissionDenied("Invalid login.")
+        return user
 
 
 @receiver(user_login_failed, dispatch_uid="archive.login_throttle.failed")

@@ -6,6 +6,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 
@@ -27,9 +28,23 @@ def main() -> int:
         options = json.load(sys.stdin)
         request = Request(options["url"], headers=options["headers"])
         with _load_safe_fetch().open_public_url(request, timeout=options["timeout"]) as response:
+            metadata_mode = options.get("metadata", False)
+            content_type = response.headers.get_content_type()
+            if (
+                metadata_mode
+                and content_type
+                and not any(kind in content_type for kind in ("html", "xml"))
+            ):
+                raise ValueError(f"Unsupported content type: {content_type}")
             size = 0
             with Path(options["path"]).open("wb") as output:
-                while chunk := response.read(1024 * 1024):
+                while not metadata_mode or size < options["max_bytes"]:
+                    read_size = (
+                        min(8192, options["max_bytes"] - size) if metadata_mode else 1024 * 1024
+                    )
+                    chunk = response.read(read_size)
+                    if not chunk:
+                        break
                     size += len(chunk)
                     if size > options["max_bytes"]:
                         raise ValueError(
@@ -39,9 +54,19 @@ def main() -> int:
                     output.write(chunk)
             print(
                 json.dumps(
-                    {"url": response.geturl(), "content_type": response.headers.get_content_type()}
+                    {
+                        "url": response.geturl(),
+                        "content_type": content_type,
+                        "charset": response.headers.get_content_charset() or "utf-8",
+                    }
                 )
             )
+    except HTTPError as exc:
+        print(json.dumps({"error": str(exc), "http_status": exc.code}))
+        return 1
+    except URLError as exc:
+        print(json.dumps({"error": str(exc), "url_reason": str(exc.reason)}))
+        return 1
     except Exception as exc:
         print(json.dumps({"error": str(exc)}))
         return 1

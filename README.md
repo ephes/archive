@@ -319,6 +319,12 @@ Important values:
 
 ## Background processing
 
+The metadata worker's `--timeout` (default 15 seconds) is one total fetch budget,
+including DNS, connection, redirects and HTML body reads. A guarded downloader
+subprocess is killed and reaped on expiry; public-address validation, DNS pinning
+and the 1 MiB metadata window still apply. Parsing keeps incremental charset and
+body media-candidate support within that byte window.
+
 Credential-bearing summary, transcription and article-audio requests only follow
 redirects on the initial HTTP(S) origin (scheme, host and effective port).
 Transcription and article-audio job/artifact URLs must match the configured API
@@ -741,18 +747,26 @@ article-audio downloads retain their separate configured media limit.
 
 ## Login protection
 
-The editor and admin logins refuse authentication after 5 failures per username/client
+The editor and admin logins reserve an attempt before password verification and refuse
+authentication at 5 failed or in-flight attempts per username/client
 pair or 50 per client address in a fixed 15-minute window. Locked attempts receive
 the normal invalid-login form response, even with the correct password. Successful
-login clears the pair counter; the address counter expires normally. Bearer-token
+login clears completed pair failures while retaining other pending attempts. A successful
+attempt is removed from the address budget; completed address failures expire normally.
+Both enabled budgets are reserved atomically within each process, so concurrent requests
+cannot all enter password hashing before their failures are counted. Settlement neither
+extends the fixed expiry nor changes reservations belonging to a newer window.
+The Django password backend remains configured for existing sessions and request-less
+callers; failed request authentication stops the backend chain to avoid a second hash. Bearer-token
 API access is unaffected. Django's four standard password validators apply to password
 forms; programmatic password setters (including `ensure_admin_user`) do not run them.
 
 Configure `ARCHIVE_LOGIN_FAILURE_LIMIT` (5), `ARCHIVE_LOGIN_ADDRESS_FAILURE_LIMIT` (50),
 and `ARCHIVE_LOGIN_FAILURE_WINDOW_S` (900). A non-positive limit disables only its own bucket; set both limits to 0
 to disable throttling. Counters use the `login_throttle` cache, by default local memory per
-worker; multiple workers multiply the effective budget. Configure a shared Redis or Memcached
-cache backend for that alias (atomic increments preserving expiry) when a deployment-wide budget is needed.
+worker; multiple workers multiply the effective budget. Reservations are synchronized
+within one process. A shared Redis or Memcached cache alone does not make these
+reservations atomic across processes; deployment-wide reservation budgets are not supported.
 
 `ARCHIVE_LOGIN_THROTTLE_PROXY_HOPS` is the number of trusted reverse proxies in front
 of the app. It defaults to 1 with the production settings (one Traefik proxy) and to 0

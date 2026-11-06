@@ -202,6 +202,8 @@ just dev
 `just check` runs lint, type checks and tests. `just audit` checks the locked dependencies
 against known vulnerabilities with `pip-audit`; refresh a flagged package with
 `uv lock --upgrade-package <name>`.
+The Brotli 1.2.1 lock corrects PYSEC-2026-4322 in the media dependency graph;
+installed environments need the updated lock to pick up the decompressor fix.
 
 `just deploy` runs `just deploy-one archive` in the ops-control checkout at
 `~/projects/ops-control` (set `OPS_CONTROL` to use another one). That deploy ships the Archive

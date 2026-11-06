@@ -9,8 +9,8 @@ from contextlib import closing
 from dataclasses import dataclass
 from time import monotonic, sleep
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse, urlsplit
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
+from urllib.request import Request
 
 from django.conf import settings
 
@@ -20,6 +20,8 @@ from archive.media_archival import MediaArchivalError, open_archived_audio, open
 from archive.metadata import REQUEST_HEADERS
 from archive.models import Item
 from archive.safe_fetch import open_public_url
+from archive.upstream_http import api_url
+from archive.upstream_http import open_authenticated_url as urlopen
 
 MAX_TRANSCRIPTION_BYTES = 25 * 1024 * 1024
 SUPPORTED_SUFFIXES = {
@@ -720,16 +722,10 @@ def _request_json(request: Request, timeout: int, error_prefix: str) -> dict[str
 
 
 def _api_url(path: str) -> str:
-    base_url = settings.ARCHIVE_TRANSCRIPTION_API_BASE.rstrip("/")
-    normalized_path = path.strip()
-    if normalized_path.startswith(("https://", "http://")):
-        return normalized_path
-    if normalized_path.startswith("/"):
-        parsed = urlsplit(base_url)
-        if not parsed.scheme or not parsed.netloc:
-            raise TranscriptionGenerationError("Transcription API base must be an absolute URL")
-        return f"{parsed.scheme}://{parsed.netloc}{normalized_path}"
-    return f"{base_url}/{normalized_path.lstrip('/')}"
+    try:
+        return api_url(settings.ARCHIVE_TRANSCRIPTION_API_BASE, path)
+    except OSError as exc:
+        raise TranscriptionGenerationError(str(exc)) from exc
 
 
 def _normalize_transcript(value: str) -> str:

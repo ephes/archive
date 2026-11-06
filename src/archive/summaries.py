@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from django.conf import settings
 
@@ -14,6 +14,7 @@ from archive.api_responses import read_api_error, read_api_response
 from archive.metadata import REQUEST_HEADERS
 from archive.models import Item
 from archive.safe_fetch import open_public_url
+from archive.upstream_http import open_authenticated_url as urlopen
 
 logger = logging.getLogger(__name__)
 

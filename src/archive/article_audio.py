@@ -7,8 +7,7 @@ from dataclasses import dataclass
 from http.client import HTTPException
 from tempfile import NamedTemporaryFile
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from django.conf import settings
 from django.db import models, transaction
@@ -21,6 +20,8 @@ from archive.media_storage import (
 )
 from archive.models import EnrichmentStatus, Item, ItemKind
 from archive.summaries import MAX_ARTICLE_AUDIO_SOURCE_CHARS, extract_summary_source_from_url
+from archive.upstream_http import api_url
+from archive.upstream_http import open_authenticated_url as urlopen
 
 logger = logging.getLogger(__name__)
 
@@ -373,13 +374,7 @@ def _parse_job_update(payload: dict[str, object]) -> ArticleAudioJobUpdate:
 
 
 def _api_url(path: str) -> str:
-    base_url = settings.ARCHIVE_ARTICLE_AUDIO_API_BASE.rstrip("/")
-    normalized_path = path.strip()
-    if normalized_path.startswith(("https://", "http://")):
-        return normalized_path
-    if normalized_path.startswith("/"):
-        parsed = urlsplit(base_url)
-        if not parsed.scheme or not parsed.netloc:
-            raise ArticleAudioGenerationError("Article audio API base must be an absolute URL")
-        return f"{parsed.scheme}://{parsed.netloc}{normalized_path}"
-    return f"{base_url}/{normalized_path.lstrip('/')}"
+    try:
+        return api_url(settings.ARCHIVE_ARTICLE_AUDIO_API_BASE, path)
+    except OSError as exc:
+        raise ArticleAudioGenerationError(str(exc)) from exc

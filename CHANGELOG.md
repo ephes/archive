@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Confine authenticated job/artifact URLs to the configured API origin and refuse
+  cross-origin, downgrade and userinfo redirects before forwarding bearer credentials.
+
 - Keep metadata and operator classification edits made during metadata fetching;
   serialize classifier PATCH lookup, override conflict checks and publication.
 

@@ -782,66 +782,68 @@ def _enrich_item_metadata_fields(item: Item, timeout: int = 15) -> bool:
         record_step_outcome(ProcessingStep.METADATA, succeeded=False, item_id=item.pk)
         return _mark_metadata_failure(item, str(exc))
 
-    update_fields: list[str] = []
-    if not item.title and metadata.title:
-        item.title = metadata.title
-        update_fields.append("title")
-    if not item.source and metadata.source:
-        item.source = metadata.source
-        update_fields.append("source")
-    if not item.author and metadata.author:
-        item.author = metadata.author
-        update_fields.append("author")
-    if item.original_published_at is None and metadata.original_published_at is not None:
-        item.original_published_at = metadata.original_published_at
-        update_fields.append("original_published_at")
-    if not item.media_url and metadata.media_url:
-        item.media_url = metadata.media_url
-        update_fields.append("media_url")
-    if not item.audio_url and metadata.audio_url:
-        item.audio_url = metadata.audio_url
-        update_fields.append("audio_url")
+    with transaction.atomic():
+        item.refresh_from_db()
+        update_fields: list[str] = []
+        if not item.title and metadata.title:
+            item.title = metadata.title
+            update_fields.append("title")
+        if not item.source and metadata.source:
+            item.source = metadata.source
+            update_fields.append("source")
+        if not item.author and metadata.author:
+            item.author = metadata.author
+            update_fields.append("author")
+        if item.original_published_at is None and metadata.original_published_at is not None:
+            item.original_published_at = metadata.original_published_at
+            update_fields.append("original_published_at")
+        if not item.media_url and metadata.media_url:
+            item.media_url = metadata.media_url
+            update_fields.append("media_url")
+        if not item.audio_url and metadata.audio_url:
+            item.audio_url = metadata.audio_url
+            update_fields.append("audio_url")
 
-    decision = classify_item(
-        original_url=item.original_url,
-        current_kind=item.kind,
-        audio_url=item.audio_url,
-        media_url=item.media_url,
-        kind_hint=metadata.kind_hint,
-        metadata_candidates=tuple(
-            MediaCandidate(
-                url=candidate.url,
-                candidate_type=candidate.candidate_type,
-                detection_source=candidate.detection_source,
-            )
-            for candidate in metadata.media_candidates
-        ),
-        existing_rule=item.classification_rule,
-        existing_evidence={
-            **item.classification_evidence,
-            "metadata_signals": {
-                "html_media_candidates": [
-                    {
-                        "url": candidate.url,
-                        "candidate_type": candidate.candidate_type,
-                        "detection_source": candidate.detection_source,
-                    }
-                    for candidate in metadata.media_candidates
-                ],
-                "kind_hint": metadata.kind_hint,
+        decision = classify_item(
+            original_url=item.original_url,
+            current_kind=item.kind,
+            audio_url=item.audio_url,
+            media_url=item.media_url,
+            kind_hint=metadata.kind_hint,
+            metadata_candidates=tuple(
+                MediaCandidate(
+                    url=candidate.url,
+                    candidate_type=candidate.candidate_type,
+                    detection_source=candidate.detection_source,
+                )
+                for candidate in metadata.media_candidates
+            ),
+            existing_rule=item.classification_rule,
+            existing_evidence={
+                **item.classification_evidence,
+                "metadata_signals": {
+                    "html_media_candidates": [
+                        {
+                            "url": candidate.url,
+                            "candidate_type": candidate.candidate_type,
+                            "detection_source": candidate.detection_source,
+                        }
+                        for candidate in metadata.media_candidates
+                    ],
+                    "kind_hint": metadata.kind_hint,
+                },
             },
-        },
-    )
-    set_item_classification(item=item, decision=decision, update_fields=update_fields)
+        )
+        set_item_classification(item=item, decision=decision, update_fields=update_fields)
 
-    item.enrichment_status = EnrichmentStatus.COMPLETE
-    item.enrichment_error = ""
-    _refresh_media_archive_state(item, update_fields)
-    _refresh_article_audio_state(item, update_fields)
-    update_fields.extend(["enrichment_status", "enrichment_error"])
-    item.save(update_fields=sorted(set(update_fields)))
-    record_step_outcome(ProcessingStep.METADATA, succeeded=True, item_id=item.pk)
-    return True
+        item.enrichment_status = EnrichmentStatus.COMPLETE
+        item.enrichment_error = ""
+        _refresh_media_archive_state(item, update_fields)
+        _refresh_article_audio_state(item, update_fields)
+        update_fields.extend(["enrichment_status", "enrichment_error"])
+        item.save(update_fields=sorted(set(update_fields)))
+        record_step_outcome(ProcessingStep.METADATA, succeeded=True, item_id=item.pk)
+        return True
 
 
 def _mark_metadata_failure(item: Item, error_message: str) -> bool:

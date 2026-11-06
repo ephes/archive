@@ -319,6 +319,12 @@ Important values:
 
 ## Background processing
 
+Metadata fetching also runs outside write transactions; fill-only enrichment and
+classification use the current row after fetching, keeping operator overrides and
+manual metadata. Classifier PATCH reads, checks override priority and publishes in
+one SQLite IMMEDIATE transaction. An existing operator override returns 409 without
+changing item fields, downstream eligibility or media references.
+
 Summary/tag and transcript generation happens outside write transactions. Publication
 re-reads the current item in a short SQLite IMMEDIATE transaction and keeps fields
 whose value or generated ownership flag changed during generation. Completion and

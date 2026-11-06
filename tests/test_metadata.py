@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 from django.core.files.base import ContentFile
 from django.core.files.storage import storages
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.db import connection
 from django.urls import reverse
 from django.utils import timezone
@@ -1390,12 +1392,7 @@ def test_prepare_item_for_enrichment_marks_fully_populated_items_complete() -> N
 
 @pytest.mark.django_db
 def test_run_metadata_worker_recovers_stale_processing_items_during_loop(monkeypatch) -> None:
-    startup_calls: list[bool] = []
     runtime_calls: list[datetime] = []
-
-    def fake_recover_processing_items() -> int:
-        startup_calls.append(True)
-        return 0
 
     def fake_recover_stale_processing_items(*, stale_before: datetime) -> int:
         runtime_calls.append(stale_before)
@@ -1404,10 +1401,6 @@ def test_run_metadata_worker_recovers_stale_processing_items_during_loop(monkeyp
     monkeypatch.setattr(
         "archive.management.commands.run_metadata_worker.signal.signal",
         lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "archive.management.commands.run_metadata_worker.recover_processing_items",
-        fake_recover_processing_items,
     )
     monkeypatch.setattr(
         "archive.management.commands.run_metadata_worker.recover_stale_processing_items",
@@ -1429,7 +1422,6 @@ def test_run_metadata_worker_recovers_stale_processing_items_during_loop(monkeyp
         stderr=stderr,
     )
 
-    assert startup_calls == [True]
     assert len(runtime_calls) == 1
     assert "Recovered 1 stale processing item(s) during worker runtime" in stderr.getvalue()
     assert "Processed 0 item(s)." in stdout.getvalue()
@@ -1453,8 +1445,8 @@ def test_run_metadata_worker_requeues_current_item_when_processing_stalls(monkey
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
-        "archive.management.commands.run_metadata_worker.recover_processing_items",
-        lambda: 0,
+        "archive.management.commands.run_metadata_worker.Command._item_processing_timeout",
+        lambda *args: nullcontext(),
     )
     monkeypatch.setattr(
         "archive.management.commands.run_metadata_worker.recover_stale_processing_items",
@@ -1479,14 +1471,15 @@ def test_run_metadata_worker_requeues_current_item_when_processing_stalls(monkey
 
     stdout = StringIO()
     stderr = StringIO()
-    call_command(
-        "run_metadata_worker",
-        "--once",
-        "--stale-processing-after",
-        "120",
-        stdout=stdout,
-        stderr=stderr,
-    )
+    with pytest.raises(CommandError, match="1 unsuccessful item"):
+        call_command(
+            "run_metadata_worker",
+            "--once",
+            "--stale-processing-after",
+            "120",
+            stdout=stdout,
+            stderr=stderr,
+        )
 
     assert recovered_ids == [item.pk]
     assert f"Processing item {item.pk}: https://example.com/stalled" in stdout.getvalue()

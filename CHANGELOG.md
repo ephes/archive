@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Apply the stale-processing age cutoff at worker startup as well as during polling,
+  preserving fresh processing leases when another worker starts.
+- Return a nonzero exit status from `run_metadata_worker --once` after any failed or
+  stalled item, while finishing independent work and printing the processed count.
+
 - Reject incomplete Voxhelm batch transcripts. whisper.cpp splits long audio across
   processors and ignores a worker thread that fails, so a batch job could succeed with whole
   parts of the audio missing: item 408 (a 3:09 h podcast) kept the first hour plus two

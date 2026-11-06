@@ -5,14 +5,13 @@ import signal
 from datetime import timedelta
 from threading import Event
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from archive.services import (
     claim_pending_item,
     enrich_item_metadata,
     recover_processing_item,
-    recover_processing_items,
     recover_stale_processing_items,
 )
 
@@ -80,7 +79,8 @@ class Command(BaseCommand):
             type=int,
             default=None,
             help=(
-                "Age in seconds after which runtime recovery re-queues stale processing items. "
+                "Age in seconds after which startup and runtime recovery re-queues "
+                "stale processing items. "
                 "Defaults to the larger of 1 hour or twice the combined per-item stage timeouts."
             ),
         )
@@ -92,10 +92,6 @@ class Command(BaseCommand):
     def handle(self, *args, **options) -> None:
         signal.signal(signal.SIGTERM, self._request_shutdown)
         signal.signal(signal.SIGINT, self._request_shutdown)
-
-        recovered = recover_processing_items()
-        if recovered:
-            self.stderr.write(f"Recovered {recovered} stale processing item(s).")
 
         stale_processing_after = self._stale_processing_after_seconds(options)
         while not self._shutdown_requested.is_set():
@@ -109,6 +105,7 @@ class Command(BaseCommand):
                     f"(older than {stale_processing_after}s)."
                 )
             processed = 0
+            unsuccessful = 0
             timed_out_in_pass = False
             skipped_item_ids: set[int] = set()
             for _ in range(options["limit"]):
@@ -129,6 +126,7 @@ class Command(BaseCommand):
                             transcription_timeout=options["transcription_timeout"],
                         )
                 except ItemProcessingStalled:
+                    unsuccessful += 1
                     timed_out_in_pass = True
                     skipped_item_ids.add(item.pk)
                     recovered = recover_processing_item(item.pk)
@@ -164,6 +162,7 @@ class Command(BaseCommand):
                 if success:
                     self.stdout.write(f"Completed item {item.pk}: {item.display_title}")
                 else:
+                    unsuccessful += 1
                     self.stderr.write(
                         "Background enrichment did not fully succeed for item "
                         f"{item.pk}; metadata_status={item.enrichment_status}; "
@@ -178,7 +177,9 @@ class Command(BaseCommand):
                         f"article_audio_error={item.article_audio_error}"
                     )
             if options["once"]:
-                self.stdout.write(self.style.SUCCESS(f"Processed {processed} item(s)."))
+                self.stdout.write(f"Processed {processed} item(s).")
+                if unsuccessful:
+                    raise CommandError(f"{unsuccessful} unsuccessful item(s) in this pass.")
                 return
             if processed == 0 or timed_out_in_pass:
                 self._shutdown_requested.wait(options["interval"])

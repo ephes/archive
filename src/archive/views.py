@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import re
+from datetime import UTC
 
 from django.conf import settings
 from django.contrib.auth.views import LoginView, LogoutView
@@ -504,20 +505,43 @@ def api_create_item(request: HttpRequest) -> JsonResponse:
 
     try:
         payload = json.loads(request.body or b"{}")
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     if not isinstance(payload, dict):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
 
-    url = (payload.get("url") or "").strip()
-    title = (payload.get("title") or "").strip()
-    notes = (payload.get("notes") or "").strip()
-    audio_url = (payload.get("audio_url") or "").strip()
-    media_url = (payload.get("media_url") or "").strip()
-    source = (payload.get("source") or "").strip()
-    author = (payload.get("author") or "").strip()
-    explicit_kind = str(payload.get("kind") or "").strip()
-    original_published_at_raw = (payload.get("original_published_at") or "").strip()
+    fields = {}
+    for name in (
+        "url",
+        "title",
+        "notes",
+        "audio_url",
+        "media_url",
+        "source",
+        "author",
+        "kind",
+        "original_published_at",
+    ):
+        value = payload.get(name)
+        if value is None:
+            value = ""
+        if not isinstance(value, str):
+            return JsonResponse({"error": f"Invalid {name}"}, status=400)
+        model_name = "original_url" if name == "url" else name
+        max_length = Item._meta.get_field(model_name).max_length
+        if max_length is not None and len(value) > max_length:
+            return JsonResponse({"error": f"Invalid {name}"}, status=400)
+        fields[name] = value.strip()
+
+    url = fields["url"]
+    title = fields["title"]
+    notes = fields["notes"]
+    audio_url = fields["audio_url"]
+    media_url = fields["media_url"]
+    source = fields["source"]
+    author = fields["author"]
+    explicit_kind = fields["kind"]
+    original_published_at_raw = fields["original_published_at"]
 
     try:
         url_validator(url)
@@ -530,14 +554,20 @@ def api_create_item(request: HttpRequest) -> JsonResponse:
 
     original_published_at = None
     if original_published_at_raw:
-        original_published_at = parse_datetime(original_published_at_raw)
-        if original_published_at is None:
+        try:
+            original_published_at = parse_datetime(original_published_at_raw)
+            if original_published_at is None:
+                raise ValueError("Invalid timestamp")
+            if timezone.is_naive(original_published_at):
+                original_published_at = timezone.make_aware(
+                    original_published_at,
+                    timezone.get_current_timezone(),
+                )
+            original_published_at = original_published_at.astimezone(UTC)
+            # Detail templates also need to render the instant in the active timezone.
+            timezone.localtime(original_published_at)
+        except (ValueError, OverflowError):
             return JsonResponse({"error": "Invalid original_published_at"}, status=400)
-        if timezone.is_naive(original_published_at):
-            original_published_at = timezone.make_aware(
-                original_published_at,
-                timezone.get_current_timezone(),
-            )
 
     item = Item(
         original_url=url,
@@ -575,7 +605,7 @@ def api_update_item(request: HttpRequest, pk: int) -> JsonResponse:
 
     try:
         payload = json.loads(request.body or b"{}")
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     if not isinstance(payload, dict):
         return JsonResponse({"error": "Invalid JSON"}, status=400)

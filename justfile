@@ -14,7 +14,9 @@ lint:
 
 # Audit the locked runtime and dev dependencies for known vulnerabilities.
 audit:
-    uv export --frozen --no-hashes --no-emit-project | uvx pip-audit --disable-pip --no-deps -r /dev/stdin
+    #!/usr/bin/env bash
+    set -euo pipefail
+    uv export --frozen --all-groups --no-hashes --no-emit-project | uvx pip-audit==2.10.1 --disable-pip --no-deps -r /dev/stdin
 
 format:
     uv run ruff format .

@@ -173,6 +173,23 @@ Reference docs:
 
 `POST /api/items/` captures a new item with `Authorization: Bearer <ARCHIVE_API_TOKEN>` and a JSON body containing `url`. Optional fields include `title`, `notes`, `kind`, `audio_url`, `media_url`, `source`, `author`, and `original_published_at`. `kind="quote"` is accepted through the same explicit-kind path as the other item kinds.
 
+Capture fields must be JSON strings; omitted or `null` fields are treated as empty,
+with `url` still required. Values are trimmed after validating the model length limits:
+`url`, `audio_url`, and `media_url` allow 200 characters; `title` allows 500;
+`source` and `author` allow 255; `kind` allows 32. `notes` has no model length limit.
+Wrong types or overlong values return `400` with `{"error":"Invalid <field>"}`
+before classification or capture. Unknown fields are ignored.
+
+`original_published_at` accepts an ISO datetime string. Naive timestamps use the current
+Django timezone (`TIME_ZONE`, normally Europe/Berlin); offset timestamps retain their
+instant. Both are normalized to UTC before capture and must fit years 1–9999 in UTC
+and the current Django timezone so detail pages can render them.
+Malformed dates and conversions outside that range return `400` with
+`{"error":"Invalid original_published_at"}`.
+Both POST and PATCH authenticate before parsing JSON. Malformed JSON, invalid JSON byte
+encodings, and non-object bodies return `400` with `{"error":"Invalid JSON"}`;
+valid UTF-8, UTF-16, and UTF-32 JSON retain support.
+
 Repeated shares through the API or authenticated web form resolve to the newest existing
 item with the same URL within `ARCHIVE_CAPTURE_DEDUPE_SECONDS` (default `86400`, 24 hours).
 The API returns `201` with `duplicate: false` for a new item and `200` with `duplicate: true`
@@ -199,9 +216,20 @@ just check
 just dev
 ```
 
-`just check` runs lint, type checks and tests. `just audit` checks the locked dependencies
-against known vulnerabilities with `pip-audit`; refresh a flagged package with
-`uv lock --upgrade-package <name>`.
+`just check` runs lint, type checks and tests. `just audit` runs the same frozen
+runtime and all-development-groups audit as CI, using pinned `pip-audit==2.10.1`:
+
+```bash
+set -euo pipefail
+uv export --frozen --all-groups --no-hashes --no-emit-project | uvx pip-audit==2.10.1 --disable-pip --no-deps -r /dev/stdin
+```
+
+Run this pipeline in Bash so export errors and audit findings both fail the command.
+The audit checks registry dependencies in `uv.lock`, including the default dev group;
+it does not audit external executables or independently installed tools. CI does not
+update the lock. Refresh a flagged package with `uv lock --upgrade-package <name>`.
+The Brotli 1.2.1 lock corrects PYSEC-2026-4322 in the media dependency graph;
+installed environments need the updated lock to pick up the decompressor fix.
 
 `just deploy` runs `just deploy-one archive` in the ops-control checkout at
 `~/projects/ops-control` (set `OPS_CONTROL` to use another one). That deploy ships the Archive
@@ -209,7 +237,7 @@ checkout at `$PROJECTS_ROOT/archive` (default `~/projects/archive`), not the cur
 so update that checkout first; running `just deploy-one archive` from ops-control directly is
 the same thing.
 
-CI (`.github/workflows/ci.yml`) runs `ruff check .`, `mypy`, a missing-migration check
+CI (`.github/workflows/ci.yml`) runs the dependency audit, `ruff check .`, `mypy`, a missing-migration check
 (`makemigrations --check --dry-run`) and the test suite on Python 3.12 (the deployed
 version) for every push and pull request. It uses the locked dependencies (`UV_FROZEN`),
 read-only permissions and no secrets.

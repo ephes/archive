@@ -319,6 +319,13 @@ Important values:
 
 ## Background processing
 
+Credential-bearing summary, transcription and article-audio requests only follow
+redirects on the initial HTTP(S) origin (scheme, host and effective port).
+Transcription and article-audio job/artifact URLs must match the configured API
+origin, with no userinfo; relative paths and same-origin absolute URLs are supported.
+External signed artifact URLs are refused: there is no external artifact download
+path carrying API credentials. Public page fetching keeps its separate SSRF guard.
+
 Metadata fetching also runs outside write transactions; fill-only enrichment and
 classification use the current row after fetching, keeping operator overrides and
 manual metadata. Classifier PATCH reads, checks override priority and publishes in

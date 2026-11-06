@@ -199,9 +199,18 @@ just check
 just dev
 ```
 
-`just check` runs lint, type checks and tests. `just audit` checks the locked dependencies
-against known vulnerabilities with `pip-audit`; refresh a flagged package with
-`uv lock --upgrade-package <name>`.
+`just check` runs lint, type checks and tests. `just audit` runs the same frozen
+runtime and all-development-groups audit as CI, using pinned `pip-audit==2.10.1`:
+
+```bash
+set -euo pipefail
+uv export --frozen --all-groups --no-hashes --no-emit-project | uvx pip-audit==2.10.1 --disable-pip --no-deps -r /dev/stdin
+```
+
+Run this pipeline in Bash so export errors and audit findings both fail the command.
+The audit checks registry dependencies in `uv.lock`, including the default dev group;
+it does not audit external executables or independently installed tools. CI does not
+update the lock. Refresh a flagged package with `uv lock --upgrade-package <name>`.
 The Brotli 1.2.1 lock corrects PYSEC-2026-4322 in the media dependency graph;
 installed environments need the updated lock to pick up the decompressor fix.
 
@@ -211,7 +220,7 @@ checkout at `$PROJECTS_ROOT/archive` (default `~/projects/archive`), not the cur
 so update that checkout first; running `just deploy-one archive` from ops-control directly is
 the same thing.
 
-CI (`.github/workflows/ci.yml`) runs `ruff check .`, `mypy`, a missing-migration check
+CI (`.github/workflows/ci.yml`) runs the dependency audit, `ruff check .`, `mypy`, a missing-migration check
 (`makemigrations --check --dry-run`) and the test suite on Python 3.12 (the deployed
 version) for every push and pull request. It uses the locked dependencies (`UV_FROZEN`),
 read-only permissions and no secrets.

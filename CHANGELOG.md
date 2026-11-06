@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Update the locked Brotli decompressor to 1.2.1 for PYSEC-2026-4322.
+- Gate CI on the existing frozen runtime/development dependency audit, pin pip-audit
+  to 2.10.1, and propagate export failures in the local and CI commands.
 
 - Bound podcast feed materialization to streamed policy batches and one page of full items,
   preserving eligibility, exact archive page counts, enclosure priority, and navigation.

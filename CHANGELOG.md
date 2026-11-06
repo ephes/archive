@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep metadata and operator classification edits made during metadata fetching;
+  serialize classifier PATCH lookup, override conflict checks and publication.
+
 - Preserve concurrent summary, tag and transcript edits when workers publish generated
   text; reconcile completion and summary refresh from current retained values.
 

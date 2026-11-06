@@ -11,7 +11,7 @@ from django.contrib.auth.views import LoginView, LogoutView
 from django.core.exceptions import ValidationError
 from django.core.paginator import EmptyPage, Paginator
 from django.core.validators import URLValidator
-from django.db import connection
+from django.db import connection, transaction
 from django.db.models import Q
 from django.db.models.functions import Trim
 from django.http import (
@@ -614,21 +614,22 @@ def api_update_item(request: HttpRequest, pk: int) -> JsonResponse:
     if kind not in ItemKind.values:
         return JsonResponse({"error": "Invalid kind"}, status=400)
 
-    item = get_object_or_404(Item, pk=pk)
-    classification_rule = str(payload.get("classification_rule") or "").strip()
-    if classification_rule:
-        if classification_rule != "quote_classifier" or kind != ItemKind.QUOTE:
-            return JsonResponse({"error": "Invalid classification_rule"}, status=400)
-        try:
-            update_fields = _apply_api_quote_classifier_kind(item=item)
-        except ValueError as exc:
-            if str(exc) == "operator_override_conflict":
-                return JsonResponse({"error": "Item has an operator override"}, status=409)
-            raise
-    else:
-        update_fields = apply_operator_kind_override(item=item, kind=kind)
-    if update_fields:
-        item.save(update_fields=sorted(set(update_fields)))
+    with transaction.atomic():
+        item = get_object_or_404(Item, pk=pk)
+        classification_rule = str(payload.get("classification_rule") or "").strip()
+        if classification_rule:
+            if classification_rule != "quote_classifier" or kind != ItemKind.QUOTE:
+                return JsonResponse({"error": "Invalid classification_rule"}, status=400)
+            try:
+                update_fields = _apply_api_quote_classifier_kind(item=item)
+            except ValueError as exc:
+                if str(exc) == "operator_override_conflict":
+                    return JsonResponse({"error": "Item has an operator override"}, status=409)
+                raise
+        else:
+            update_fields = apply_operator_kind_override(item=item, kind=kind)
+        if update_fields:
+            item.save(update_fields=sorted(set(update_fields)))
 
     return JsonResponse(
         {

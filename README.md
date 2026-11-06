@@ -319,6 +319,11 @@ Important values:
 
 ## Background processing
 
+Summary/tag and transcript generation happens outside write transactions. Publication
+re-reads the current item in a short SQLite IMMEDIATE transaction and keeps fields
+whose value or generated ownership flag changed during generation. Completion and
+summary refresh decisions use the retained current values, preserving manual edits.
+
 All app settings (local, production, and test) inherit SQLite `transaction_mode: "IMMEDIATE"`
 and a five-second busy timeout from the base settings. Each outer `transaction.atomic()`
 starts with `BEGIN IMMEDIATE`: writers queue for the lock before reading instead of failing

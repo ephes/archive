@@ -173,6 +173,13 @@ Reference docs:
 
 `POST /api/items/` captures a new item with `Authorization: Bearer <ARCHIVE_API_TOKEN>` and a JSON body containing `url`. Optional fields include `title`, `notes`, `kind`, `audio_url`, `media_url`, `source`, `author`, and `original_published_at`. `kind="quote"` is accepted through the same explicit-kind path as the other item kinds.
 
+Capture fields must be JSON strings; omitted or `null` fields are treated as empty,
+with `url` still required. Values are trimmed after validating the model length limits:
+`url`, `audio_url`, and `media_url` allow 200 characters; `title` allows 500;
+`source` and `author` allow 255; `kind` allows 32. `notes` has no model length limit.
+Wrong types or overlong values return `400` with `{"error":"Invalid <field>"}`
+before classification or capture. Unknown fields are ignored.
+
 Repeated shares through the API or authenticated web form resolve to the newest existing
 item with the same URL within `ARCHIVE_CAPTURE_DEDUPE_SECONDS` (default `86400`, 24 hours).
 The API returns `201` with `duplicate: false` for a new item and `200` with `duplicate: true`

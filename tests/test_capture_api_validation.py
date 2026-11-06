@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 from unittest.mock import Mock
 
 import pytest
@@ -102,6 +103,66 @@ def test_api_preserves_valid_json_encodings(client, method, path, encoding):
         path.format(pk=item.pk), body, content_type="application/json", headers=HEADERS
     )
     assert response.status_code == (201 if method == "post" else 200)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "9999-12-31T23:59:59-23:59",
+        "0001-01-01T00:00:00+23:59",
+        "9999-12-31T23:59:59Z",
+        "0001-01-01T00:00:00",
+        "2026-02-30T12:00:00Z",
+        "2026-01-01T12:00:00+24:00",
+        "not-a-date",
+    ],
+)
+def test_capture_rejects_unrepresentable_timestamp(client, no_capture, settings, value):
+    settings.TIME_ZONE = "Europe/Berlin"
+    response = client.post(
+        "/api/items/",
+        json.dumps(
+            {
+                "url": "https://example.com/story",
+                "original_published_at": value,
+            }
+        ),
+        content_type="application/json",
+        headers=HEADERS,
+    )
+    assert response.status_code == 400
+    assert response.json() == {"error": "Invalid original_published_at"}
+    for call in no_capture:
+        call.assert_not_called()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("2026-01-01T12:00:00+02:00", datetime(2026, 1, 1, 10, tzinfo=UTC)),
+        ("2026-01-01T12:00:00", datetime(2026, 1, 1, 11, tzinfo=UTC)),
+        ("0001-01-01T00:00:00Z", datetime(1, 1, 1, tzinfo=UTC)),
+        ("9999-12-31T22:59:59Z", datetime(9999, 12, 31, 22, 59, 59, tzinfo=UTC)),
+    ],
+)
+def test_capture_normalizes_timestamp_to_utc(client, settings, value, expected):
+    settings.TIME_ZONE = "Europe/Berlin"
+    response = client.post(
+        "/api/items/",
+        json.dumps(
+            {
+                "url": "https://example.com/story",
+                "original_published_at": value,
+            }
+        ),
+        content_type="application/json",
+        headers=HEADERS,
+    )
+    assert response.status_code == 201
+    item = Item.objects.get()
+    assert item.original_published_at == expected
+    assert client.get(item.get_absolute_url()).status_code == 200
 
 
 @pytest.mark.django_db

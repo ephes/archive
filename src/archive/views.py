@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import re
+from datetime import UTC
 
 from django.conf import settings
 from django.contrib.auth.views import LoginView, LogoutView
@@ -553,14 +554,20 @@ def api_create_item(request: HttpRequest) -> JsonResponse:
 
     original_published_at = None
     if original_published_at_raw:
-        original_published_at = parse_datetime(original_published_at_raw)
-        if original_published_at is None:
+        try:
+            original_published_at = parse_datetime(original_published_at_raw)
+            if original_published_at is None:
+                raise ValueError("Invalid timestamp")
+            if timezone.is_naive(original_published_at):
+                original_published_at = timezone.make_aware(
+                    original_published_at,
+                    timezone.get_current_timezone(),
+                )
+            original_published_at = original_published_at.astimezone(UTC)
+            # Detail templates also need to render the instant in the active timezone.
+            timezone.localtime(original_published_at)
+        except (ValueError, OverflowError):
             return JsonResponse({"error": "Invalid original_published_at"}, status=400)
-        if timezone.is_naive(original_published_at):
-            original_published_at = timezone.make_aware(
-                original_published_at,
-                timezone.get_current_timezone(),
-            )
 
     item = Item(
         original_url=url,

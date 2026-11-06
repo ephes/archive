@@ -180,6 +180,12 @@ with `url` still required. Values are trimmed after validating the model length 
 Wrong types or overlong values return `400` with `{"error":"Invalid <field>"}`
 before classification or capture. Unknown fields are ignored.
 
+`original_published_at` accepts an ISO datetime string. Naive timestamps use the current
+Django timezone (`TIME_ZONE`, normally Europe/Berlin); offset timestamps retain their
+instant. Both are normalized to UTC before capture and must fit years 1–9999 in UTC
+and the current Django timezone so detail pages can render them.
+Malformed dates and conversions outside that range return `400` with
+`{"error":"Invalid original_published_at"}`.
 Both POST and PATCH authenticate before parsing JSON. Malformed JSON, invalid JSON byte
 encodings, and non-object bodies return `400` with `{"error":"Invalid JSON"}`;
 valid UTF-8, UTF-16, and UTF-32 JSON retain support.

@@ -9,6 +9,9 @@
   returning field-specific 400 responses while preserving optional empty values.
 - Return the existing invalid-JSON 400 response for malformed byte encodings on both
   item creation and updates, retaining authentication before decoding.
+- Normalize capture publication timestamps to UTC before persistence and reject invalid
+  dates or out-of-range UTC/display-timezone conversions with the existing field-specific
+  400 response.
 
 - Bound podcast feed materialization to streamed policy batches and one page of full items,
   preserving eligibility, exact archive page counts, enclosure priority, and navigation.

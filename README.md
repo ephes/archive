@@ -307,6 +307,11 @@ Metadata extraction plus transcription plus summary/tag generation runs in a sep
 just manage run_metadata_worker --once
 ```
 
+`--once` processes up to `--limit` available items, continuing past failed or stalled items.
+It prints the processed count, then exits nonzero if any attempted item failed or stalled.
+An empty pass or a pass whose attempts all succeed exits zero. Continuous mode keeps polling
+and retains its existing retry behavior.
+
 Quote classification is intentionally external to Archive. Archive owns storage
 and exposes the authenticated item PATCH API; Daybook/macOS runners decide when
 to mark an item as `kind=quote`.
@@ -322,7 +327,7 @@ Optional worker flags for the Milestone 6 slice:
 - `--media-archive-timeout` gives each direct audio/video download one elapsed budget across
   connection setup, redirects, and streaming; it is also used for video-to-audio extraction work
 - `--stale-processing-after` controls how old an in-flight `processing` lease must be before the worker
-  re-queues it during normal runtime and also acts as the worker's hard cap for a single in-flight item;
+  re-queues it at startup and during normal runtime and also acts as the worker's hard cap for a single in-flight item;
   by default Archive uses the larger of 1 hour or 2x the combined per-item stage timeouts
 
 Direct media downloads run urllib in a small isolated subprocess, which is killed
@@ -384,8 +389,18 @@ remaining failed for operator review.
 The worker also persists when an item first entered `processing` and now re-queues stale `processing`
 states during normal loop iterations instead of only recovering them on worker startup. The same stale
 window is enforced against the currently running item, so a transcript or summary path that stops making
-progress no longer strands the row in `processing` indefinitely. Startup recovery still clears any leftover
-`processing` rows immediately after a worker restart.
+progress no longer strands the row in `processing` indefinitely. Startup uses the same age cutoff
+and preserves fresh leases held by other workers. Choose a stale window longer than legitimate per-item processing; this is age-based recovery, not a heartbeat
+or ownership lock. After a crash, recent work waits until that window expires. To deliberately
+recover all abandoned work sooner (including legacy rows without a lease timestamp), stop all
+workers first, then run this from the repository root and restart them:
+
+```bash
+(cd src/django && uv run python manage.py shell -c \
+  'from archive.services import recover_processing_items; print(recover_processing_items())')
+```
+
+Never force recovery while a worker is active.
 
 Operator note:
 

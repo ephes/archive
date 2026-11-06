@@ -32,6 +32,14 @@ Public endpoints:
 - `/api/health/` unauthenticated JSON processing health for monitoring (step counts and timestamps
   only, see [Processing health](#processing-health))
 
+## Public search
+
+`/search/?q=<terms>&page=<n>` returns 20 public results per page. SQLite counts matches
+and selects only that page's ids with `LIMIT/OFFSET`; only those items are loaded.
+Results keep full-text relevance (`bm25`) order, then newest `shared_at` and highest id
+for ties. Totals remain exact. Blank or punctuation-only queries return no results;
+invalid page text selects the first page, and out-of-range numbers select the last page.
+
 ## Week JSON Feed
 
 `GET /feeds/week/<YYYY-Wnn>.json` returns public (`is_public=True`) items whose `shared_at`
@@ -585,6 +593,15 @@ Current automatic policy:
   looks substantial and coherent rather than like a short note or mixed-topic link dump
 - if both source-derived archived audio and generated article audio exist, the source-derived archived audio
   wins for the feed enclosure
+
+Both RSS feeds keep exact 50-item archive pages ordered by newest `published_at`, then highest
+id. Podcast feed selection applies public/published, basic title/summary/audio and operator-exclude
+filters in SQL, then streams policy fields in batches of 100 to preserve Python whitespace and
+generated-summary eligibility rules. It retains only the exact eligible count and the requested
+page's ids, then loads full items for that page and rechecks eligibility so edits made during
+the scan cannot expose newly private or excluded items. Notes and transcripts are excluded from the scan;
+summary text remains necessary for generated-audio policy. Counting still scans candidate history,
+but memory no longer grows with that history and no eligible history is truncated.
 
 Operator workflow in Django admin:
 

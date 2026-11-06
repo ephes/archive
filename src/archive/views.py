@@ -39,7 +39,7 @@ from archive.classification import (
 from archive.forms import ArchiveAuthenticationForm, ItemForm
 from archive.media_archival import MediaArchivalError, open_archived_audio
 from archive.media_responses import ranged_file_response
-from archive.models import Item, ItemKind
+from archive.models import Item, ItemKind, PodcastFeedPolicy
 from archive.processing_health import processing_health_snapshot
 from archive.services import (
     apply_operator_kind_override,
@@ -89,21 +89,59 @@ def _public_feed_items():
     )
 
 
-def _public_podcast_feed_items():
+def _public_podcast_feed_page(page: int):
     candidates = (
         Item.objects.filter(
             is_public=True,
             published_at__isnull=False,
         )
-        .filter(Q(archived_audio_path__gt="") | Q(article_audio_artifact_path__gt=""))
+        .exclude(podcast_feed_policy=PodcastFeedPolicy.EXCLUDE)
+        .filter(
+            Q(archived_audio_path__gt="")
+            | Q(kind=ItemKind.ARTICLE, article_audio_artifact_path__gt="")
+        )
         .annotate(feed_title=Trim("title"), feed_summary=Trim("short_summary"))
         .exclude(feed_title="")
         .exclude(feed_summary="")
         .order_by("-published_at", "-id")
     )
-    # Feed policy currently depends on per-item application logic, so this first
-    # slice filters in Python after a bounded candidate query.
-    return [item for item in candidates if podcast_feed_decision_for_item(item).eligible]
+    # Python owns whitespace and generated-summary policy. Stream only its inputs;
+    # retain a count and one page of ids, then load full items for that page alone.
+    eligible_count = 0
+    page_ids = []
+    start = (page - 1) * FEED_PAGE_SIZE
+    policy_fields = (
+        "id",
+        "is_public",
+        "published_at",
+        "title",
+        "short_summary",
+        "long_summary",
+        "kind",
+        "podcast_feed_policy",
+        "archived_audio_path",
+        "article_audio_artifact_path",
+    )
+    for item in candidates.only(*policy_fields).iterator(chunk_size=100):
+        if not podcast_feed_decision_for_item(item).eligible:
+            continue
+        if start <= eligible_count < start + FEED_PAGE_SIZE:
+            page_ids.append(item.pk)
+        eligible_count += 1
+    page_obj = _feed_page(range(eligible_count), page)
+    page_obj.object_list = [
+        item
+        for item in candidates.filter(pk__in=page_ids)
+        if podcast_feed_decision_for_item(item).eligible
+    ]
+    return page_obj
+
+
+def _feed_page(items, page: int):
+    try:
+        return Paginator(items, FEED_PAGE_SIZE).page(page)
+    except EmptyPage as exc:
+        raise Http404("Unknown feed page") from exc
 
 
 def _build_search_match_query(raw_query: str) -> str:
@@ -111,12 +149,28 @@ def _build_search_match_query(raw_query: str) -> str:
     return " AND ".join(f"{token}*" for token in tokens)
 
 
-def _search_public_item_ids(raw_query: str) -> list[int]:
+def _search_public_item_page(raw_query: str, number):
     match_query = _build_search_match_query(raw_query)
     if not match_query:
-        return []
+        return Paginator([], SEARCH_PAGE_SIZE).get_page(number)
 
     with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM archive_item_fts
+            JOIN archive_item AS item ON item.id = archive_item_fts.rowid
+            WHERE archive_item_fts MATCH %s
+              AND item.is_public = 1
+            """,
+            [match_query],
+        )
+        result_count = cursor.fetchone()[0]
+        # A range supplies exact pagination metadata without allocating matching ids.
+        page_obj = Paginator(range(result_count), SEARCH_PAGE_SIZE).get_page(number)
+        if not result_count:
+            page_obj.object_list = []
+            return page_obj
         cursor.execute(
             """
             SELECT item.id
@@ -125,17 +179,18 @@ def _search_public_item_ids(raw_query: str) -> list[int]:
             WHERE archive_item_fts MATCH %s
               AND item.is_public = 1
             ORDER BY bm25(archive_item_fts), item.shared_at DESC, item.id DESC
+            LIMIT %s OFFSET %s
             """,
-            [match_query],
+            [match_query, SEARCH_PAGE_SIZE, (page_obj.number - 1) * SEARCH_PAGE_SIZE],
         )
-        return [row[0] for row in cursor.fetchall()]
+        page_obj.object_list = [row[0] for row in cursor.fetchall()]
+        return page_obj
 
 
 def _render_feed(
     request: HttpRequest,
     *,
-    page: int,
-    items_queryset,
+    page_obj,
     canonical_view_name: str,
     paged_view_name: str,
     feed_title: str,
@@ -144,22 +199,17 @@ def _render_feed(
     include_enclosures: bool = False,
     feed_image_path: str | None = None,
 ) -> HttpResponse:
+    page = page_obj.number
     if page == 1 and request.path != reverse(canonical_view_name):
         return redirect(canonical_view_name, permanent=True)
 
-    paginator = Paginator(items_queryset, FEED_PAGE_SIZE)
-
-    if paginator.count == 0:
+    if page_obj.paginator.count == 0:
         if page != 1:
             raise Http404("Unknown feed page")
         page_items = []
         newer_url = None
         older_url = None
     else:
-        try:
-            page_obj = paginator.page(page)
-        except EmptyPage as exc:
-            raise Http404("Unknown feed page") from exc
         page_items = list(page_obj.object_list)
         newer_url = (
             request.build_absolute_uri(reverse(canonical_view_name))
@@ -259,9 +309,7 @@ def overview(request: HttpRequest) -> HttpResponse:
 @require_GET
 def search(request: HttpRequest) -> HttpResponse:
     raw_query = (request.GET.get("q") or "").strip()
-    item_ids = _search_public_item_ids(raw_query) if raw_query else []
-    paginator = Paginator(item_ids, SEARCH_PAGE_SIZE)
-    page_obj = paginator.get_page(request.GET.get("page") or 1)
+    page_obj = _search_public_item_page(raw_query, request.GET.get("page") or 1)
     items_by_id = Item.objects.in_bulk(page_obj.object_list)
     results = [items_by_id[item_id] for item_id in page_obj.object_list if item_id in items_by_id]
 
@@ -272,7 +320,7 @@ def search(request: HttpRequest) -> HttpResponse:
             "search_query": raw_query,
             "results": results,
             "page_obj": page_obj,
-            "result_count": len(item_ids),
+            "result_count": page_obj.paginator.count,
         },
     )
 
@@ -294,8 +342,7 @@ def robots_txt(request: HttpRequest) -> HttpResponse:
 def rss_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
     return _render_feed(
         request,
-        page=page,
-        items_queryset=_public_feed_items(),
+        page_obj=_feed_page(_public_feed_items(), page),
         canonical_view_name="archive:rss-feed",
         paged_view_name="archive:rss-feed-page",
         feed_title="Archive",
@@ -308,8 +355,7 @@ def rss_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
 def podcast_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
     return _render_feed(
         request,
-        page=page,
-        items_queryset=_public_podcast_feed_items(),
+        page_obj=_public_podcast_feed_page(page),
         canonical_view_name="archive:podcast-feed",
         paged_view_name="archive:podcast-feed-page",
         feed_title="Archive Podcast",

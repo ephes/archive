@@ -254,6 +254,10 @@ def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
             )
         return True
 
+    captured = {
+        field: (getattr(item, field), getattr(item, f"{field}_generated"))
+        for field in ("short_summary", "long_summary", "tags")
+    }
     try:
         generated = generate_item_summaries(item=item, timeout=timeout)
     except Exception as exc:
@@ -261,34 +265,50 @@ def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
         record_step_outcome(ProcessingStep.SUMMARY, succeeded=False, item_id=item.pk)
         return _mark_summary_failure(item, str(exc))
 
-    update_fields: list[str] = []
-    if (not item.short_summary or item.short_summary_generated) and generated.short_summary:
-        item.short_summary = generated.short_summary
-        item.short_summary_generated = True
-        update_fields.extend(["short_summary", "short_summary_generated"])
-    if (not item.long_summary or item.long_summary_generated) and generated.long_summary:
-        item.long_summary = generated.long_summary
-        item.long_summary_generated = True
-        update_fields.extend(["long_summary", "long_summary_generated"])
-    if (not item.tags or item.tags_generated) and generated.tags:
-        item.tags = "\n".join(generated.tags)
-        item.tags_generated = True
-        update_fields.extend(["tags", "tags_generated"])
+    with transaction.atomic():
+        item.refresh_from_db()
+        update_fields: list[str] = []
+        if (
+            (item.short_summary, item.short_summary_generated) == captured["short_summary"]
+            and (not item.short_summary or item.short_summary_generated)
+            and generated.short_summary
+        ):
+            item.short_summary = generated.short_summary
+            item.short_summary_generated = True
+            update_fields.extend(["short_summary", "short_summary_generated"])
+        if (
+            (item.long_summary, item.long_summary_generated) == captured["long_summary"]
+            and (not item.long_summary or item.long_summary_generated)
+            and generated.long_summary
+        ):
+            item.long_summary = generated.long_summary
+            item.long_summary_generated = True
+            update_fields.extend(["long_summary", "long_summary_generated"])
+        if (
+            (item.tags, item.tags_generated) == captured["tags"]
+            and (not item.tags or item.tags_generated)
+            and generated.tags
+        ):
+            item.tags = "\n".join(generated.tags)
+            item.tags_generated = True
+            update_fields.extend(["tags", "tags_generated"])
 
-    if not _has_generated_summaries(item):
-        record_step_outcome(ProcessingStep.SUMMARY, succeeded=False, item_id=item.pk)
-        return _mark_summary_failure(item, "Summary response did not produce all required fields")
+        if not _has_generated_summaries(item):
+            record_step_outcome(ProcessingStep.SUMMARY, succeeded=False, item_id=item.pk)
+            return _mark_summary_failure(
+                item, "Summary response did not produce all required fields"
+            )
 
-    item.summary_status = EnrichmentStatus.COMPLETE
-    item.summary_error = ""
-    item.summary_retry_count = 0
-    item.summary_retry_at = None
-    update_fields.extend(
-        ["summary_status", "summary_error", "summary_retry_count", "summary_retry_at"]
-    )
-    item.save(update_fields=sorted(set(update_fields)))
-    record_step_outcome(ProcessingStep.SUMMARY, succeeded=True, item_id=item.pk)
-    return True
+        item.summary_status = EnrichmentStatus.COMPLETE
+        item.summary_error = ""
+        item.summary_retry_count = 0
+        item.summary_retry_at = None
+        update_fields.extend(
+            ["summary_status", "summary_error", "summary_retry_count", "summary_retry_at"]
+        )
+        item.save(update_fields=sorted(set(update_fields)))
+        record_step_outcome(ProcessingStep.SUMMARY, succeeded=True, item_id=item.pk)
+        return True
 
 
 def enrich_item_transcript(item: Item, timeout: int = 300) -> bool:
@@ -306,6 +326,7 @@ def enrich_item_transcript(item: Item, timeout: int = 300) -> bool:
             item.save(update_fields=["transcript_status", "transcript_error"])
         return True
 
+    captured = (item.transcript, item.transcript_generated)
     try:
         transcript = generate_item_transcript(item=item, timeout=timeout)
     except Exception as exc:
@@ -313,34 +334,37 @@ def enrich_item_transcript(item: Item, timeout: int = 300) -> bool:
         record_step_outcome(ProcessingStep.TRANSCRIPT, succeeded=False, item_id=item.pk)
         return _mark_transcript_failure(item, str(exc))
 
-    item.transcript = transcript
-    item.transcript_generated = True
-    item.transcript_status = EnrichmentStatus.COMPLETE
-    item.transcript_error = ""
-    update_fields = [
-        "transcript",
-        "transcript_generated",
-        "transcript_status",
-        "transcript_error",
-    ]
+    with transaction.atomic():
+        item.refresh_from_db()
+        if (item.transcript, item.transcript_generated) == captured:
+            item.transcript = transcript
+            item.transcript_generated = True
+        item.transcript_status = EnrichmentStatus.COMPLETE
+        item.transcript_error = ""
+        update_fields = [
+            "transcript",
+            "transcript_generated",
+            "transcript_status",
+            "transcript_error",
+        ]
 
-    if _summary_should_refresh_from_transcript(item):
-        item.summary_status = EnrichmentStatus.PENDING
-        item.summary_error = ""
-        item.summary_retry_count = 0
-        item.summary_retry_at = None
-        update_fields.extend(
-            [
-                "summary_status",
-                "summary_error",
-                "summary_retry_count",
-                "summary_retry_at",
-            ]
-        )
+        if _summary_should_refresh_from_transcript(item):
+            item.summary_status = EnrichmentStatus.PENDING
+            item.summary_error = ""
+            item.summary_retry_count = 0
+            item.summary_retry_at = None
+            update_fields.extend(
+                [
+                    "summary_status",
+                    "summary_error",
+                    "summary_retry_count",
+                    "summary_retry_at",
+                ]
+            )
 
-    item.save(update_fields=sorted(set(update_fields)))
-    record_step_outcome(ProcessingStep.TRANSCRIPT, succeeded=True, item_id=item.pk)
-    return True
+        item.save(update_fields=sorted(set(update_fields)))
+        record_step_outcome(ProcessingStep.TRANSCRIPT, succeeded=True, item_id=item.pk)
+        return True
 
 
 def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:

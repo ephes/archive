@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Reserve login budgets before password verification, preserving other pending attempts
+  on successful login and ignoring settlement from expired windows.
+- Bound metadata DNS, connections, redirects and body reads by a single elapsed fetch
+  deadline using the guarded downloader subprocess; retain charset parsing and byte caps.
+
 - Confine authenticated job/artifact URLs to the configured API origin and refuse
   cross-origin, downgrade and userinfo redirects before forwarding bearer credentials.
 

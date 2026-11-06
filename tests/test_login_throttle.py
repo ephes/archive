@@ -146,7 +146,7 @@ def test_disabled_buckets(client, editor_user, settings, pair_limit, address_lim
 
 
 def test_locked_address_does_not_create_pair_keys(settings):
-    from archive.login_throttle import _keys, is_locked, record_failure
+    from archive.login_throttle import _count, _keys, is_locked, record_failure
 
     settings.LOGIN_FAILURE_LIMIT = 0
     settings.LOGIN_ADDRESS_FAILURE_LIMIT = 2
@@ -157,7 +157,7 @@ def test_locked_address_does_not_create_pair_keys(settings):
         record_failure(request, f"unknown-{index}")
     assert is_locked(request, "never-seen")
     assert len(caches["login_throttle"]._cache) == 1
-    assert caches["login_throttle"].get(_keys(request, "never-seen")[1]) == 2
+    assert _count(_keys(request, "never-seen")[1]) == 2
 
 
 @pytest.mark.django_db

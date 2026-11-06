@@ -3,18 +3,25 @@ from __future__ import annotations
 import codecs
 import json
 import re
+import subprocess
+import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, time
+from email.message import Message
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
+from pathlib import Path
+from subprocess import run as run_download
+from tempfile import TemporaryDirectory
+from time import monotonic
+from types import SimpleNamespace
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request
 
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
-
-from archive.safe_fetch import open_public_url
 
 AUDIO_SUFFIXES = (".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav")
 VIDEO_SUFFIXES = (".mp4", ".m4v", ".mov", ".webm", ".m3u8")
@@ -199,10 +206,64 @@ class _MetadataHTMLParser(HTMLParser):
             self.media_candidates.append(candidate)
 
 
+@contextmanager
+def _open_metadata_url(request: Request, *, timeout: float):
+    """Kill and reap the fetch subprocess at one whole-transfer deadline."""
+    deadline = monotonic() + timeout
+    with TemporaryDirectory(prefix="archive-metadata-") as directory:
+        path = Path(directory) / "source"
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise MetadataExtractionError("Metadata fetch exceeded the total timeout")
+        options = {
+            "url": request.full_url,
+            "headers": dict(request.header_items()),
+            "path": str(path),
+            "timeout": remaining,
+            "max_bytes": MAX_METADATA_BYTES,
+            "metadata": True,
+        }
+        try:
+            result = run_download(
+                [sys.executable, "-I", str(Path(__file__).with_name("direct_media_download.py"))],
+                input=json.dumps(options),
+                capture_output=True,
+                text=True,
+                timeout=remaining,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise MetadataExtractionError("Metadata fetch exceeded the total timeout") from exc
+        if monotonic() >= deadline:
+            raise MetadataExtractionError("Metadata fetch exceeded the total timeout")
+        try:
+            info = json.loads(result.stdout)
+        except (ValueError, TypeError) as exc:
+            raise MetadataExtractionError("Metadata downloader returned an invalid result") from exc
+        if not isinstance(info, dict):
+            raise MetadataExtractionError("Metadata downloader returned an invalid result")
+        if result.returncode:
+            if isinstance(info.get("http_status"), int):
+                raise MetadataExtractionError(f"HTTP {info['http_status']} while fetching metadata")
+            if isinstance(info.get("url_reason"), str):
+                raise MetadataExtractionError(f"Could not fetch metadata: {info['url_reason']}")
+            raise MetadataExtractionError(
+                f"Could not fetch metadata: {str(info.get('error', 'download failed'))[:500]}"
+            )
+        content_type = info.get("content_type")
+        charset = info.get("charset")
+        if not isinstance(content_type, str) or not isinstance(charset, str):
+            raise MetadataExtractionError("Metadata downloader returned invalid headers")
+        headers = Message()
+        headers.set_type(content_type)
+        headers.set_param("charset", charset)
+        with path.open("rb") as source:
+            yield SimpleNamespace(headers=headers, read=source.read)
+
+
 def extract_metadata_from_url(url: str, timeout: int = 15) -> ExtractedMetadata:
     request = Request(url, headers=REQUEST_HEADERS)
     try:
-        with open_public_url(request, timeout=timeout) as response:
+        with _open_metadata_url(request, timeout=timeout) as response:
             content_type = response.headers.get_content_type()
             if content_type and "html" not in content_type and "xml" not in content_type:
                 raise MetadataExtractionError(f"Unsupported content type: {content_type}")

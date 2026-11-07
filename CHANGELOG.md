@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Exclude active processing stages from item claims and acquire newly pending
+  stages atomically, preserving explicit stale recovery.
+- Fence source-media publication against source, classification, attempt and media
+  reference changes; reclaim losing uploads without deleting referenced objects.
+- Ignore synthesis submission/poll results superseded by job, source, classification
+  or script edits, retaining newer artifacts and polling state.
+
 - Reject generated summaries with nontext summaries, nonarray tags, or malformed
   tag entries; retain existing content and stage retry handling.
 - Verify article-copy timeout cleanup and retained references under a trickling

@@ -116,6 +116,7 @@ class Command(BaseCommand):
                     break
                 processed += 1
                 self.stdout.write(f"Processing item {item.pk}: {item.original_url}")
+                claimed_started_at = item.processing_started_at
                 try:
                     with self._item_processing_timeout(stale_processing_after):
                         success = enrich_item_metadata(
@@ -129,7 +130,9 @@ class Command(BaseCommand):
                     unsuccessful += 1
                     timed_out_in_pass = True
                     skipped_item_ids.add(item.pk)
-                    recovered = recover_processing_item(item.pk)
+                    recovered = recover_processing_item(
+                        item.pk, expected_started_at=claimed_started_at
+                    )
                     if recovered:
                         self.stderr.write(
                             "Processing item "

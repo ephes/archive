@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from functools import partial
@@ -45,6 +46,21 @@ SUMMARY_RETRY_DELAYS = (
 )
 MEDIA_ARCHIVE_RETRY_DELAYS = SUMMARY_RETRY_DELAYS
 TRANSCRIBABLE_ITEM_KINDS = (ItemKind.PODCAST_EPISODE, ItemKind.VIDEO)
+SOURCE_VERSION_FIELDS = (
+    "original_url",
+    "kind",
+    "audio_url",
+    "media_url",
+    "classification_rule",
+    "classification_evidence",
+    "classification_engine_version",
+)
+
+
+def _item_state(item: Item, fields) -> dict:
+    return {field: deepcopy(getattr(item, field)) for field in fields}
+
+
 WEEK_TOKEN_RE = re.compile(r"^(\d{4})-W(\d{2})$")
 
 
@@ -207,34 +223,50 @@ def enrich_item_metadata(
     transcription_timeout: int = 300,
     article_audio_timeout: int = 30,
 ) -> bool:
-    metadata_success = True
-    media_archive_success = True
-    transcript_success = True
-    summary_success = True
-    article_audio_success = True
-
-    if item.enrichment_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
-        metadata_success = _enrich_item_metadata_fields(item=item, timeout=timeout)
-
-    if item.media_archive_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
-        media_archive_success = enrich_item_media_archive(item=item, timeout=media_archive_timeout)
-
-    if item.transcript_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
-        transcript_success = enrich_item_transcript(item=item, timeout=transcription_timeout)
-
-    if item.summary_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
-        summary_success = enrich_item_summaries(item=item, timeout=summary_timeout)
-
-    if item.article_audio_status in {EnrichmentStatus.PENDING, EnrichmentStatus.PROCESSING}:
-        article_audio_success = enrich_item_article_audio(item=item, timeout=article_audio_timeout)
-
-    return (
-        metadata_success
-        and media_archive_success
-        and transcript_success
-        and summary_success
-        and article_audio_success
+    # Only resume stages acquired by this pass. Pending stages that become
+    # eligible later must be acquired atomically before any external work.
+    owned = {
+        field
+        for field in (
+            "enrichment_status",
+            "media_archive_status",
+            "transcript_status",
+            "summary_status",
+            "article_audio_status",
+        )
+        if getattr(item, field) == EnrichmentStatus.PROCESSING
+    }
+    started_at = item.processing_started_at
+    succeeded = True
+    stages = (
+        ("enrichment", _enrich_item_metadata_fields, timeout),
+        ("media_archive", enrich_item_media_archive, media_archive_timeout),
+        ("transcript", enrich_item_transcript, transcription_timeout),
+        ("summary", enrich_item_summaries, summary_timeout),
+        ("article_audio", enrich_item_article_audio, article_audio_timeout),
     )
+    for stage, enrich, budget in stages:
+        field = f"{stage}_status"
+        with transaction.atomic():
+            item.refresh_from_db(from_queryset=Item.objects.select_for_update())
+            current = getattr(item, field)
+            if current == EnrichmentStatus.PROCESSING:
+                if field not in owned or item.processing_started_at != started_at:
+                    continue
+            elif current == EnrichmentStatus.PENDING:
+                if item._has_processing_status() and (
+                    not owned or item.processing_started_at != started_at
+                ):
+                    continue
+                setattr(item, field, EnrichmentStatus.PROCESSING)
+                item.processing_started_at = started_at
+                item.save(update_fields=[field, "processing_started_at"])
+                owned.add(field)
+                started_at = item.processing_started_at
+            else:
+                continue
+        succeeded = enrich(item=item, timeout=budget) and succeeded
+    return succeeded
 
 
 def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
@@ -410,13 +442,31 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
             )
         return True
 
+    captured = _item_state(
+        item,
+        (
+            *SOURCE_VERSION_FIELDS,
+            "archived_audio_path",
+            "archived_audio_content_type",
+            "archived_audio_size_bytes",
+            "archived_video_path",
+            "archived_video_content_type",
+            "archived_video_size_bytes",
+            "media_archive_status",
+            "processing_started_at",
+        ),
+    )
     health_step = media_archive_step(item)
     try:
         archived_audio = archive_item_audio(item=item, timeout=timeout)
     except Exception as exc:
         logger.exception("Audio archival failed for item %s", item.pk)
-        record_step_outcome(health_step, succeeded=False, item_id=item.pk)
-        return _mark_media_archive_failure(item, str(exc))
+        with transaction.atomic():
+            item.refresh_from_db(from_queryset=Item.objects.select_for_update())
+            if _item_state(item, captured) != captured:
+                return True
+            record_step_outcome(health_step, succeeded=False, item_id=item.pk)
+            return _mark_media_archive_failure(item, str(exc))
 
     published_fields = [
         "archived_audio_path",
@@ -437,25 +487,28 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
     try:
         # A durable boundary prevents a caller from rolling back after publication.
         with transaction.atomic(using=using, durable=True):
-            item.archived_audio_path = archived_audio.object_name
-            item.archived_audio_content_type = archived_audio.content_type
-            item.archived_audio_size_bytes = archived_audio.size_bytes
-            item.archived_video_path = archived_audio.source_object_name
-            item.archived_video_content_type = archived_audio.source_content_type
-            item.archived_video_size_bytes = archived_audio.source_size_bytes
-            item.media_archive_status = EnrichmentStatus.COMPLETE
-            item.media_archive_error = ""
-            item.media_archive_retry_count = 0
-            item.media_archive_retry_at = None
-            item.save(update_fields=published_fields)
-            # The reservations end in the transaction that commits the references,
-            # so the new objects are never both unreserved and unreferenced.
-            release_pending_archive_media_paths(new_paths, using=using)
-            transaction.on_commit(
-                partial(delete_unreferenced_archive_media_paths, old_paths, using=using),
-                using=using,
-                robust=True,
-            )
+            item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
+            published = _item_state(item, captured) == captured
+            if published:
+                item.archived_audio_path = archived_audio.object_name
+                item.archived_audio_content_type = archived_audio.content_type
+                item.archived_audio_size_bytes = archived_audio.size_bytes
+                item.archived_video_path = archived_audio.source_object_name
+                item.archived_video_content_type = archived_audio.source_content_type
+                item.archived_video_size_bytes = archived_audio.source_size_bytes
+                item.media_archive_status = EnrichmentStatus.COMPLETE
+                item.media_archive_error = ""
+                item.media_archive_retry_count = 0
+                item.media_archive_retry_at = None
+                item.save(update_fields=published_fields)
+                # The reservations end in the transaction that commits the references,
+                # so the new objects are never both unreserved and unreferenced.
+                release_pending_archive_media_paths(new_paths, using=using)
+                transaction.on_commit(
+                    partial(delete_unreferenced_archive_media_paths, old_paths, using=using),
+                    using=using,
+                    robust=True,
+                )
     except BaseException:
         # The commit may have completed before the failure surfaced (for example a
         # processing alarm during or after COMMIT), so nothing here may assume the
@@ -472,6 +525,12 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
                 setattr(item, field, value)
         raise
 
+    if not published:
+        try:
+            delete_unreferenced_archive_media_paths(new_paths, using=using, owns_reservation=True)
+        except Exception:
+            logger.exception("Failed to discard superseded media for item %s", item.pk)
+        return True
     record_step_outcome(health_step, succeeded=True, item_id=item.pk)
     return True
 
@@ -542,64 +601,89 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
             )
         return True
 
+    captured = _item_state(
+        item,
+        (
+            *SOURCE_VERSION_FIELDS,
+            "title",
+            "short_summary",
+            "long_summary",
+            "notes",
+            "summary_status",
+            "article_audio_job_id",
+            "article_audio_artifact_path",
+            "article_audio_status",
+            "article_audio_generated",
+            "article_audio_poll_at",
+            "processing_started_at",
+        ),
+    )
     try:
         update = generate_item_article_audio(item=item, timeout=timeout)
     except Exception as exc:
         logger.exception("Article audio generation failed for item %s", item.pk)
-        record_step_outcome(ProcessingStep.ARTICLE_AUDIO, succeeded=False, item_id=item.pk)
-        return _mark_article_audio_failure(item, str(exc))
+        with transaction.atomic():
+            item.refresh_from_db(from_queryset=Item.objects.select_for_update())
+            if _item_state(item, captured) != captured:
+                return True
+            record_step_outcome(ProcessingStep.ARTICLE_AUDIO, succeeded=False, item_id=item.pk)
+            return _mark_article_audio_failure(item, str(exc))
 
-    if update.is_complete:
+    with transaction.atomic():
+        item.refresh_from_db(from_queryset=Item.objects.select_for_update())
+        if _item_state(item, captured) != captured:
+            return True
         item.article_audio_job_id = update.job_id
-        item.article_audio_artifact_path = update.artifact_path
-        item.article_audio_generated = True
-        item.article_audio_status = EnrichmentStatus.COMPLETE
         item.article_audio_error = ""
-        item.article_audio_poll_at = None
-        item.save(
-            update_fields=[
-                "article_audio_job_id",
-                "article_audio_artifact_path",
-                "article_audio_generated",
-                "article_audio_status",
-                "article_audio_error",
-                "article_audio_poll_at",
-            ]
-        )
-        record_step_outcome(ProcessingStep.ARTICLE_AUDIO, succeeded=True, item_id=item.pk)
-        try:
-            store_generated_article_audio(item=item, timeout=timeout)
-        except Exception:
-            logger.exception(
-                "Article audio copy failed for item %s; lazy backfill will retry", item.pk
+        if update.is_complete:
+            item.article_audio_artifact_path = update.artifact_path
+            item.article_audio_generated = True
+            item.article_audio_status = EnrichmentStatus.COMPLETE
+            item.article_audio_poll_at = None
+            item.save(
+                update_fields=[
+                    "article_audio_job_id",
+                    "article_audio_artifact_path",
+                    "article_audio_generated",
+                    "article_audio_status",
+                    "article_audio_error",
+                    "article_audio_poll_at",
+                ]
             )
-        return True
+        elif update.is_pending:
+            item.article_audio_status = EnrichmentStatus.PENDING
+            item.article_audio_poll_at = _next_article_audio_poll_at()
+            item.save(
+                update_fields=[
+                    "article_audio_job_id",
+                    "article_audio_status",
+                    "article_audio_error",
+                    "article_audio_poll_at",
+                ]
+            )
+            return True
+        else:
+            record_step_outcome(ProcessingStep.ARTICLE_AUDIO, succeeded=False, item_id=item.pk)
+            return _mark_article_audio_failure(item, update.error_message)
 
-    if update.is_pending:
-        item.article_audio_job_id = update.job_id
-        item.article_audio_status = EnrichmentStatus.PENDING
-        item.article_audio_error = ""
-        item.article_audio_poll_at = _next_article_audio_poll_at()
-        item.save(
-            update_fields=[
-                "article_audio_job_id",
-                "article_audio_status",
-                "article_audio_error",
-                "article_audio_poll_at",
-            ]
-        )
-        return True
-
-    record_step_outcome(ProcessingStep.ARTICLE_AUDIO, succeeded=False, item_id=item.pk)
-    return _mark_article_audio_failure(item, update.error_message)
+    record_step_outcome(ProcessingStep.ARTICLE_AUDIO, succeeded=True, item_id=item.pk)
+    try:
+        store_generated_article_audio(item=item, timeout=timeout)
+    except Exception:
+        logger.exception("Article audio copy failed for item %s; lazy backfill will retry", item.pk)
+    return True
 
 
 def recover_processing_items() -> int:
     return _recover_processing_items(_processing_item_query())
 
 
-def recover_processing_item(item_id: int) -> int:
-    return _recover_processing_items(Q(pk=item_id) & _processing_item_query())
+def recover_processing_item(item_id: int, *, expected_started_at: datetime | None) -> int:
+    if expected_started_at is None:
+        return 0
+    return _recover_processing_items(
+        Q(pk=item_id, processing_started_at=expected_started_at) & _processing_item_query()
+    )
 
 
 def recover_stale_processing_items(*, stale_before: datetime) -> int:
@@ -674,12 +758,16 @@ def _recover_processing_items(query: Q) -> int:
 def claim_pending_item(*, exclude_ids: set[int] | None = None) -> Item | None:
     now = timezone.now()
     with transaction.atomic():
-        queryset = Item.objects.select_for_update().filter(
-            Q(enrichment_status=EnrichmentStatus.PENDING)
-            | _claimable_media_archive_query(now)
-            | _claimable_transcript_query()
-            | _claimable_summary_query(now)
-            | _claimable_article_audio_query(now)
+        queryset = (
+            Item.objects.select_for_update()
+            .exclude(_processing_item_query())
+            .filter(
+                Q(enrichment_status=EnrichmentStatus.PENDING)
+                | _claimable_media_archive_query(now)
+                | _claimable_transcript_query()
+                | _claimable_summary_query(now)
+                | _claimable_article_audio_query(now)
+            )
         )
         if exclude_ids:
             queryset = queryset.exclude(pk__in=exclude_ids)
@@ -713,6 +801,20 @@ def claim_pending_item(*, exclude_ids: set[int] | None = None) -> Item | None:
             item.article_audio_error = ""
             update_fields.extend(["article_audio_status", "article_audio_error"])
 
+        if not update_fields:
+            # SQL eligibility can include a stage that needs only normalization
+            # (for example pending media with no supported source). Own that
+            # stage too, so every returned claim has a recoverable timestamp.
+            for stage, query in (
+                ("media_archive", _claimable_media_archive_query(now)),
+                ("transcript", _claimable_transcript_query()),
+                ("article_audio", _claimable_article_audio_query(now)),
+            ):
+                if Item.objects.filter(pk=item.pk).filter(query).exists():
+                    setattr(item, f"{stage}_status", EnrichmentStatus.PROCESSING)
+                    setattr(item, f"{stage}_error", "")
+                    update_fields.extend([f"{stage}_status", f"{stage}_error"])
+                    break
         if update_fields:
             item.save(update_fields=sorted(set(update_fields)))
     return item

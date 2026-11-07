@@ -48,6 +48,14 @@ one query, returning one result per occupied week in newest-first order. Gaps an
 DST/year boundaries are preserved. A second query selects only card fields (including
 title/URL and summary/notes fallbacks), leaving transcripts and processing payloads deferred.
 
+`just manage rebuild_search_index` repairs SQLite FTS drift from the current item rows.
+It leaves item content and visibility unchanged and can be run repeatedly. It refuses
+unsupported database backends and a missing FTS table (run migrations first); a failed
+SQL operation propagates an error without reporting a successful rebuild.
+`uv run pytest tests/test_rebuild_search_index.py` exercises real missing/stale terms,
+public visibility after repair, repeated rebuilding, refusal/failure paths and the
+empty/singular/plural success counts using synthetic, isolated SQLite data.
+
 ## Week JSON Feed
 
 `GET /feeds/week/<YYYY-Wnn>.json` returns public (`is_public=True`) items whose `shared_at`

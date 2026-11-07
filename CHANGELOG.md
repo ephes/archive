@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Refuse stale admin change forms while preserving submitted edits for conflict recovery.
+- Reload current rows before admin reprocessing; retain active worker attempts and retire
+  only current media references, with storage cleanup deferred until commit.
+
 - Require JSON artifacts and nonempty readable segments when batch coverage checking
   is enabled; keep the explicit nonpositive-threshold compatibility opt-out.
 - Retain delayed health outcomes as attempts without reversing newer step state or

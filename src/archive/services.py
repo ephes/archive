@@ -1220,50 +1220,59 @@ def _next_article_audio_poll_at() -> datetime:
 
 
 def request_item_reprocess(item: Item) -> Item:
-    update_fields: list[str] = []
-    # Reprocess first recomputes the cheap classification/media-resolution view from
-    # currently stored fields so stale archived source media can be dropped before a
-    # fresh metadata fetch runs. Items that depend on new metadata hints may
-    # therefore pass through a transient generic kind until enrichment completes.
-    decision = classify_item(
-        original_url=item.original_url,
-        current_kind=item.kind,
-        audio_url=item.audio_url,
-        media_url=item.media_url,
-        existing_rule=item.classification_rule,
-        existing_evidence=item.classification_evidence,
-    )
-    set_item_classification(item=item, decision=decision, update_fields=update_fields)
-    if (item.has_archived_audio or item.has_archived_video) and not _supports_media_archive(item):
-        _clear_stale_archive_media(item=item, update_fields=update_fields)
-    prepare_item_for_enrichment(item)
-    update_fields.extend(
-        [
-            "enrichment_status",
-            "enrichment_error",
-            "summary_status",
-            "summary_error",
-            "summary_retry_count",
-            "summary_retry_at",
-            "transcript_status",
-            "transcript_error",
-            "transcript_generated",
-            "media_archive_status",
-            "media_archive_error",
-            "media_archive_retry_count",
-            "media_archive_retry_at",
-            "article_audio_status",
-            "article_audio_error",
-            "article_audio_generated",
-            "article_audio_poll_at",
-        ]
-    )
-    # Reprocess should always force a fresh metadata pass, even when the current
-    # row already looks enrichment-complete.
-    item.enrichment_status = EnrichmentStatus.PENDING
-    item.enrichment_error = ""
-    item.save(update_fields=sorted(set(update_fields)))
-    return item
+    using = item._state.db or "default"
+    with transaction.atomic(using=using):
+        item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
+        # A selected instance may predate a newly claimed worker attempt. Leave
+        # its lease and publication ownership intact; retry after it finishes.
+        if item._has_processing_status():
+            return item
+        update_fields: list[str] = []
+        # Reprocess first recomputes the cheap classification/media-resolution view from
+        # currently stored fields so stale archived source media can be dropped before a
+        # fresh metadata fetch runs. Items that depend on new metadata hints may
+        # therefore pass through a transient generic kind until enrichment completes.
+        decision = classify_item(
+            original_url=item.original_url,
+            current_kind=item.kind,
+            audio_url=item.audio_url,
+            media_url=item.media_url,
+            existing_rule=item.classification_rule,
+            existing_evidence=item.classification_evidence,
+        )
+        set_item_classification(item=item, decision=decision, update_fields=update_fields)
+        if (item.has_archived_audio or item.has_archived_video) and not _supports_media_archive(
+            item
+        ):
+            _clear_stale_archive_media(item=item, update_fields=update_fields)
+        prepare_item_for_enrichment(item)
+        update_fields.extend(
+            [
+                "enrichment_status",
+                "enrichment_error",
+                "summary_status",
+                "summary_error",
+                "summary_retry_count",
+                "summary_retry_at",
+                "transcript_status",
+                "transcript_error",
+                "transcript_generated",
+                "media_archive_status",
+                "media_archive_error",
+                "media_archive_retry_count",
+                "media_archive_retry_at",
+                "article_audio_status",
+                "article_audio_error",
+                "article_audio_generated",
+                "article_audio_poll_at",
+            ]
+        )
+        # Reprocess should always force a fresh metadata pass, even when the current
+        # row already looks enrichment-complete.
+        item.enrichment_status = EnrichmentStatus.PENDING
+        item.enrichment_error = ""
+        item.save(update_fields=sorted(set(update_fields)))
+        return item
 
 
 def describe_item_downstream_normalization(item: Item) -> list[str]:

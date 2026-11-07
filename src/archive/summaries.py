@@ -269,9 +269,21 @@ def _parse_generated_summary(raw_content: str) -> GeneratedSummary:
     except json.JSONDecodeError as exc:
         raise SummaryGenerationError("Summary response was not valid JSON") from exc
 
-    short_summary = _normalize_text(str(payload.get("short_summary", "")))
-    long_summary = _normalize_text(str(payload.get("long_summary", "")))
-    tags = _normalize_tags(payload.get("tags"))
+    if not isinstance(payload, dict):
+        raise SummaryGenerationError("Summary response must be an object")
+    short = payload.get("short_summary")
+    long = payload.get("long_summary")
+    raw_tags = payload.get("tags")
+    if (
+        not isinstance(short, str)
+        or not isinstance(long, str)
+        or not isinstance(raw_tags, list)
+        or not all(isinstance(tag, str) and _normalize_text(tag).strip(" -#") for tag in raw_tags)
+    ):
+        raise SummaryGenerationError("Summary response fields must contain text")
+    short_summary = _normalize_text(short)
+    long_summary = _normalize_text(long)
+    tags = _normalize_tags(raw_tags)
 
     if not short_summary or not long_summary or not tags:
         raise SummaryGenerationError("Summary response did not include all required fields")

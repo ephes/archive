@@ -738,6 +738,12 @@ reservations in the publishing transaction) or discard them with
 `delete_unreferenced_archive_media_paths(..., owns_reservation=True)`; the worker
 service handles this lifecycle automatically.
 
+Generated summary output must be a JSON object with nonempty string
+`short_summary` and `long_summary` values and an array of nonempty string tags.
+Malformed values fail generation instead of publishing stringified JSON values;
+existing summaries remain intact and the normal retry policy applies. Valid tags
+retain whitespace normalization, lowercasing, deduplication and the eight-tag cap.
+
 ## Upstream API response limits
 
 Summary, transcription (including plain-text transcripts), and article-audio JSON

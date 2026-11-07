@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Reject nonpositive reclassification limits before any selection or mutation.
+- Keep exact ongoing failure-streak membership independently of retry events;
+  backfill existing streaks and prune all attempt events beyond 30 days.
+
 - Stream historical reclassification selections without transcript payloads and
   decide/apply each item from its current row in one transaction.
 

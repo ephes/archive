@@ -293,3 +293,15 @@ class ProcessingEvent(models.Model):
                 fields=["step", "succeeded", "occurred_at"], name="archive_proc_event_step"
             ),
         ]
+
+
+class ProcessingFailureItem(models.Model):
+    """Exact membership of an ongoing streak, bounded by distinct failed items."""
+
+    step = models.CharField(max_length=32, choices=ProcessingStep.choices)
+    item_id = models.PositiveIntegerField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["step", "item_id"], name="archive_failure_step_item")
+        ]

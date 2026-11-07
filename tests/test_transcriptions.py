@@ -438,8 +438,9 @@ def test_find_transcript_gaps_reports_uncovered_stretches_including_the_start() 
     "segments",
     [None, "segments", [{"start": "0", "end": 1}], [["0", "1"]], [{"start": True, "end": 9}]],
 )
-def test_find_transcript_gaps_ignores_unreadable_segments(segments) -> None:
-    assert find_transcript_gaps(segments, max_gap_seconds=1) == []
+def test_find_transcript_gaps_rejects_unreadable_segments(segments) -> None:
+    with pytest.raises(TranscriptionGenerationError, match="segment"):
+        find_transcript_gaps(segments, max_gap_seconds=1)
 
 
 @pytest.mark.django_db
@@ -541,3 +542,87 @@ def test_generate_item_transcript_rejects_unsupported_archived_media(monkeypatch
 
     with pytest.raises(TranscriptionGenerationError, match="Unsupported archived audio type"):
         generate_item_transcript(item=item)
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [(0, float("inf")), (float("nan"), 1), (0, 10**500), (-1, 1), (2, 1)],
+)
+def test_gap_check_rejects_invalid_time_domain(start, end) -> None:
+    with pytest.raises(TranscriptionGenerationError, match="segment"):
+        find_transcript_gaps(
+            [{"start": start, "end": end}, {"start": 900, "end": 905}],
+            max_gap_seconds=600,
+        )
+
+
+@pytest.mark.parametrize(
+    "intervals",
+    [((900, 905), (0, 900)), ((10, 20), (0, 15), (5, 8)), ((0, 15), (5, 8), (10, 20))],
+)
+def test_gap_check_uses_interval_union(intervals) -> None:
+    assert (
+        find_transcript_gaps(
+            [{"start": start, "end": end} for start, end in intervals], max_gap_seconds=1
+        )
+        == []
+    )
+
+
+def test_gap_check_preserves_threshold_and_input_order() -> None:
+    segments = [{"start": 20, "end": 25}, {"start": 5, "end": 10}]
+    assert find_transcript_gaps(segments, max_gap_seconds=5) == [(10.0, 20.0)]
+    assert segments == [{"start": 20, "end": 25}, {"start": 5, "end": 10}]
+
+
+@pytest.mark.parametrize("text", [None, {}, [], True, 12, 1.5, "", "  "])
+def test_batch_result_requires_nonempty_string_text(text) -> None:
+    from archive.transcriptions import _parse_batch_transcription_job_update
+
+    with pytest.raises(TranscriptionGenerationError, match="transcript text"):
+        _parse_batch_transcription_job_update(
+            {"id": "job-synthetic", "state": "succeeded", "result": {"text": text}}
+        )
+
+
+def test_batch_result_preserves_unicode_text() -> None:
+    from archive.transcriptions import _parse_batch_transcription_job_update
+
+    text = " Grüße 👋\n第二行 "
+    update = _parse_batch_transcription_job_update(
+        {"id": "job-synthetic", "state": "succeeded", "result": {"text": text}}
+    )
+    assert update.transcript == text.strip()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("malformed_text", [False, True])
+def test_generate_transcript_rejects_malformed_batch_evidence(
+    monkeypatch, settings, malformed_text
+) -> None:
+    item = _oversized_archived_audio_item()
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
+    settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
+    monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
+    requested: list[str] = []
+    response = _batch_job_urlopen(
+        segments=[{"start": 0, "end": float("inf")}, {"start": 900, "end": 905}],
+        requested=requested,
+    )
+
+    def fake_urlopen(request, timeout):
+        if malformed_text and request.full_url.endswith("/jobs/job-123"):
+            return _FakeResponse(
+                json.dumps(
+                    {"id": "job-123", "state": "succeeded", "result": {"text": None}}
+                ).encode(),
+                content_type="application/json",
+                url=request.full_url,
+            )
+        return response(request, timeout)
+
+    monkeypatch.setattr("archive.transcriptions.urlopen", fake_urlopen)
+    expected = "did not return transcript text" if malformed_text else "segment times were invalid"
+    with pytest.raises(TranscriptionGenerationError, match=expected):
+        generate_item_transcript(item=item)
+    assert any(url.endswith("transcript.json") for url in requested) is not malformed_text

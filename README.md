@@ -516,7 +516,11 @@ just manage reprocess_items --ids 152-176 --only summary --stagger 60 --hold-art
 just manage reprocess_items --ids 408 --only transcript --regenerate --dry-run
 ```
 
-- `--ids` takes ids and inclusive ranges (`318 152-176`, commas also work).
+- `--ids` takes positive ids and inclusive ranges (`318 152-176`, commas also work),
+  processed in sorted, deduplicated order. Each invocation allows at most 10,000 unique
+  ids, including missing items; overlapping ranges count only once. Oversized ranges or
+  cumulative selections fail before expansion of the offending range or database access.
+  Split larger selections into separate invocations.
 - `--only` is `summary`, `media_archive`, `transcript`, or `article_audio`. Only items whose
   step is `failed` are re-queued; every other item is reported as skipped with its current
   state. `transcript` also skips items without a transcribable media source.
@@ -541,6 +545,11 @@ just manage reprocess_items --ids 408 --only transcript --regenerate --dry-run
   `article_audio`: the worker runs pending article audio whenever it processes the item for
   another step, so no due time can hold it back. Not available for `transcript` either: the
   worker claims every pending transcript right away.
+  Staggering must be nonnegative, and the entire prospective schedule for currently
+  eligible items must fit the datetime range before any item is changed, including
+  article-audio holds. Invalid schedules raise a command error, also in dry-run mode.
+  Items that change concurrently are still rechecked and skipped without consuming a
+  stagger slot.
 - A successful summary immediately starts paid article audio (text-to-speech) for articles
   whose article audio is `pending`, in the same worker pass. `--hold-article-audio` (with
   `--only summary`) marks that pending, not yet submitted article audio as `failed` with a

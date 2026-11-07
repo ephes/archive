@@ -12,6 +12,7 @@ from archive.models import EnrichmentStatus, Item, ItemKind
 from archive.transcriptions import can_transcribe_item
 
 STEPS = ("summary", "media_archive", "transcript", "article_audio")
+MAX_SELECTED_ITEMS = 10_000
 HOLD_ARTICLE_AUDIO_ERROR = (
     "Held by reprocess_items --hold-article-audio; "
     "release with reprocess_items --only article_audio"
@@ -29,7 +30,7 @@ IN_FLIGHT = Q(
 
 
 def parse_item_ids(tokens: list[str]) -> list[int]:
-    """Parse ``318`` / ``152-176`` tokens into sorted, unique item ids."""
+    """Parse ``318`` / ``152-176`` into at most 10,000 sorted, unique item ids."""
     ids: set[int] = set()
     for token in tokens:
         for part in token.split(","):
@@ -44,6 +45,12 @@ def parse_item_ids(tokens: list[str]) -> list[int]:
                 raise CommandError(f"Invalid item id or range: {part!r}") from exc
             if start < 1 or end < start:
                 raise CommandError(f"Invalid item id or range: {part!r}")
+            range_size = end - start + 1
+            if range_size > MAX_SELECTED_ITEMS:
+                raise CommandError(f"--ids selects more than {MAX_SELECTED_ITEMS:,} unique items.")
+            overlap = sum(start <= item_id <= end for item_id in ids)
+            if len(ids) + range_size - overlap > MAX_SELECTED_ITEMS:
+                raise CommandError(f"--ids selects more than {MAX_SELECTED_ITEMS:,} unique items.")
             ids.update(range(start, end + 1))
     if not ids:
         raise CommandError("No item ids given.")
@@ -61,7 +68,9 @@ class Command(BaseCommand):
             "--ids",
             nargs="+",
             required=True,
-            help="Item ids and inclusive ranges, e.g. --ids 318 152-176.",
+            help=(
+                "Item ids and inclusive ranges, e.g. --ids 318 152-176; at most 10,000 unique ids."
+            ),
         )
         parser.add_argument(
             "--only",
@@ -126,6 +135,19 @@ class Command(BaseCommand):
         item_ids = parse_item_ids(options["ids"])
         items = Item.objects.in_bulk(item_ids)
         now = timezone.now()
+        skip_reasons = {
+            item_id: _skip_reason(item, step, regenerate=regenerate)
+            for item_id, item in items.items()
+        }
+        eligible_count = sum(not reason for reason in skip_reasons.values())
+        try:
+            # With nonnegative staggering, the last prospective retry bounds all
+            # earlier ones. Concurrent skips can only shorten this schedule.
+            now + timedelta(seconds=stagger * max(eligible_count - 1, 0))
+        except OverflowError as exc:
+            raise CommandError(
+                "--stagger puts the retry schedule outside the datetime range."
+            ) from exc
         prefix = "[dry-run] " if dry_run else ""
         queued = skipped = held = 0
 
@@ -135,7 +157,7 @@ class Command(BaseCommand):
                 self.stdout.write(f"{prefix}item {item_id}: skipped, not found")
                 skipped += 1
                 continue
-            reason = _skip_reason(item, step, regenerate=regenerate)
+            reason = skip_reasons[item_id]
             if reason:
                 self.stdout.write(f"{prefix}item {item_id}: skipped, {reason}")
                 skipped += 1

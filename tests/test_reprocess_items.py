@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import io
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.utils import timezone
 
+from archive.management.commands import reprocess_items
 from archive.management.commands.reprocess_items import (
     HOLD_ARTICLE_AUDIO_ERROR,
     _requeue,
@@ -72,6 +73,126 @@ def test_parse_item_ids_accepts_ids_ranges_and_commas() -> None:
 def test_parse_item_ids_rejects_invalid_tokens(token) -> None:
     with pytest.raises(CommandError):
         parse_item_ids([token])
+
+
+def test_huge_selection_is_rejected_before_range_expansion_or_database_read(monkeypatch) -> None:
+    def unexpected(*args, **kwargs):
+        pytest.fail("oversized selection must fail before expansion or database access")
+
+    monkeypatch.setattr(reprocess_items, "range", unexpected, raising=False)
+    monkeypatch.setattr(Item.objects, "in_bulk", unexpected)
+    with pytest.raises(CommandError, match="10,000"):
+        run("--ids", "1-999999999999", "--only", "summary")
+
+
+def test_selection_limit_counts_unique_ids_and_checks_before_each_expansion(monkeypatch) -> None:
+    assert parse_item_ids(["1-10000", "5000-10000", "1,10000"]) == list(range(1, 10001))
+    expanded = []
+
+    def tracked_range(start, stop):
+        expanded.append((start, stop))
+        assert len(expanded) == 1, "cumulative limit must fail before the next expansion"
+        return range(start, stop)
+
+    monkeypatch.setattr(reprocess_items, "range", tracked_range, raising=False)
+    with pytest.raises(CommandError, match="10,000"):
+        parse_item_ids(["1-7500", "5000-10001"])
+    assert expanded == [(1, 7501)]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("stagger", [10**30, 300_000_000_000])
+def test_stagger_overflow_is_rejected_before_any_requeue(monkeypatch, dry_run, stagger) -> None:
+    items = [failed_summary_article(), failed_summary_article()]
+    monkeypatch.setattr(timezone, "now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("invalid schedule must fail before any requeue")
+
+    monkeypatch.setattr(reprocess_items, "_requeue", unexpected)
+    args = [
+        "--ids",
+        *(str(item.pk) for item in items),
+        "--only",
+        "summary",
+        "--stagger",
+        str(stagger),
+        "--hold-article-audio",
+    ]
+    if dry_run:
+        args.append("--dry-run")
+    with pytest.raises(CommandError, match="--stagger"):
+        run(*args)
+    for item in items:
+        item.refresh_from_db()
+        assert item.summary_retry_count == 4
+        assert item.summary_retry_at is None
+        assert item.article_audio_status == PENDING
+
+
+def test_stagger_preflight_checks_last_eligible_retry(monkeypatch) -> None:
+    items = [failed_summary_article() for _ in range(3)]
+    monkeypatch.setattr(timezone, "now", lambda: datetime(9999, 12, 31, tzinfo=UTC))
+    with pytest.raises(CommandError, match="--stagger"):
+        run("--ids", *(str(item.pk) for item in items), "--only", "summary", "--stagger", "43200")
+    for item in items:
+        item.refresh_from_db()
+        assert item.summary_retry_count == 4
+        assert item.summary_retry_at is None
+
+
+def test_stagger_preflight_excludes_missing_and_ineligible_items() -> None:
+    item = failed_summary_article()
+    skipped = failed_summary_article(summary_status=COMPLETE)
+    out = run(
+        "--ids",
+        str(item.pk),
+        str(skipped.pk),
+        "99999",
+        "--only",
+        "summary",
+        "--stagger",
+        str(10**30),
+    )
+    assert "Re-queued summary for 1 item(s), skipped 2." in out
+    item.refresh_from_db()
+    assert item.summary_retry_count == 0
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_zero_stagger_uses_the_same_due_time(monkeypatch, dry_run) -> None:
+    items = [failed_summary_article(), failed_summary_article()]
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    monkeypatch.setattr(timezone, "now", lambda: now)
+    args = ["--ids", *(str(item.pk) for item in items), "--only", "summary"]
+    if dry_run:
+        args.append("--dry-run")
+    out = run(*args)
+    assert out.count(f"due {now.isoformat()}") == 2
+    for item in items:
+        item.refresh_from_db()
+        assert item.summary_retry_at == (None if dry_run else now)
+
+
+def test_concurrent_skip_does_not_consume_a_stagger_slot(monkeypatch) -> None:
+    items = [failed_summary_article() for _ in range(3)]
+    original_requeue = reprocess_items._requeue
+    attempted = []
+
+    def concurrent_requeue(item_id, *args, **kwargs):
+        attempted.append(item_id)
+        if item_id == items[1].pk:
+            Item.objects.filter(pk=item_id).update(summary_status=COMPLETE)
+        return original_requeue(item_id, *args, **kwargs)
+
+    monkeypatch.setattr(reprocess_items, "_requeue", concurrent_requeue)
+    out = run("--ids", *(str(item.pk) for item in items), "--only", "summary", "--stagger", "60")
+    assert attempted == [item.pk for item in items]
+    for item in items:
+        item.refresh_from_db()
+    assert items[2].summary_retry_at - items[0].summary_retry_at == timedelta(seconds=60)
+    assert items[1].summary_retry_at is None
+    assert "changed concurrently" in out
 
 
 def test_summary_requeue_resets_only_the_summary_retry_state() -> None:

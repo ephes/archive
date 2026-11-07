@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Check reprocessing ranges and the cumulative 10,000 unique-id limit before
+  expanding each range or accessing the database, preserving sorted/deduplicated selections.
+- Reject unrepresentable staggered retry schedules before requeuing or holding
+  any items, including during dry runs; retain per-item concurrency checks.
+
 - Require JSON artifacts and nonempty readable segments when batch coverage checking
   is enabled; keep the explicit nonpositive-threshold compatibility opt-out.
 - Retain delayed health outcomes as attempts without reversing newer step state or

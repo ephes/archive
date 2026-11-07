@@ -183,12 +183,12 @@ def test_health_endpoint_rejects_writes(client) -> None:
 
 
 @pytest.mark.django_db
-def test_health_endpoint_query_count_is_bounded(client, django_assert_max_num_queries) -> None:
+def test_health_endpoint_query_count_is_bounded(client, django_assert_num_queries) -> None:
     for item_id in range(20):
         for step in ProcessingStep.values:
             record_step_outcome(step, succeeded=False, item_id=item_id)
 
-    with django_assert_max_num_queries(2 + len(ProcessingStep)):
+    with django_assert_num_queries(3):
         assert client.get("/api/health/").status_code == 200
 
 

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Recheck public visibility when hydrating ranked search results.
+- Group overview navigation by local ISO week in the database and fetch only card
+  columns, leaving large content/processing fields deferred.
+- Batch all active health failure-streak item counts into one grouped query.
+
 - Reject nonpositive reclassification limits before any selection or mutation.
 - Keep exact ongoing failure-streak membership independently of retry events;
   backfill existing streaks and prune all attempt events beyond 30 days.

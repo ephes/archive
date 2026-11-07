@@ -1,5 +1,10 @@
+import hashlib
+import json
+
 from django.contrib.auth.forms import AuthenticationForm
-from django.forms import ModelForm, Textarea
+from django.core import signing
+from django.core.exceptions import ValidationError
+from django.forms import CharField, HiddenInput, ModelForm, Textarea
 
 from archive.models import EnrichmentStatus, Item
 from archive.services import apply_operator_kind_override, normalize_item_kind_dependent_statuses
@@ -72,3 +77,37 @@ class ItemForm(ModelForm):
             item.save()
             self.save_m2m()
         return item
+
+
+class ItemAdminForm(ItemForm):
+    content_revision = CharField(required=False, widget=HiddenInput)
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Cover all persisted state, including generated flags and worker leases.
+        # Admin's POST transaction starts before loading this instance; SQLite's
+        # configured IMMEDIATE mode holds the write reservation through save.
+        state = [field.value_to_string(self.instance) for field in Item._meta.concrete_fields]
+        digest = hashlib.sha256(json.dumps(state).encode()).hexdigest()
+        self._revision = f"{self.instance.pk}:{digest}"
+        if self.instance.pk:
+            self.initial["content_revision"] = self._signer().sign(self._revision)
+
+    @staticmethod
+    def _signer():
+        return signing.Signer(salt="archive.admin.item")
+
+    def clean(self):
+        cleaned = super().clean()
+        if self.instance.pk:
+            try:
+                revision = self._signer().unsign(cleaned.get("content_revision", ""))
+            except signing.BadSignature:
+                revision = None
+            if revision != self._revision:
+                raise ValidationError(
+                    "This item changed since you opened it. Your submitted values are "
+                    "shown below and have not been saved. Copy your edits, reload the "
+                    "item, and reapply them to the current content."
+                )
+        return cleaned

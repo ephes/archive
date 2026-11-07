@@ -697,6 +697,23 @@ Operator workflow in Django admin:
 - manually override `kind` when automatic classification is wrong; supported values include `quote` for daybook/weeknote quote items
 - use `Reprocess selected items` to re-queue one or more items for a fresh enrichment pass
 
+Admin change forms carry a signed fingerprint of the loaded item's persisted state.
+If a worker or another editor changes that state before submission, the save is refused
+and submitted values remain displayed. Copy the edits, reload the item, review the current
+content, and reapply the intended changes. Resubmitting the conflict page does not bypass
+this check or turn stale generated text into an operator override. New items and fresh
+manual overrides retain their existing behavior. Validation and save share the admin POST
+transaction and SQLite's configured IMMEDIATE write reservation.
+
+Reprocessing reloads each selected row under the same short write reservation before
+classification and status changes. Rows with an active processing stage are skipped
+and counted separately; retry after the worker finishes (or use explicit stale recovery).
+Only names retired from the current row are queued for reference-aware storage cleanup
+after commit; external storage work stays outside the mutation transaction.
+Regression tests in `tests/test_admin_mutations.py` use synthetic content and independent
+connections to temporary SQLite files in both rollback-journal and WAL modes:
+`uv run pytest tests/test_admin_mutations.py`.
+
 The reprocess action is intentionally per-item or small-batch in this slice. It does not trigger any implicit
 bulk historical replay. It also does not currently clear an existing generated article-audio artifact or job
 reference on its own, so a true article-audio regeneration still requires clearing the stored article-audio

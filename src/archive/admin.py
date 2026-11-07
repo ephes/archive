@@ -8,14 +8,14 @@ from archive.classification import (
     podcast_feed_decision_for_item,
     selected_media_from_evidence,
 )
-from archive.forms import ItemForm
+from archive.forms import ItemAdminForm
 from archive.models import Item
 from archive.services import describe_item_downstream_normalization, request_item_reprocess
 
 
 @admin.register(Item)
 class ItemAdmin(admin.ModelAdmin):
-    form = ItemForm
+    form = ItemAdminForm
     actions = ("reprocess_selected_items",)
     list_display = (
         "display_title",
@@ -113,7 +113,14 @@ class ItemAdmin(admin.ModelAdmin):
     @admin.action(description="Reprocess selected items")
     def reprocess_selected_items(self, request, queryset) -> None:
         count = 0
+        skipped = 0
         for item in queryset:
             request_item_reprocess(item)
-            count += 1
-        self.message_user(request, f"Queued {count} item(s) for reprocessing.")
+            if item._has_processing_status():
+                skipped += 1
+            else:
+                count += 1
+        self.message_user(
+            request,
+            f"Queued {count} item(s) for reprocessing. Skipped {skipped} active item(s).",
+        )

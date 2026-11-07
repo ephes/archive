@@ -743,7 +743,13 @@ service handles this lifecycle automatically.
 Summary, transcription (including plain-text transcripts), and article-audio JSON
 API responses are capped at 8 MiB. Larger responses fail with the stage's existing
 error and retry behavior. HTTP error diagnostics read at most 64 KiB. Binary
-article-audio downloads retain their separate configured media limit.
+article-audio downloads retain their separate configured media limit. Authenticated
+exchanges run in a disposable transport process with one elapsed timeout covering
+DNS, connect, same-origin redirects, response reads (including errors), and
+transport teardown. Timeout kills and reaps that process; no timed-out request
+thread remains. Transcription polling passes only its remaining elapsed budget
+and rejects responses arriving at or after its deadline. The separate worker
+stale-processing recovery window is unchanged.
 
 ## Login protection
 
@@ -790,9 +796,11 @@ When Voxhelm generation completes, the worker downloads the MP3 into a temporary
 file in 64 KiB chunks, then saves it in the configured `archive_media` storage under
 `article-audio/`. Older generated items are lazily copied on their first GET or HEAD.
 Subsequent requests use storage without contacting Voxhelm. Downloads use a 30-second
-socket timeout (the worker uses its article-audio timeout) and the existing
+whole-transfer elapsed budget (the worker uses its article-audio timeout) and the existing
 `ARCHIVE_ARTICLE_AUDIO_MAX_BYTES` cap. Empty, oversized, truncated or non-MP3 responses
-are rejected without publishing a partial copy. Backfill failure returns `503` with
+are rejected without publishing a partial copy. Content type and declared oversized
+length are rejected before reading the body; the byte cap also applies when length
+is absent or inaccurate. Expiry closes the upstream and removes temporary downloads. Backfill failure returns `503` with
 `Retry-After: 60`; retrying can create the copy later. Generation is complete once
 the Voxhelm artifact exists. Worker copy failures are logged; the completed artifact
 and generated flag are retained, and the next GET/HEAD retries the copy. No new

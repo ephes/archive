@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bound authenticated upstream exchanges, including DNS, redirects, error bodies
+  and transport teardown, by one elapsed deadline in a disposable process.
+- Stop transcription polling before its deadline expires and reject late completion.
+
 - Reserve login budgets before password verification, preserving other pending attempts
   on successful login and ignoring settlement from expired windows.
 - Bound metadata DNS, connections, redirects and body reads by a single elapsed fetch

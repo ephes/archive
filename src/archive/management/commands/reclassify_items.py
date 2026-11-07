@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import nullcontext
 from typing import Any
 from urllib.parse import urlparse
 
 from django.core.management.base import BaseCommand, CommandError
+from django.db import transaction
 
 from archive.classification import (
     CURRENT_CLASSIFICATION_ENGINE_VERSION,
@@ -104,58 +107,77 @@ class Command(BaseCommand):
         if not options["all"] and not selectors_used:
             raise CommandError("Provide a selector such as --item-id/--host/--rule, or use --all.")
 
-        items = self._matching_items(options)
         mode = "apply" if options["apply"] else "dry-run"
-        if not items:
-            self.stdout.write(f"No items matched ({mode}).")
-            return
-
-        self.stdout.write(self._mode_banner(options))
-
         changed = 0
         unchanged = 0
-        for item in items:
-            decision = classify_item(
-                original_url=item.original_url,
-                current_kind=item.kind,
-                audio_url=item.audio_url,
-                media_url=item.media_url,
-                existing_rule=item.classification_rule,
-                existing_evidence=item.classification_evidence,
-            )
-            change_descriptions = self._change_descriptions(
-                item=item,
-                decision=decision,
-                normalize_downstream=options["normalize_downstream"],
-            )
-
-            if change_descriptions:
-                changed += 1
-                label = "UPDATED" if options["apply"] else "WOULD UPDATE"
-                self.stdout.write(f"{label} item {item.pk}: {item.original_url}")
-                for description in change_descriptions:
-                    self.stdout.write(f"  - {description}")
+        for item_id in self._matching_items(options):
+            # Decide from the current row, holding the lock through normalization
+            # and publication. SQLite rejects a competing write during this read
+            # transaction rather than allowing a stale publication.
+            with transaction.atomic() if options["apply"] else nullcontext():
+                current = Item.objects.filter(pk=item_id)
                 if options["apply"]:
-                    update_fields = set_item_classification(item=item, decision=decision)
-                    if options["normalize_downstream"]:
-                        normalize_item_downstream_state(item=item, update_fields=update_fields)
-                    if update_fields:
-                        item.save(update_fields=sorted(set(update_fields)))
+                    current = current.select_for_update()
+                item = current.first()
+                if item is None:
+                    continue
+                did_change, lines = self._process_item(item, options)
+            if changed + unchanged == 0:
+                self.stdout.write(self._mode_banner(options))
+            for line in lines:
+                self.stdout.write(line)
+            if did_change:
+                changed += 1
             else:
                 unchanged += 1
-                self.stdout.write(f"UNCHANGED item {item.pk}: {item.original_url}")
-                self.stdout.write(
-                    "  - "
-                    f"kind={item.kind}; "
-                    f"rule={item.classification_rule or 'none'}; "
-                    f"engine_version={item.classification_engine_version}"
-                )
 
+        inspected = changed + unchanged
+        if not inspected:
+            self.stdout.write(f"No items matched ({mode}).")
+            return
         self.stdout.write(
-            f"Summary: inspected={len(items)} changed={changed} unchanged={unchanged} mode={mode}"
+            f"Summary: inspected={inspected} changed={changed} unchanged={unchanged} mode={mode}"
         )
 
-    def _matching_items(self, options: dict[str, Any]) -> list[Item]:
+    def _process_item(self, item: Item, options: dict[str, Any]) -> tuple[bool, list[str]]:
+        lines = []
+        decision = classify_item(
+            original_url=item.original_url,
+            current_kind=item.kind,
+            audio_url=item.audio_url,
+            media_url=item.media_url,
+            existing_rule=item.classification_rule,
+            existing_evidence=item.classification_evidence,
+        )
+        change_descriptions = self._change_descriptions(
+            item=item,
+            decision=decision,
+            normalize_downstream=options["normalize_downstream"],
+        )
+
+        if change_descriptions:
+            label = "UPDATED" if options["apply"] else "WOULD UPDATE"
+            lines.append(f"{label} item {item.pk}: {item.original_url}")
+            for description in change_descriptions:
+                lines.append(f"  - {description}")
+            if options["apply"]:
+                update_fields = set_item_classification(item=item, decision=decision)
+                if options["normalize_downstream"]:
+                    normalize_item_downstream_state(item=item, update_fields=update_fields)
+                if update_fields:
+                    item.save(update_fields=sorted(set(update_fields)))
+        else:
+            lines.append(f"UNCHANGED item {item.pk}: {item.original_url}")
+            lines.append(
+                "  - "
+                f"kind={item.kind}; "
+                f"rule={item.classification_rule or 'none'}; "
+                f"engine_version={item.classification_engine_version}"
+            )
+
+        return bool(change_descriptions), lines
+
+    def _matching_items(self, options: dict[str, Any]) -> Iterator[int]:
         queryset = Item.objects.order_by("id")
         if options["item_ids"]:
             queryset = queryset.filter(pk__in=options["item_ids"])
@@ -172,14 +194,24 @@ class Command(BaseCommand):
 
         allowed_hosts = {host.strip().lower() for host in options["host"] if host.strip()}
         limit = options["limit"]
-        items: list[Item] = []
-        for item in queryset.iterator():
-            if allowed_hosts and urlparse(item.original_url).netloc.lower() not in allowed_hosts:
-                continue
-            items.append(item)
-            if limit is not None and len(items) >= limit:
-                break
-        return items
+        matched = 0
+        last_id = 0
+        while True:
+            # Exhaust each cursor before opening a row transaction. A live
+            # iterator on SQLite would pin the selection's read snapshot.
+            batch = list(queryset.filter(pk__gt=last_id).values_list("id", "original_url")[:200])
+            if not batch:
+                return
+            for item_id, original_url in batch:
+                if allowed_hosts and urlparse(original_url).netloc.lower() not in allowed_hosts:
+                    continue
+                yield item_id
+                matched += 1
+                if limit is not None and matched >= limit:
+                    return
+            last_id = batch[-1][0]
+            if len(batch) < 200:
+                return
 
     def _mode_banner(self, options: dict[str, Any]) -> str:
         if options["apply"] and options["normalize_downstream"]:

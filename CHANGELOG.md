@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Stream historical reclassification selections without transcript payloads and
+  decide/apply each item from its current row in one transaction.
+
 - Fence failure bookkeeping against current source, result and processing state;
   preserve newer successes and count unchanged-source failures under a row lock.
 - Return invalid-JSON 400 responses for excessive API JSON nesting.

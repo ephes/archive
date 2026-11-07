@@ -676,6 +676,14 @@ back to a generic `link` classification until the next metadata enrichment pass 
 
 Historical replay workflow:
 
+Selection streams only IDs and URLs in bounded batches, in ID order. Each item is
+re-read under a transaction/row lock before deciding and applying classification
+and normalization, so edits and completed worker results since selection are used.
+Deleted rows are skipped. Each selection batch is fully fetched before processing,
+so no live selection cursor pins a stale SQLite snapshot. Dry-runs use current rows
+without write transactions; apply-mode output is emitted after each row commits.
+The command does not delete stored media.
+
 - use `just manage reclassify_items --item-id <id>` for a dry-run replay of one or more items
 - use selectors such as `--host <host>`, `--rule <rule>`, `--empty-rule`, `--empty-evidence`, or
   `--stale-only` to narrow a historical replay pass

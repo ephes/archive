@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Protect search-index repair with real SQLite drift, repeat-rebuild, visibility,
+  refusal/failure and success-count regressions; command behavior is unchanged.
+
 - Refuse stale admin change forms while preserving submitted edits for conflict recovery.
 - Reload current rows before admin reprocessing; retain active worker attempts and retire
   only current media references, with storage cleanup deferred until commit.

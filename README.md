@@ -302,7 +302,12 @@ Important values:
 - `ARCHIVE_TRANSCRIPTION_MODEL` defaults to `gpt-4o-mini-transcribe`
 - `ARCHIVE_TRANSCRIPTION_POLL_SECONDS` defaults to `30`
 - `ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS` defaults to `600`: a Voxhelm batch transcript whose
-  segments leave a longer stretch of audio uncovered is rejected as incomplete; `0` disables the check
+  segments leave a longer stretch of audio uncovered is rejected as incomplete; `0` disables the check.
+  Coverage uses the sorted union of intervals without changing transcript order. Segment times
+  must be finite, representable, nonnegative numbers with start <= end; malformed evidence
+  fails transcription, including a missing/null segment list or non-object entries in a JSON
+  artifact. Successful batch results must contain nonblank string text; other JSON
+  types are rejected instead of converted to text.
 - `ARCHIVE_ARTICLE_AUDIO_API_KEY` defaults to `ARCHIVE_TRANSCRIPTION_API_KEY`
 - `ARCHIVE_ARTICLE_AUDIO_API_BASE` defaults to `ARCHIVE_TRANSCRIPTION_API_BASE`
 - `ARCHIVE_ARTICLE_AUDIO_MODEL` defaults to `tts-1`

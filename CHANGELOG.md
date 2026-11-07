@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Reject missing/unreadable batch segment lists, invalid/nonfinite segment times and
+  malformed transcript text; compute
+  coverage from the interval union so out-of-order/overlapping segments remain valid.
+
 - Recheck public visibility when hydrating ranked search results.
 - Group overview navigation by local ISO week in the database and fetch only card
   columns, leaving large content/processing fields deferred.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import mimetypes
 import re
 import uuid
@@ -315,18 +316,22 @@ def find_transcript_gaps(
 ) -> list[tuple[float, float]]:
     """Return ``(start, end)`` stretches longer than ``max_gap_seconds`` without a segment.
 
-    Malformed segment lists yield no gaps: the check only rejects what it can read.
+    Reject malformed evidence; measure coverage from the union without reordering text.
     """
     if not isinstance(segments, list):
-        return []
-    gaps: list[tuple[float, float]] = []
-    covered_until = 0.0
+        raise TranscriptionGenerationError("Batch transcription segment list was unreadable")
+    intervals: list[tuple[float, float]] = []
     for segment in segments:
         if not isinstance(segment, dict):
-            return []
+            raise TranscriptionGenerationError("Batch transcription segment was unreadable")
         start, end = _seconds(segment.get("start")), _seconds(segment.get("end"))
-        if start is None or end is None:
-            return []
+        if start is None or end is None or start > end:
+            raise TranscriptionGenerationError("Batch transcription segment times were invalid")
+        intervals.append((start, end))
+
+    gaps: list[tuple[float, float]] = []
+    covered_until = 0.0
+    for start, end in sorted(intervals):
         if start - covered_until > max_gap_seconds:
             gaps.append((covered_until, start))
         covered_until = max(covered_until, end)
@@ -336,7 +341,11 @@ def find_transcript_gaps(
 def _seconds(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    try:
+        seconds = float(value)
+    except OverflowError:
+        return None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
 def _format_seconds(seconds: float) -> str:
@@ -486,8 +495,8 @@ def _parse_batch_transcription_job_update(
         result = payload.get("result")
         if not isinstance(result, dict):
             raise TranscriptionGenerationError("Batch transcription job result was missing")
-        transcript = str(result.get("text", "")).strip()
-        if not transcript:
+        text = result.get("text")
+        if not isinstance(text, str) or not text.strip():
             raise TranscriptionGenerationError(
                 "Batch transcription job did not return transcript text"
             )
@@ -498,7 +507,7 @@ def _parse_batch_transcription_job_update(
         return BatchTranscriptionJobUpdate(
             job_id=job_id,
             state=state,
-            transcript=transcript,
+            transcript=text.strip(),
             json_artifact_path=json_artifact_path,
         )
 

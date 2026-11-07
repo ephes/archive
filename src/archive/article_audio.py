@@ -140,7 +140,12 @@ def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
         try:
             with NamedTemporaryFile(prefix="archive-article-audio-") as temporary:
                 size = 0
-                with urlopen(request, timeout=timeout) as response:
+                with urlopen(
+                    request,
+                    timeout=timeout,
+                    max_bytes=settings.ARCHIVE_ARTICLE_AUDIO_MAX_BYTES,
+                    audio=True,
+                ) as response:
                     content_type = response.headers.get_content_type().lower()
                     if content_type not in {"audio/mpeg", "audio/mp3"}:
                         raise ArticleAudioGenerationError("Article audio artifact is not MP3 audio")

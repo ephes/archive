@@ -449,17 +449,19 @@ def _wait_for_batch_transcription_job(
                 f"Timed out waiting for batch transcription job {current.job_id}"
             )
         sleep(min(settings.ARCHIVE_TRANSCRIPTION_POLL_SECONDS, remaining))
-        current = _poll_batch_transcription_job(
-            job_id=current.job_id,
-            timeout=max(1, int(deadline - monotonic())),
-        )
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise TranscriptionGenerationError("Timed out waiting for batch transcription job")
+        current = _poll_batch_transcription_job(job_id=current.job_id, timeout=remaining)
+        if monotonic() >= deadline:
+            raise TranscriptionGenerationError("Timed out waiting for batch transcription job")
 
     if current.is_complete:
         return current
     raise TranscriptionGenerationError(current.error_message or "Batch transcription job failed")
 
 
-def _poll_batch_transcription_job(job_id: str, timeout: int) -> BatchTranscriptionJobUpdate:
+def _poll_batch_transcription_job(job_id: str, timeout: float) -> BatchTranscriptionJobUpdate:
     request = Request(
         _api_url(f"jobs/{job_id}"),
         headers={"Authorization": f"Bearer {settings.ARCHIVE_TRANSCRIPTION_API_KEY}"},
@@ -702,7 +704,7 @@ def _encode_multipart_formdata(fields: dict[str, str], media: DownloadedMedia) -
     return boundary, b"".join(body)
 
 
-def _request_json(request: Request, timeout: int, error_prefix: str) -> dict[str, object]:
+def _request_json(request: Request, timeout: float, error_prefix: str) -> dict[str, object]:
     try:
         with urlopen(request, timeout=timeout) as response:
             payload = json.loads(read_api_response(response).decode("utf-8"))

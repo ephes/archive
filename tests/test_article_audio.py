@@ -286,7 +286,7 @@ def test_store_generated_article_audio_fetches_artifact(monkeypatch, settings) -
     settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = "tts-token"
     settings.ARCHIVE_ARTICLE_AUDIO_API_BASE = "https://voxhelm.example.test/v1"
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, **kwargs):
         assert timeout == 30
         assert (
             request.full_url == "https://voxhelm.example.test/v1/jobs/job-123/artifacts/speech.mp3"
@@ -318,7 +318,7 @@ def test_store_generated_article_audio_rejects_oversized_artifact(monkeypatch, s
     settings.ARCHIVE_ARTICLE_AUDIO_API_BASE = "https://voxhelm.example.test/v1"
     settings.ARCHIVE_ARTICLE_AUDIO_MAX_BYTES = 4
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, **kwargs):
         assert timeout == 30
         return _FakeResponse(
             b"12345",

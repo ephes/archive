@@ -95,6 +95,7 @@ def test_authenticated_calls_guard_redirects(monkeypatch, module, method, destin
     # Also catches any production call site still using ordinary urllib.urlopen.
     monkeypatch.setattr(urllib.request, "_opener", real_build(Transport()))
     imported = __import__(f"archive.{module}", fromlist=["urlopen"])
+    assert imported.urlopen is upstream_http.open_authenticated_url
     request = Request(
         "https://api.test/start",
         data=b"{}" if method == "POST" else None,
@@ -102,11 +103,11 @@ def test_authenticated_calls_guard_redirects(monkeypatch, module, method, destin
         method=method,
     )
     if destination == "https://api.test/final":
-        with imported.urlopen(request, timeout=1) as response:
+        with upstream_http._open_authenticated_url(request, timeout=1) as response:
             assert response.read() == b"{}"
         assert sent[-1][:2] == (destination, "Bearer SYNTHETIC")
     else:
         with pytest.raises(OSError):
-            imported.urlopen(request, timeout=1)
+            upstream_http._open_authenticated_url(request, timeout=1)
         assert len(sent) == 1
         assert responses[0].closed

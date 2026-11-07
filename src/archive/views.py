@@ -13,7 +13,7 @@ from django.core.paginator import EmptyPage, Paginator
 from django.core.validators import URLValidator
 from django.db import connection, transaction
 from django.db.models import Q
-from django.db.models.functions import Trim
+from django.db.models.functions import Trim, TruncWeek
 from django.http import (
     Http404,
     HttpRequest,
@@ -70,15 +70,13 @@ class ArchiveLogoutView(LogoutView):
 
 
 def _build_week_navigation(items) -> list:
-    week_pages = []
-    seen = set()
-    for shared_at in items.values_list("shared_at", flat=True):
-        page = to_week_page(shared_at)
-        if page.token in seen:
-            continue
-        seen.add(page.token)
-        week_pages.append(page)
-    return week_pages
+    weeks = (
+        items.annotate(week_start=TruncWeek("shared_at", tzinfo=timezone.get_current_timezone()))
+        .order_by("-week_start")
+        .values_list("week_start", flat=True)
+        .distinct()
+    )
+    return [to_week_page(week_start) for week_start in weeks]
 
 
 def _public_feed_items():
@@ -306,7 +304,9 @@ def overview(request: HttpRequest) -> HttpResponse:
             current_index = 0
         current_page = week_pages[current_index]
         starts_at, ends_at = week_bounds(current_page)
-        items = public_items.filter(shared_at__gte=starts_at, shared_at__lt=ends_at)
+        items = public_items.filter(shared_at__gte=starts_at, shared_at__lt=ends_at).only(
+            "id", "kind", "title", "original_url", "shared_at", "source", "short_summary", "notes"
+        )
         newer_page = week_pages[current_index - 1] if current_index > 0 else None
         older_page = week_pages[current_index + 1] if current_index + 1 < len(week_pages) else None
     else:
@@ -331,7 +331,7 @@ def overview(request: HttpRequest) -> HttpResponse:
 def search(request: HttpRequest) -> HttpResponse:
     raw_query = (request.GET.get("q") or "").strip()
     page_obj = _search_public_item_page(raw_query, request.GET.get("page") or 1)
-    items_by_id = Item.objects.in_bulk(page_obj.object_list)
+    items_by_id = Item.objects.filter(is_public=True).in_bulk(page_obj.object_list)
     results = [items_by_id[item_id] for item_id in page_obj.object_list if item_id in items_by_id]
 
     return render(

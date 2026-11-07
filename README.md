@@ -39,6 +39,14 @@ and selects only that page's ids with `LIMIT/OFFSET`; only those items are loade
 Results keep full-text relevance (`bm25`) order, then newest `shared_at` and highest id
 for ties. Totals remain exact. Blank or punctuation-only queries return no results;
 invalid page text selects the first page, and out-of-range numbers select the last page.
+The final batched object fetch rechecks public visibility, skipping rows made private or
+deleted since the FTS ID read while preserving rank. Concurrent changes can leave a page
+partially filled; this cannot revoke content already fetched.
+
+The overview discovers occupied ISO weeks with a timezone-aware database grouping in
+one query, returning one result per occupied week in newest-first order. Gaps and local
+DST/year boundaries are preserved. A second query selects only card fields (including
+title/URL and summary/notes fallbacks), leaving transcripts and processing payloads deferred.
 
 ## Week JSON Feed
 
@@ -597,7 +605,11 @@ history indefinitely or reduce `failing_items`. A success clears that step’s m
 and a new failure starts a fresh streak. The migration backfills existing active streaks
 before pruning old events. Reversing the migration restores representative
 failure events for compacted memberships, preserving distinct streak counts; old
-retry attempt totals are not reconstructed. The per-step latest timestamps are not pruned. When the migration creating these tables runs, it seeds `media_archive_youtube.last_success_at` with the `shared_at` of the newest
+retry attempt totals are not reconstructed. The per-step latest timestamps are not pruned.
+Health snapshots use two queries (states and recent attempt totals), plus one grouped
+membership count when any step is failing, independent of the number of failing steps.
+When the migration creating these tables runs, it seeds
+`media_archive_youtube.last_success_at` with the `shared_at` of the newest
 item that has archived audio from a YouTube URL (the archival happened at or after that time),
 so the YouTube age is meaningful right after the deploy instead of `null`.
 

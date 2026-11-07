@@ -99,6 +99,17 @@ def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:
         .annotate(total=Count("id"))
     }
 
+    active_steps = [step for step, state in states.items() if state.failing_since is not None]
+    failing_counts = {}
+    if active_steps:
+        # Membership already enforces each state's cutoff and resets on success.
+        failing_counts = {
+            row["step"]: row["total"]
+            for row in ProcessingFailureItem.objects.filter(step__in=active_steps)
+            .values("step")
+            .annotate(total=Count("item_id"))
+        }
+
     steps: dict[str, dict[str, Any]] = {}
     for step in ProcessingStep.values:
         state = states.get(step)
@@ -113,7 +124,7 @@ def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:
             "last_failure_at": _isoformat(last_failure_at),
             "failing_since": _isoformat(failing_since),
             "failing_for_seconds": _age_seconds(failing_since, now) or 0,
-            "failing_items": _failing_items(step, failing_since),
+            "failing_items": failing_counts.get(step, 0),
         }
 
     return {
@@ -121,12 +132,6 @@ def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:
         "window_hours": int(HEALTH_WINDOW.total_seconds() // 3600),
         "steps": steps,
     }
-
-
-def _failing_items(step: str, failing_since: datetime | None) -> int:
-    if failing_since is None:
-        return 0
-    return ProcessingFailureItem.objects.filter(step=step).count()
 
 
 def _isoformat(value: datetime | None) -> str | None:

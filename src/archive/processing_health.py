@@ -17,11 +17,17 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import Count
 from django.utils import timezone
 
 from archive.media_archival import uses_supported_video_page_source
-from archive.models import Item, ProcessingEvent, ProcessingStep, ProcessingStepState
+from archive.models import (
+    Item,
+    ProcessingEvent,
+    ProcessingFailureItem,
+    ProcessingStep,
+    ProcessingStepState,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +69,13 @@ def _record_step_outcome(
         if succeeded:
             state.last_success_at = occurred_at
             state.failing_since = None
+            ProcessingFailureItem.objects.filter(step=step).delete()
         else:
             state.last_failure_at = occurred_at
             if state.failing_since is None:
                 state.failing_since = occurred_at
+            if item_id is not None and occurred_at >= state.failing_since:
+                ProcessingFailureItem.objects.get_or_create(step=step, item_id=item_id)
         state.save()
         ProcessingEvent.objects.create(
             step=step, succeeded=succeeded, item_id=item_id, occurred_at=occurred_at
@@ -75,17 +84,8 @@ def _record_step_outcome(
 
 
 def _prune_events(*, cutoff: datetime) -> None:
-    """Delete events past retention, except those of a step's ongoing failure streak.
-
-    ``failing_items`` counts the failures since ``failing_since``; pruning them would
-    report a recovery that never happened.
-    """
-    streaks = Q()
-    for step, failing_since in ProcessingStepState.objects.filter(
-        failing_since__isnull=False
-    ).values_list("step", "failing_since"):
-        streaks |= Q(step=step, occurred_at__gte=failing_since)
-    ProcessingEvent.objects.filter(occurred_at__lt=cutoff).exclude(streaks).delete()
+    """Prune old attempts; exact streak membership lives independently of retries."""
+    ProcessingEvent.objects.filter(occurred_at__lt=cutoff).delete()
 
 
 def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:
@@ -126,13 +126,7 @@ def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:
 def _failing_items(step: str, failing_since: datetime | None) -> int:
     if failing_since is None:
         return 0
-    return (
-        ProcessingEvent.objects.filter(step=step, succeeded=False, occurred_at__gte=failing_since)
-        .exclude(item_id__isnull=True)
-        .values("item_id")
-        .distinct()
-        .count()
-    )
+    return ProcessingFailureItem.objects.filter(step=step).count()
 
 
 def _isoformat(value: datetime | None) -> str | None:

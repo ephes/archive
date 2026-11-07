@@ -68,7 +68,7 @@ class Command(BaseCommand):
             "--limit",
             type=int,
             default=None,
-            help="Maximum number of matched items to inspect after filtering.",
+            help="Positive maximum matched items after filtering; omitted means all matches.",
         )
         parser.add_argument(
             "--all",
@@ -94,6 +94,9 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options) -> None:
+        if options["limit"] is not None and options["limit"] <= 0:
+            raise CommandError("--limit must be strictly positive.")
+
         selectors_used = any(
             (
                 options["item_ids"],

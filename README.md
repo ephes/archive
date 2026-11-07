@@ -591,9 +591,13 @@ Per step:
   item count once, so a value of two or more points to a systemic problem rather than one
   broken source.
 
-Outcome events are pruned after 30 days, except the failures of a step's ongoing streak (since
-its `failing_since`), so `failing_items` cannot drop to zero without a success. The per-step
-latest timestamps are not pruned. When the migration creating these tables runs, it seeds `media_archive_youtube.last_success_at` with the `shared_at` of the newest
+Outcome events are pruned after 30 days. Separate durable membership stores one row per
+distinct item in each ongoing failure streak, so repeated retries cannot grow old event
+history indefinitely or reduce `failing_items`. A success clears that step’s membership
+and a new failure starts a fresh streak. The migration backfills existing active streaks
+before pruning old events. Reversing the migration restores representative
+failure events for compacted memberships, preserving distinct streak counts; old
+retry attempt totals are not reconstructed. The per-step latest timestamps are not pruned. When the migration creating these tables runs, it seeds `media_archive_youtube.last_success_at` with the `shared_at` of the newest
 item that has archived audio from a YouTube URL (the archival happened at or after that time),
 so the YouTube age is meaningful right after the deploy instead of `null`.
 
@@ -687,6 +691,8 @@ The command does not delete stored media.
 - use `just manage reclassify_items --item-id <id>` for a dry-run replay of one or more items
 - use selectors such as `--host <host>`, `--rule <rule>`, `--empty-rule`, `--empty-evidence`, or
   `--stale-only` to narrow a historical replay pass
+- use `--limit N` for a strictly positive cap after filtering; zero/negative values
+  fail before selection or mutation. Omitting the limit inspects all matches.
 - add `--apply` to persist `kind`, `classification_rule`, `classification_evidence`, and the stored engine
   version for the selected items
 - add `--normalize-downstream` to preview or explicitly apply cheap downstream status cleanup after replay;

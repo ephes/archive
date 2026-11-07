@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Reject generated summaries with nontext summaries, nonarray tags, or malformed
+  tag entries; retain existing content and stage retry handling.
+- Verify article-copy timeout cleanup and retained references under a trickling
+  synthetic MP3 response, using the shared authenticated transfer deadline.
+
 - Bound authenticated upstream exchanges, including DNS, redirects, error bodies
   and transport teardown, by one elapsed deadline in a disposable process.
 - Stop transcription polling before its deadline expires and reject late completion.

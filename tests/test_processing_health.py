@@ -300,3 +300,130 @@ def test_seed_migration_starts_youtube_clock_at_newest_archived_youtube_item() -
     state = ProcessingStepState.objects.get(step=YOUTUBE)
     assert state.last_success_at == NOW - timedelta(days=5)
     assert state.failing_since is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("newer_success", [False, True])
+def test_older_outcome_cannot_reverse_newer_projection(newer_success) -> None:
+    _record(YOUTUBE, newer_success, 1, hours_ago=1)
+    before = processing_health_snapshot(NOW)["steps"][YOUTUBE]
+    _record(YOUTUBE, not newer_success, 2, hours_ago=2)
+    after = processing_health_snapshot(NOW)["steps"][YOUTUBE]
+    for key in STEP_KEYS - {"successes", "failures"}:
+        assert after[key] == before[key]
+    assert ProcessingEvent.objects.filter(step=YOUTUBE).count() == 2
+    assert after["successes"] == after["failures"] == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("success_first", [False, True])
+def test_equal_timestamp_success_wins_and_failures_remain_events(success_first) -> None:
+    for success in (success_first, not success_first):
+        record_step_outcome(YOUTUBE, succeeded=success, item_id=1, now=NOW)
+    record_step_outcome(YOUTUBE, succeeded=False, item_id=2, now=NOW)
+    state = processing_health_snapshot(NOW)["steps"][YOUTUBE]
+    assert state["failing_since"] is None
+    assert state["failing_items"] == 0
+    assert state["last_success_at"] == NOW.isoformat()
+    assert state["last_failure_at"] == NOW.isoformat()
+    assert ProcessingEvent.objects.filter(step=YOUTUBE).count() == 3
+
+
+@pytest.mark.django_db
+def test_equal_failure_observations_keep_distinct_streak_membership() -> None:
+    for item_id in (1, 1, 2):
+        record_step_outcome(YOUTUBE, succeeded=False, item_id=item_id, now=NOW)
+    assert processing_health_snapshot(NOW)["steps"][YOUTUBE]["failing_items"] == 2
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_snapshot_is_one_wal_read_transaction(tmp_path, restart) -> None:
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = r"""
+import sqlite3
+import sys
+from datetime import UTC, datetime, timedelta
+import django
+django.setup()
+from django.conf import settings
+from django.core.management import call_command
+from django.db import connection
+from archive.processing_health import processing_health_snapshot, record_step_outcome
+
+call_command('migrate', verbosity=0)
+with connection.cursor() as cursor:
+    cursor.execute('PRAGMA journal_mode=WAL')
+    assert cursor.fetchone()[0] == 'wal'
+now = datetime(2026, 11, 7, 12, tzinfo=UTC)
+record_step_outcome('summary', succeeded=False, item_id=1, now=now-timedelta(hours=2))
+before = processing_health_snapshot(now)
+writer = sqlite3.connect(settings.DATABASES['default']['NAME'], timeout=2)
+changed = False
+restart = sys.argv[1] == 'True'
+def interleave(execute, sql, params, many, context):
+    global changed
+    if not changed and 'SELECT' in sql and 'archive_processingevent' in sql:
+        changed = True
+        stamp = (now-timedelta(hours=1)).isoformat()
+        with writer:
+            writer.execute(
+                'UPDATE archive_processingstepstate '
+                'SET last_success_at=?, failing_since=NULL WHERE step=?', (stamp, 'summary'))
+            writer.execute('DELETE FROM archive_processingfailureitem WHERE step=?', ('summary',))
+            writer.execute(
+                'INSERT INTO archive_processingevent (step,succeeded,item_id,occurred_at) '
+                'VALUES (?,?,?,?)', ('summary', True, 2, stamp))
+            if restart:
+                writer.execute(
+                    'UPDATE archive_processingstepstate '
+                    'SET last_failure_at=?, failing_since=? WHERE step=?',
+                    (stamp, stamp, 'summary'))
+                for pk in (2, 3):
+                    writer.execute(
+                        'INSERT INTO archive_processingfailureitem (step,item_id) VALUES (?,?)',
+                        ('summary', pk))
+        assert not writer.in_transaction
+    return execute(sql, params, many, context)
+with connection.execute_wrapper(interleave):
+    observed = processing_health_snapshot(now)
+assert changed, 'writer interleaving never ran'
+assert observed == before, (observed, before)
+assert connection.get_autocommit()
+after = processing_health_snapshot(now)['steps']['summary']
+assert after['successes'] == 1
+assert after['failing_items'] == (2 if restart else 0)
+# Errors also release the read transaction and restore autocommit.
+def broken(execute, sql, params, many, context):
+    if 'SELECT' in sql and 'archive_processingevent' in sql:
+        raise RuntimeError('synthetic read failure')
+    return execute(sql, params, many, context)
+try:
+    with connection.execute_wrapper(broken):
+        processing_health_snapshot(now)
+except RuntimeError:
+    pass
+else:
+    raise AssertionError('synthetic failure did not execute')
+assert connection.get_autocommit()
+assert not connection.connection.in_transaction
+writer.close()
+connection.close()
+"""
+    env = os.environ.copy()
+    env.update(
+        DJANGO_SETTINGS_MODULE="config.settings.test",
+        DJANGO_DB_PATH=str(tmp_path / "health.sqlite3"),
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(restart)],
+        env=env,
+        cwd=Path(__file__).resolve().parents[1] / "src" / "django",
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

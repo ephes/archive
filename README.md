@@ -307,7 +307,11 @@ Important values:
   must be finite, representable, nonnegative numbers with start <= end; malformed evidence
   fails transcription, including a missing/null segment list or non-object entries in a JSON
   artifact. Successful batch results must contain nonblank string text; other JSON
-  types are rejected instead of converted to text.
+  types are rejected instead of converted to text. With a positive threshold, successful batch
+  jobs must also return a nonblank string JSON artifact path and a readable, nonempty
+  segment list. Missing evidence fails with a retryable transcription error and preserves
+  existing stored content. Older services without segment artifacts require an explicit
+  nonpositive threshold opt-out; coverage checking cannot verify their output.
 - `ARCHIVE_ARTICLE_AUDIO_API_KEY` defaults to `ARCHIVE_TRANSCRIPTION_API_KEY`
 - `ARCHIVE_ARTICLE_AUDIO_API_BASE` defaults to `ARCHIVE_TRANSCRIPTION_API_BASE`
 - `ARCHIVE_ARTICLE_AUDIO_MODEL` defaults to `tts-1`
@@ -611,7 +615,14 @@ and a new failure starts a fresh streak. The migration backfills existing active
 before pruning old events. Reversing the migration restores representative
 failure events for compacted memberships, preserving distinct streak counts; old
 retry attempt totals are not reconstructed. The per-step latest timestamps are not pruned.
-Health snapshots use two queries (states and recent attempt totals), plus one grouped
+State and current-streak membership follow nondecreasing observation timestamps. A delayed
+older outcome remains in the retained attempt history but cannot reverse the current
+projection or its membership. Success wins equal-timestamp ties, regardless of arrival order;
+repeated failure observations at one timestamp count each distinct item once. Ordinary
+observations are timestamped after acquiring the database write lock.
+Health snapshots read all projection tables in one consistent SQLite read transaction;
+concurrent WAL writers can continue, and each response reflects one complete database view.
+Response construction happens after the read transaction. Snapshots use two SELECT queries (states and recent attempt totals), plus one grouped
 membership count when any step is failing, independent of the number of failing steps.
 When the migration creating these tables runs, it seeds
 `media_archive_youtube.last_success_at` with the `shared_at` of the newest

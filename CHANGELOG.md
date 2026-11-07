@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Require JSON artifacts and nonempty readable segments when batch coverage checking
+  is enabled; keep the explicit nonpositive-threshold compatibility opt-out.
+- Retain delayed health outcomes as attempts without reversing newer step state or
+  streak membership; let success win equal-timestamp ties.
+- Read health states, attempt totals and streak membership in one consistent SQLite
+  snapshot without acquiring the configured IMMEDIATE writer lock.
+
 - Reject missing/unreadable batch segment lists, invalid/nonfinite segment times and
   malformed transcript text; compute
   coverage from the interval union so out-of-order/overlapping segments remain valid.

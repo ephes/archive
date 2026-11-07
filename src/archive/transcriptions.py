@@ -286,8 +286,14 @@ def _check_batch_transcript_coverage(
     the job still succeeds, but whole parts of the audio are missing from the text.
     """
     max_gap_seconds = settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS
-    if max_gap_seconds <= 0 or not completed.json_artifact_path:
+    if max_gap_seconds <= 0:
         return
+    if not completed.json_artifact_path:
+        raise TranscriptionGenerationError(
+            f"Batch transcription job {completed.job_id} is missing its JSON segment artifact; "
+            "retry with a service that provides segment evidence, or explicitly disable "
+            "coverage checking with ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS<=0"
+        )
 
     request = Request(
         _api_url(completed.json_artifact_path),
@@ -298,7 +304,12 @@ def _check_batch_transcript_coverage(
         timeout=timeout,
         error_prefix="Batch transcription segment download failed",
     )
-    gaps = find_transcript_gaps(payload.get("segments"), max_gap_seconds=max_gap_seconds)
+    try:
+        gaps = find_transcript_gaps(payload.get("segments"), max_gap_seconds=max_gap_seconds)
+    except TranscriptionGenerationError as exc:
+        raise TranscriptionGenerationError(
+            f"Batch transcription job {completed.job_id}: {exc}"
+        ) from exc
     if not gaps:
         return
     start, end = max(gaps, key=lambda gap: gap[1] - gap[0])
@@ -318,7 +329,7 @@ def find_transcript_gaps(
 
     Reject malformed evidence; measure coverage from the union without reordering text.
     """
-    if not isinstance(segments, list):
+    if not isinstance(segments, list) or not segments:
         raise TranscriptionGenerationError("Batch transcription segment list was unreadable")
     intervals: list[tuple[float, float]] = []
     for segment in segments:
@@ -503,7 +514,9 @@ def _parse_batch_transcription_job_update(
         artifacts = result.get("artifacts")
         json_artifact_path = ""
         if isinstance(artifacts, dict):
-            json_artifact_path = str(artifacts.get("json") or "").strip()
+            artifact = artifacts.get("json")
+            if isinstance(artifact, str):
+                json_artifact_path = artifact.strip()
         return BatchTranscriptionJobUpdate(
             job_id=job_id,
             state=state,

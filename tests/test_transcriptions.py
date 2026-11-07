@@ -238,6 +238,8 @@ def test_generate_item_transcript_does_not_fallback_to_remote_when_archived_audi
 def test_generate_item_transcript_stages_oversized_archived_audio_for_batch_job(
     monkeypatch, settings
 ) -> None:
+    # This upload-contract fixture represents an older service without segment artifacts.
+    settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = 0
     item = Item.objects.create(
         original_url="https://example.com/episode",
         audio_url="https://cdn.example.com/episode.mp3",
@@ -626,3 +628,105 @@ def test_generate_transcript_rejects_malformed_batch_evidence(
     with pytest.raises(TranscriptionGenerationError, match=expected):
         generate_item_transcript(item=item)
     assert any(url.endswith("transcript.json") for url in requested) is not malformed_text
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("artifact", [None, {}, {"json": None}, {"json": []}, {"json": 12}])
+def test_enabled_coverage_requires_json_artifact(monkeypatch, settings, artifact) -> None:
+    from archive.transcriptions import (
+        BatchTranscriptionJobUpdate,
+        _check_batch_transcript_coverage,
+        _parse_batch_transcription_job_update,
+    )
+
+    settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = 600
+    update = _parse_batch_transcription_job_update(
+        {
+            "id": "job-synthetic",
+            "state": "succeeded",
+            "result": {"text": "Valid transcript", "artifacts": artifact},
+        }
+    )
+    assert isinstance(update, BatchTranscriptionJobUpdate)
+    with pytest.raises(TranscriptionGenerationError, match="segment artifact"):
+        _check_batch_transcript_coverage(completed=update, timeout=1)
+
+
+@pytest.mark.parametrize("segments", [None, [], {}, "segments"])
+def test_enabled_coverage_requires_readable_segments(segments) -> None:
+    with pytest.raises(TranscriptionGenerationError, match="segment"):
+        find_transcript_gaps(segments, max_gap_seconds=600)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "evidence",
+    ["missing-artifact", "bad-artifact-shape", "missing-segments", "empty-segments", "nonobject"],
+)
+def test_missing_coverage_evidence_cannot_publish_transcript(monkeypatch, settings, evidence):
+    from archive.models import EnrichmentStatus
+    from archive.services import enrich_item_transcript
+
+    item = _oversized_archived_audio_item()
+    item.short_summary = "Existing summary"
+    item.save(update_fields=["short_summary"])
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
+    settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
+    monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
+    requested: list[str] = []
+    response = _batch_job_urlopen(segments=[], requested=requested)
+
+    def fake_urlopen(request, timeout):
+        payload: object
+        if request.full_url.endswith("/jobs/job-123") and evidence.endswith("artifact"):
+            payload = {"id": "job-123", "state": "succeeded", "result": {"text": "Unchecked"}}
+        elif request.full_url.endswith("/jobs/job-123") and evidence == "bad-artifact-shape":
+            payload = {
+                "id": "job-123",
+                "state": "succeeded",
+                "result": {"text": "Unchecked", "artifacts": {"json": {"url": "/v1/synthetic"}}},
+            }
+        elif request.full_url.endswith("transcript.json") and evidence == "missing-segments":
+            payload = {"text": "Unchecked"}
+        elif request.full_url.endswith("transcript.json") and evidence == "nonobject":
+            payload = []
+        else:
+            return response(request, timeout)
+        return _FakeResponse(
+            json.dumps(payload).encode(), content_type="application/json", url=request.full_url
+        )
+
+    monkeypatch.setattr("archive.transcriptions.urlopen", fake_urlopen)
+    assert enrich_item_transcript(item=item) is False
+    item.refresh_from_db()
+    assert item.transcript == ""
+    assert item.transcript_status == EnrichmentStatus.FAILED
+    assert item.short_summary == "Existing summary"
+    assert item.transcript_error
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("threshold", [0, -1])
+def test_old_batch_service_requires_explicit_coverage_opt_out(monkeypatch, settings, threshold):
+    item = _oversized_archived_audio_item()
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
+    settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
+    settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = threshold
+    monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
+    requested: list[str] = []
+    response = _batch_job_urlopen(segments=[], requested=requested)
+
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/jobs/job-123"):
+            return _FakeResponse(
+                json.dumps(
+                    {"id": "job-123", "state": "succeeded", "result": {"text": "Valid"}}
+                ).encode(),
+                content_type="application/json",
+                url=request.full_url,
+            )
+        return response(request, timeout)
+
+    monkeypatch.setattr("archive.transcriptions.urlopen", fake_urlopen)
+    assert generate_item_transcript(item=item) == "Valid"
+    assert not any(url.endswith("transcript.json") for url in requested)

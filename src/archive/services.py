@@ -286,6 +286,7 @@ def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
             )
         return True
 
+    failure_state = _failure_state(item, "summary")
     captured = {
         field: (getattr(item, field), getattr(item, f"{field}_generated"))
         for field in ("short_summary", "long_summary", "tags")
@@ -295,7 +296,7 @@ def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
     except Exception as exc:
         logger.exception("Summary generation failed for item %s", item.pk)
         record_step_outcome(ProcessingStep.SUMMARY, succeeded=False, item_id=item.pk)
-        return _mark_summary_failure(item, str(exc))
+        return _mark_summary_failure(item, str(exc), expected=failure_state)
 
     with transaction.atomic():
         item.refresh_from_db()
@@ -328,7 +329,7 @@ def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
         if not _has_generated_summaries(item):
             record_step_outcome(ProcessingStep.SUMMARY, succeeded=False, item_id=item.pk)
             return _mark_summary_failure(
-                item, "Summary response did not produce all required fields"
+                item, "Summary response did not produce all required fields", expected=failure_state
             )
 
         item.summary_status = EnrichmentStatus.COMPLETE
@@ -358,13 +359,14 @@ def enrich_item_transcript(item: Item, timeout: int = 300) -> bool:
             item.save(update_fields=["transcript_status", "transcript_error"])
         return True
 
+    failure_state = _failure_state(item, "transcript")
     captured = (item.transcript, item.transcript_generated)
     try:
         transcript = generate_item_transcript(item=item, timeout=timeout)
     except Exception as exc:
         logger.exception("Transcript generation failed for item %s", item.pk)
         record_step_outcome(ProcessingStep.TRANSCRIPT, succeeded=False, item_id=item.pk)
-        return _mark_transcript_failure(item, str(exc))
+        return _mark_transcript_failure(item, str(exc), expected=failure_state)
 
     with transaction.atomic():
         item.refresh_from_db()
@@ -461,12 +463,8 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
         archived_audio = archive_item_audio(item=item, timeout=timeout)
     except Exception as exc:
         logger.exception("Audio archival failed for item %s", item.pk)
-        with transaction.atomic():
-            item.refresh_from_db(from_queryset=Item.objects.select_for_update())
-            if _item_state(item, captured) != captured:
-                return True
-            record_step_outcome(health_step, succeeded=False, item_id=item.pk)
-            return _mark_media_archive_failure(item, str(exc))
+        record_step_outcome(health_step, succeeded=False, item_id=item.pk)
+        return _mark_media_archive_failure(item, str(exc), expected=captured)
 
     published_fields = [
         "archived_audio_path",
@@ -622,20 +620,16 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
         update = generate_item_article_audio(item=item, timeout=timeout)
     except Exception as exc:
         logger.exception("Article audio generation failed for item %s", item.pk)
-        with transaction.atomic():
-            item.refresh_from_db(from_queryset=Item.objects.select_for_update())
-            if _item_state(item, captured) != captured:
-                return True
-            record_step_outcome(ProcessingStep.ARTICLE_AUDIO, succeeded=False, item_id=item.pk)
-            return _mark_article_audio_failure(item, str(exc))
+        record_step_outcome(ProcessingStep.ARTICLE_AUDIO, succeeded=False, item_id=item.pk)
+        return _mark_article_audio_failure(item, str(exc), expected=captured)
 
     with transaction.atomic():
         item.refresh_from_db(from_queryset=Item.objects.select_for_update())
         if _item_state(item, captured) != captured:
             return True
-        item.article_audio_job_id = update.job_id
         item.article_audio_error = ""
         if update.is_complete:
+            item.article_audio_job_id = update.job_id
             item.article_audio_artifact_path = update.artifact_path
             item.article_audio_generated = True
             item.article_audio_status = EnrichmentStatus.COMPLETE
@@ -651,6 +645,7 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
                 ]
             )
         elif update.is_pending:
+            item.article_audio_job_id = update.job_id
             item.article_audio_status = EnrichmentStatus.PENDING
             item.article_audio_poll_at = _next_article_audio_poll_at()
             item.save(
@@ -664,7 +659,7 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
             return True
         else:
             record_step_outcome(ProcessingStep.ARTICLE_AUDIO, succeeded=False, item_id=item.pk)
-            return _mark_article_audio_failure(item, update.error_message)
+            return _mark_article_audio_failure(item, update.error_message, expected=captured)
 
     record_step_outcome(ProcessingStep.ARTICLE_AUDIO, succeeded=True, item_id=item.pk)
     try:
@@ -958,7 +953,89 @@ def _mark_metadata_failure(item: Item, error_message: str) -> bool:
     return False
 
 
-def _mark_summary_failure(item: Item, error_message: str) -> bool:
+_FAILURE_FIELDS = {
+    "summary": (
+        "title",
+        "notes",
+        "source",
+        "author",
+        "transcript",
+        "transcript_generated",
+        "short_summary",
+        "long_summary",
+        "tags",
+        "short_summary_generated",
+        "long_summary_generated",
+        "tags_generated",
+    ),
+    "transcript": (
+        "transcript",
+        "transcript_generated",
+        "archived_audio_path",
+        "archived_video_path",
+        "archived_audio_content_type",
+        "archived_audio_size_bytes",
+        "archived_video_content_type",
+        "archived_video_size_bytes",
+    ),
+    "media_archive": (
+        "archived_audio_path",
+        "archived_video_path",
+        "archived_audio_content_type",
+        "archived_audio_size_bytes",
+        "archived_video_content_type",
+        "archived_video_size_bytes",
+    ),
+    "article_audio": (
+        "title",
+        "short_summary",
+        "long_summary",
+        "notes",
+        "summary_status",
+        "article_audio_job_id",
+        "article_audio_artifact_path",
+        "article_audio_generated",
+        "article_audio_poll_at",
+    ),
+}
+
+
+def _failure_state(item: Item, stage: str) -> dict:
+    return _item_state(
+        item,
+        (
+            *SOURCE_VERSION_FIELDS,
+            *_FAILURE_FIELDS[stage],
+            f"{stage}_status",
+            "processing_started_at",
+        ),
+    )
+
+
+def _refresh_current_failure(item: Item, stage: str, expected: dict) -> bool:
+    """Called inside the failure transaction; preserve newer work and edits."""
+    fields = (*SOURCE_VERSION_FIELDS, *_FAILURE_FIELDS[stage])
+    expected_status = expected[f"{stage}_status"]
+    expected_started_at = expected["processing_started_at"]
+    item.refresh_from_db(from_queryset=Item.objects.select_for_update())
+    current_status = getattr(item, f"{stage}_status")
+    if _item_state(item, fields) != {field: expected[field] for field in fields}:
+        return False
+    if current_status != expected_status and current_status != EnrichmentStatus.FAILED:
+        return False
+    # A settled failure clears the processing timestamp. Allow another actual
+    # failure of that same source to increment the current count under the lock.
+    if item.processing_started_at != expected_started_at and (
+        current_status != EnrichmentStatus.FAILED or item.processing_started_at is not None
+    ):
+        return False
+    return True
+
+
+@transaction.atomic
+def _mark_summary_failure(item: Item, error_message: str, *, expected: dict) -> bool:
+    if not _refresh_current_failure(item, "summary", expected):
+        return False
     item.summary_error = error_message
     item.summary_retry_count += 1
     if _has_generated_summaries(item):
@@ -979,7 +1056,10 @@ def _mark_summary_failure(item: Item, error_message: str) -> bool:
     return False
 
 
-def _mark_transcript_failure(item: Item, error_message: str) -> bool:
+@transaction.atomic
+def _mark_transcript_failure(item: Item, error_message: str, *, expected: dict) -> bool:
+    if not _refresh_current_failure(item, "transcript", expected):
+        return False
     item.transcript_error = error_message
     if item.has_transcript:
         item.transcript_status = EnrichmentStatus.COMPLETE
@@ -989,7 +1069,10 @@ def _mark_transcript_failure(item: Item, error_message: str) -> bool:
     return False
 
 
-def _mark_media_archive_failure(item: Item, error_message: str) -> bool:
+@transaction.atomic
+def _mark_media_archive_failure(item: Item, error_message: str, *, expected: dict) -> bool:
+    if not _refresh_current_failure(item, "media_archive", expected):
+        return True
     item.media_archive_error = error_message
     item.media_archive_retry_count += 1
     if item.has_archived_audio:
@@ -1010,7 +1093,10 @@ def _mark_media_archive_failure(item: Item, error_message: str) -> bool:
     return False
 
 
-def _mark_article_audio_failure(item: Item, error_message: str) -> bool:
+@transaction.atomic
+def _mark_article_audio_failure(item: Item, error_message: str, *, expected: dict) -> bool:
+    if not _refresh_current_failure(item, "article_audio", expected):
+        return True
     item.article_audio_error = error_message
     item.article_audio_status = EnrichmentStatus.FAILED
     item.article_audio_poll_at = None

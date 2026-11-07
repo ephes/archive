@@ -758,6 +758,18 @@ Malformed values fail generation instead of publishing stringified JSON values;
 existing summaries remain intact and the normal retry policy applies. Valid tags
 retain whitespace normalization, lowercasing, deduplication and the eight-tag cap.
 
+Failure bookkeeping reloads and locks the current row before writing stage status,
+retry counters or polling state. A newer result, source/classification edit, job or
+processing pass supersedes the old failure; its diagnostic remains in worker logs.
+Failures of the same unchanged source increment the current retry count without
+lost updates.
+
+Authenticated create/PATCH endpoints return the normal `400 Invalid JSON` response
+when decoding exhausts Python's nesting limit, without echoing request bodies.
+RSS item text and attributes replace XML 1.0-forbidden code points with U+FFFD at
+serialization. Valid Unicode and escaped entities retain their text; stored item
+content is unchanged in both general and podcast feeds.
+
 ## Upstream API response limits
 
 Summary, transcription (including plain-text transcripts), and article-audio JSON

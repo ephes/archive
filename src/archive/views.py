@@ -188,6 +188,21 @@ def _search_public_item_page(raw_query: str, number):
         return page_obj
 
 
+def _xml_safe_text(value: str) -> str:
+    """Replace XML 1.0-forbidden code points only at RSS serialization."""
+    return "".join(
+        char
+        if (
+            char in "\t\n\r"
+            or " " <= char <= "\ud7ff"
+            or "\ue000" <= char <= "\ufffd"
+            or "\U00010000" <= char <= "\U0010ffff"
+        )
+        else "\ufffd"
+        for char in value
+    )
+
+
 def _render_feed(
     request: HttpRequest,
     *,
@@ -245,7 +260,12 @@ def _render_feed(
         }
         if include_enclosures:
             entry.update(_podcast_enclosure_attributes(request, item))
-        feed_items.append(entry)
+        feed_items.append(
+            {
+                key: _xml_safe_text(value) if isinstance(value, str) else value
+                for key, value in entry.items()
+            }
+        )
 
     return render(
         request,
@@ -505,7 +525,7 @@ def api_create_item(request: HttpRequest) -> JsonResponse:
 
     try:
         payload = json.loads(request.body or b"{}")
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     if not isinstance(payload, dict):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
@@ -605,7 +625,7 @@ def api_update_item(request: HttpRequest, pk: int) -> JsonResponse:
 
     try:
         payload = json.loads(request.body or b"{}")
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     if not isinstance(payload, dict):
         return JsonResponse({"error": "Invalid JSON"}, status=400)

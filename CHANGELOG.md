@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fence failure bookkeeping against current source, result and processing state;
+  preserve newer successes and count unchanged-source failures under a row lock.
+- Return invalid-JSON 400 responses for excessive API JSON nesting.
+- Replace XML 1.0-forbidden characters in RSS item text/attributes at serialization,
+  preserving valid Unicode and stored content.
+
 - Exclude active processing stages from item claims and acquire newly pending
   stages atomically, preserving explicit stale recovery.
 - Fence source-media publication against source, classification, attempt and media

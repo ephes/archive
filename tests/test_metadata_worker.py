@@ -60,7 +60,9 @@ def test_once_exit_status_and_continued_processing(monkeypatch, outcomes):
     attempted = []
     recovered = []
     monkeypatch.setattr(worker, "claim_pending_item", lambda **kwargs: next(queue))
-    monkeypatch.setattr(worker, "recover_processing_item", lambda pk: recovered.append(pk) or 1)
+    monkeypatch.setattr(
+        worker, "recover_processing_item", lambda pk, **kwargs: recovered.append(pk) or 1
+    )
 
     def enrich(*, item, **kwargs):
         outcome = outcomes[len(attempted)]
@@ -98,3 +100,67 @@ def test_continuous_worker_keeps_running_after_failure(monkeypatch):
     monkeypatch.setattr(worker, "enrich_item_metadata", lambda **kwargs: False)
     call_command(command, limit=1, interval=0)
     assert len(claims) == 2
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("handoff", [False, True])
+def test_stall_recovery_matches_the_claimed_processing_pass(monkeypatch, handoff):
+    from test_attempt_ownership import idle_item, other_worker_claim
+
+    from archive import services
+    from archive.models import ItemKind
+
+    item = idle_item(
+        enrichment_status=EnrichmentStatus.PENDING, transcript_status=EnrichmentStatus.PENDING
+    )
+    attempts = []
+
+    def metadata(item, timeout):
+        attempts.append(item.processing_started_at)
+        item.enrichment_status = EnrichmentStatus.COMPLETE
+        item.kind = ItemKind.PODCAST_EPISODE
+        item.audio_url = "https://example.test/audio.mp3"
+        item.save(update_fields=["enrichment_status", "kind", "audio_url"])
+        if handoff:
+            assert other_worker_claim() == item.pk
+            raise worker.ItemProcessingStalled()
+        return True
+
+    def transcribe(item, timeout):
+        assert item.processing_started_at == attempts[0]
+        raise worker.ItemProcessingStalled()
+
+    monkeypatch.setattr(services, "_enrich_item_metadata_fields", metadata)
+    monkeypatch.setattr(services, "enrich_item_transcript", transcribe)
+    with pytest.raises(CommandError):
+        call_command("run_metadata_worker", once=True, limit=1)
+    item.refresh_from_db()
+    if handoff:
+        assert item.transcript_status == EnrichmentStatus.PROCESSING
+        assert item.processing_started_at != attempts[0]
+    else:
+        assert item.transcript_status == EnrichmentStatus.PENDING
+        assert item.processing_started_at is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_stall_recovers_claim_that_only_needs_stage_normalization(monkeypatch):
+    from test_attempt_ownership import idle_item
+
+    from archive import services
+
+    item = idle_item(media_archive_status=EnrichmentStatus.PENDING)
+    observed = []
+
+    def stall(item, timeout):
+        observed.append(item.processing_started_at)
+        assert item.media_archive_status == EnrichmentStatus.PROCESSING
+        raise worker.ItemProcessingStalled()
+
+    monkeypatch.setattr(services, "enrich_item_media_archive", stall)
+    with pytest.raises(CommandError):
+        call_command("run_metadata_worker", once=True, limit=1)
+    assert observed[0] is not None
+    item.refresh_from_db()
+    assert item.media_archive_status == EnrichmentStatus.PENDING
+    assert item.processing_started_at is None

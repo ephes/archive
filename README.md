@@ -699,6 +699,20 @@ Migration note:
   direct-video items, by setting `media_archive_status` back to `pending` when they do not have a stable
   local audio copy yet
 
+Workers skip items with any processing stage. A stage that becomes pending or
+eligible during a pass is acquired in a short database transaction before work
+starts. A pass may hand off between stages; it never resumes another pass's
+processing stage. Age-based recovery requeues abandoned stages. A processing-timeout handler only
+requeues stages matching its own captured processing timestamp, preserving a later
+worker after handoff.
+
+Source-media publication checks the captured source URL, media candidates,
+classification, processing attempt and existing media references in its durable
+transaction. A superseded result is discarded through the reference-safe cleanup
+path. Synthesis submission/poll results similarly check the observed job, source,
+classification and script fields before changing job/artifact/poll state. Stale
+results are no-ops and preserve newer operator decisions and scheduling.
+
 ## Media publication and orphan recovery
 
 Invariant: an archive media object is deleted only after it has been verified,

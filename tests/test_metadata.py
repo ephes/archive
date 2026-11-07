@@ -1436,7 +1436,7 @@ def test_run_metadata_worker_requeues_current_item_when_processing_stalls(monkey
     claimed_items = [item, None]
     recovered_ids: list[int] = []
 
-    def fake_recover_processing_item(item_id: int) -> int:
+    def fake_recover_processing_item(item_id: int, **kwargs) -> int:
         recovered_ids.append(item_id)
         return 1
 

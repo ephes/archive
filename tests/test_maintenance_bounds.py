@@ -67,7 +67,8 @@ def test_thousands_of_old_retries_compact_without_losing_exact_streaks():
     record_step_outcome("summary", succeeded=False, item_id=1, now=NOW - timedelta(hours=1))
     record_step_outcome("summary", succeeded=False, item_id=None, now=NOW)
     snapshot = processing_health_snapshot(NOW)["steps"]["summary"]
-    assert ProcessingEvent.objects.count() == 2
+    # Two outcomes each prune one 100-event batch; streak counts stay exact.
+    assert ProcessingEvent.objects.count() == 2802
     assert ProcessingFailureItem.objects.count() == 3
     assert snapshot["failing_items"] == 3
     assert snapshot["failing_since"] == OLD.isoformat()

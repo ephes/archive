@@ -427,3 +427,40 @@ connection.close()
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.django_db
+def test_retention_backlog_drains_in_bounded_batches_without_changing_health() -> None:
+    # A long-running streak outlives the event history that supplied its members.
+    _record(YOUTUBE, False, 7, hours_ago=40 * 24)
+    old = NOW - timedelta(days=31)
+    backlog = ProcessingEvent.objects.bulk_create(
+        ProcessingEvent(step=YOUTUBE, succeeded=False, item_id=7, occurred_at=old)
+        for _ in range(204)
+    )
+    cutoff = NOW - timedelta(days=30)
+    previous_ids = list(
+        ProcessingEvent.objects.filter(occurred_at__lt=cutoff)
+        .order_by("occurred_at", "pk")
+        .values_list("pk", flat=True)
+    )
+    assert len(previous_ids) == len(backlog) + 1
+    expected = None
+    for remaining in (105, 5, 0):
+        _record(ProcessingStep.METADATA, True, 8, hours_ago=0)
+        expired_ids = list(
+            ProcessingEvent.objects.filter(occurred_at__lt=cutoff)
+            .order_by("occurred_at", "pk")
+            .values_list("pk", flat=True)
+        )
+        assert len(expired_ids) == remaining
+        assert expired_ids == previous_ids[100:]
+        previous_ids = expired_ids
+        observed = processing_health_snapshot(NOW)["steps"][YOUTUBE]
+        if expected is None:
+            expected = observed
+        assert observed == expected
+        assert observed["failing_items"] == 1
+        assert observed["failures"] == 0
+        assert observed["failing_since"] == (NOW - timedelta(days=40)).isoformat()
+    assert ProcessingEvent.objects.filter(occurred_at=NOW).count() == 3

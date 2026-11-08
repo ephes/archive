@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Bound health-event retention pruning to 100 expired events per outcome, preserving
+  exact recent counts and ongoing failure streaks while later outcomes drain backlogs.
+- Recover at most 100 stale items per worker iteration, oldest first, and recheck
+  selected attempt timestamps before resetting processing states.
+- Cover killed-worker/reopened-SQLite recovery at claim and media-publication barriers,
+  including fresh leases, delayed superseded results and shared media references.
+
 - Cover both stored-audio routes with real local HTTP byte-range, HEAD and
   interrupted-client cleanup journeys using synthetic storage files.
 - Identify worker progress by item ID and stage, omitting raw URLs, title fallbacks

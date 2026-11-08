@@ -501,7 +501,12 @@ The worker also persists when an item first entered `processing` and now re-queu
 states during normal loop iterations instead of only recovering them on worker startup. The same stale
 window is enforced against the currently running item, so a transcript or summary path that stops making
 progress no longer strands the row in `processing` indefinitely. Startup uses the same age cutoff
-and preserves fresh leases held by other workers. Choose a stale window longer than legitimate per-item processing; this is age-based recovery, not a heartbeat
+and preserves fresh leases held by other workers. Each recovery pass resets at most
+100 items, oldest processing timestamp first (then primary key), and matches each
+selected attempt's timestamp again when updating. Continuous worker iterations
+drain larger backlogs; `--once` recovers only one batch. Newer/reclaimed attempts
+and rows without timestamps are left untouched. Choose a stale window longer than
+legitimate per-item processing; this is age-based recovery, not a heartbeat
 or ownership lock. After a crash, recent work waits until that window expires. To deliberately
 recover all abandoned work sooner (including legacy rows without a lease timestamp), stop all
 workers first, then run this from the repository root and restart them:
@@ -642,7 +647,10 @@ Per step:
   item count once, so a value of two or more points to a systemic problem rather than one
   broken source.
 
-Outcome events are pruned after 30 days. Separate durable membership stores one row per
+Each outcome prunes at most 100 events older than 30 days, oldest timestamp first
+(then primary key). Repeated outcomes drain a retention backlog; expired events
+may remain between passes, without contributing to the 24-hour totals. Separate
+durable membership stores one row per
 distinct item in each ongoing failure streak, so repeated retries cannot grow old event
 history indefinitely or reduce `failing_items`. A success clears that step’s membership
 and a new failure starts a fresh streak. The migration backfills existing active streaks
@@ -805,6 +813,14 @@ transaction. A superseded result is discarded through the reference-safe cleanup
 path. Synthesis submission/poll results similarly check the observed job, source,
 classification and script fields before changing job/artifact/poll state. Stale
 results are no-ops and preserve newer operator decisions and scheduling.
+
+The synthetic restart journey (`uv run pytest tests/test_worker_restart_journey.py`)
+hard-kills a subprocess after claim and before media publication, then opens the
+temporary SQLite database in new workers. File barriers and a controlled clock
+verify fresh-lease preservation, one-time recovery, rejection of a delayed
+superseded result, and preservation of media still referenced by another item.
+Killed uploads remain reserved for the existing orphan-recovery workflow. The
+fake upstream uses only temporary storage; no network or archive data is used.
 
 ## Media publication and orphan recovery
 

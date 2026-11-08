@@ -10,7 +10,12 @@ from urllib.request import Request
 
 from django.conf import settings
 
-from archive.api_responses import read_api_error, read_api_response
+from archive.api_responses import (
+    InvalidAPIJSON,
+    decode_api_json,
+    read_api_response,
+    safe_api_error,
+)
 from archive.metadata import REQUEST_HEADERS
 from archive.models import Item
 from archive.safe_fetch import open_public_url
@@ -138,11 +143,17 @@ def extract_summary_source_from_url(
             charset = response.headers.get_content_charset() or "utf-8"
             payload = response.read(MAX_SUMMARY_SOURCE_BYTES + 1)
     except HTTPError as exc:
-        raise SummaryGenerationError(f"HTTP {exc.code} while fetching summary source") from exc
+        raise SummaryGenerationError(
+            f"{safe_api_error(exc)} while fetching summary source"
+        ) from None
     except URLError as exc:
-        raise SummaryGenerationError(f"Could not fetch summary source: {exc.reason}") from exc
+        raise SummaryGenerationError(
+            f"Could not fetch summary source: {safe_api_error(exc)}"
+        ) from None
     except OSError as exc:
-        raise SummaryGenerationError(f"Could not fetch summary source: {exc}") from exc
+        raise SummaryGenerationError(
+            f"Could not fetch summary source: {safe_api_error(exc)}"
+        ) from None
 
     if len(payload) > MAX_SUMMARY_SOURCE_BYTES:
         raise SummaryGenerationError("Summary source exceeded 1 MiB limit")
@@ -241,23 +252,20 @@ def _request_summary(prompt: str, timeout: int) -> str:
 
     try:
         with urlopen(request, timeout=timeout) as response:
-            payload = json.loads(read_api_response(response).decode("utf-8"))
+            payload = decode_api_json(read_api_response(response))
     except HTTPError as exc:
-        message = read_api_error(exc)
-        raise SummaryGenerationError(
-            f"Summary API request failed: HTTP {exc.code}: {message}"
-        ) from exc
+        raise SummaryGenerationError(f"Summary API request failed: {safe_api_error(exc)}") from None
     except URLError as exc:
-        raise SummaryGenerationError(f"Summary API request failed: {exc.reason}") from exc
+        raise SummaryGenerationError(f"Summary API request failed: {safe_api_error(exc)}") from None
     except OSError as exc:
-        raise SummaryGenerationError(f"Summary API request failed: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise SummaryGenerationError("Summary API returned invalid JSON") from exc
+        raise SummaryGenerationError(f"Summary API request failed: {safe_api_error(exc)}") from None
+    except InvalidAPIJSON:
+        raise SummaryGenerationError("Summary API returned invalid JSON") from None
 
     try:
         content = payload["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise SummaryGenerationError("Summary API response did not include content") from exc
+    except (KeyError, IndexError, TypeError):
+        raise SummaryGenerationError("Summary API response did not include content") from None
     if not isinstance(content, str) or not content.strip():
         raise SummaryGenerationError("Summary API response was empty")
     return content
@@ -265,9 +273,9 @@ def _request_summary(prompt: str, timeout: int) -> str:
 
 def _parse_generated_summary(raw_content: str) -> GeneratedSummary:
     try:
-        payload = json.loads(raw_content)
-    except json.JSONDecodeError as exc:
-        raise SummaryGenerationError("Summary response was not valid JSON") from exc
+        payload = decode_api_json(raw_content)
+    except InvalidAPIJSON:
+        raise SummaryGenerationError("Summary response was not valid JSON") from None
 
     if not isinstance(payload, dict):
         raise SummaryGenerationError("Summary response must be an object")

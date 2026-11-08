@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Normalize invalid UTF-8, JSON recursion and integer-decoding failures to fixed
+  summary/transcription/article-audio errors with response cleanup.
+- Keep upstream error bodies, failed-job messages and raw transport details out of
+  normal stored errors and logs; retain HTTP status and fixed diagnostic categories.
+
 - Skip FTS updates when indexed text and row identity are unchanged, with a
   reversible null-safe trigger migration.
 - Persist derived publication dates on partial saves while preserving empty-save

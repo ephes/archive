@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Bound orphan-sweep memory with a temporary disk inventory and batched database
+  reference streaming; retain path normalization, sorted unique reports and finish
+  listing before deletion.
+- Reject negative orphan age grace before any work and retain objects with unusable
+  modification times while continuing the sweep; zero explicitly disables age grace.
+
 - Provision admin accounts atomically from a locked current row, preserve inactive
   accounts and unchanged password hashes, and save only changed provisioning fields.
 - Isolate post-deletion media cleanup failures from committed item deletion; log a

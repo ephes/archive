@@ -804,12 +804,20 @@ later commit callbacks. Retained objects can be reclaimed with the orphan sweep.
 A `PendingArchiveMediaUpload` reservation commits before each storage write and
 protects its namespace. Publication removes the reservation in the same transaction
 that commits the item references, so an uploaded object is always either reserved
-or referenced. Orphan cleanup treats its initial listing only as a candidate list:
+or referenced. Orphan cleanup spools the complete object inventory to temporary disk
+storage before deleting anything, streams database references in bounded batches using
+the same whitespace normalization as other media paths, then processes sorted unique
+candidates. References are scanned once rather than once per object batch. Temporary disk use grows with the inventory;
+Python candidate memory stays bounded. An incomplete listing aborts without deletion.
+Summary reference counts include distinct nonblank paths across all three media fields,
+even when their objects are missing. Orphan cleanup treats this listing only as candidates:
 for each candidate it checks the reservation first and the item references second,
 inside one transaction, and deletes only when both are absent. `--min-age-seconds`
-adds an age grace (default 3600); even zero never bypasses reservations or
-references. Backends without modification times are skipped when the grace is
-enabled. Dry-run lists snapshot candidates without deleting anything; delete mode
+adds an age grace (default 3600); negative values are rejected before any work,
+and zero explicitly disables age grace while retaining reservations and reference
+checks. With grace enabled, unknown or unusable modification times (including naive
+timestamps) retain the object and the sweep continues. Objects exactly at the age
+cutoff are eligible. Dry-run lists snapshot candidates without deleting anything; delete mode
 may skip candidates that are reserved or have become referenced. Cleanup can run
 while workers are archiving. Apply database migrations before running updated
 workers or cleanup.

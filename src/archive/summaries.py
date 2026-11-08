@@ -23,6 +23,11 @@ from archive.upstream_http import open_authenticated_url as urlopen
 
 logger = logging.getLogger(__name__)
 
+MAX_SHORT_SUMMARY_CHARS = 239
+MAX_LONG_SUMMARY_CHARS = 8_000
+MAX_SUMMARY_TAGS = 8
+MAX_SUMMARY_TAG_CHARS = 64
+
 MAX_SUMMARY_SOURCE_BYTES = 1024 * 1024
 MAX_SUMMARY_INPUT_CHARS = 12_000
 MAX_ARTICLE_AUDIO_SOURCE_CHARS = 100_000
@@ -58,14 +63,14 @@ class _SummaryHTMLParser(HTMLParser):
         "style",
         "svg",
     }
-    _TEXT_TAGS = {"h1", "h2", "h3", "h4", "li", "p", "blockquote", "pre"}
+    _TEXT_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "li", "p", "blockquote", "pre"}
 
     def __init__(self) -> None:
         super().__init__()
         self.meta_description = ""
         self.text_chunks: list[str] = []
         self._ignored_depth = 0
-        self._current_tag: str | None = None
+        self._text_containers: list[str] = []
         self._current_parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs) -> None:
@@ -90,8 +95,10 @@ class _SummaryHTMLParser(HTMLParser):
             return
 
         if self._ignored_depth == 0 and lowered in self._TEXT_TAGS:
-            self._current_tag = lowered
-            self._current_parts = []
+            self._flush_text()
+            self._text_containers.append(lowered)
+        elif self._ignored_depth == 0 and lowered == "br" and self._text_containers:
+            self._current_parts.append(" ")
 
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.lower()
@@ -99,16 +106,25 @@ class _SummaryHTMLParser(HTMLParser):
             self._ignored_depth -= 1
             return
 
-        if self._ignored_depth == 0 and lowered == self._current_tag:
-            text = _normalize_text(" ".join(self._current_parts))
-            if len(text) >= 25:
-                self.text_chunks.append(text)
-            self._current_tag = None
-            self._current_parts = []
+        if self._ignored_depth == 0 and lowered in self._text_containers:
+            self._flush_text()
+            # Also tolerate omitted inner closing tags without retaining a stale container.
+            while self._text_containers.pop() != lowered:
+                pass
 
     def handle_data(self, data: str) -> None:
-        if self._ignored_depth == 0 and self._current_tag is not None:
+        if self._ignored_depth == 0 and self._text_containers:
             self._current_parts.append(data)
+
+    def _flush_text(self) -> None:
+        text = _normalize_text("".join(self._current_parts))
+        if text:
+            self.text_chunks.append(text)
+        self._current_parts = []
+
+    def close(self) -> None:
+        super().close()
+        self._flush_text()
 
 
 def generate_item_summaries(item: Item, timeout: int = 60) -> GeneratedSummary:
@@ -195,8 +211,11 @@ def _build_summary_prompt(item: Item, source: SummarySource) -> str:
         "Generate archive metadata for this captured item.",
         "Return JSON with keys short_summary, long_summary, and tags.",
         "short_summary must be 1 or 2 sentences and under 240 characters.",
-        "long_summary must be 2 to 4 sentences.",
-        "tags must be a JSON array of 3 to 8 short lowercase tags.",
+        f"long_summary must be 2 to 4 sentences and at most {MAX_LONG_SUMMARY_CHARS} characters.",
+        (
+            "tags must be a JSON array of 3 to 8 lowercase tags, "
+            f"at most {MAX_SUMMARY_TAG_CHARS} characters each."
+        ),
         "Write summaries and tags in the same language as the transcript when present.",
         (
             "If there is no transcript, use the dominant language of the page description and "
@@ -293,6 +312,14 @@ def _parse_generated_summary(raw_content: str) -> GeneratedSummary:
     long_summary = _normalize_text(long)
     tags = _normalize_tags(raw_tags)
 
+    if (
+        len(short_summary) > MAX_SHORT_SUMMARY_CHARS
+        or len(long_summary) > MAX_LONG_SUMMARY_CHARS
+        or len(raw_tags) > MAX_SUMMARY_TAGS
+        or any(len(tag) > MAX_SUMMARY_TAG_CHARS for tag in tags)
+    ):
+        raise SummaryGenerationError("Summary response exceeded generated field limits")
+
     if not short_summary or not long_summary or not tags:
         raise SummaryGenerationError("Summary response did not include all required fields")
 
@@ -319,8 +346,6 @@ def _normalize_tags(value) -> tuple[str, ...]:
             continue
         seen.add(cleaned)
         tags.append(cleaned)
-        if len(tags) == 8:
-            break
     return tuple(tags)
 
 

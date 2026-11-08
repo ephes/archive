@@ -993,3 +993,18 @@ No upstream request identifiers are currently retained in these diagnostics.
 Operators should use the stage, item ID, status and category to investigate in the
 upstream service through their existing authorized access. Existing historical
 error records are not rewritten by this change.
+
+### Generated summary text
+
+Generated short summaries allow at most 239 Unicode characters (under 240), long
+summaries 8,000 characters, and tag arrays at most 8 entries with 64 characters per
+normalized lowercase tag. Whitespace is normalized before measuring text; tag
+count is checked before deduplication. At least one nonempty tag is required.
+Excess output is rejected as a summary-stage failure and uses the existing retry
+policy; it is never silently truncated. Operator-authored fields are unchanged.
+
+HTML source extraction for summaries and article audio preserves leading, nested
+and trailing text from paragraphs, blockquotes, headings, lists and preformatted
+containers in document order, once each. Block boundaries separate text; inline
+markup preserves its text and line breaks separate words. Navigation, scripts
+and the existing ignored containers remain excluded.

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Ignore malformed or over-budget JSON-LD blobs without losing independent metadata;
+  bound iterative traversal to depth 32 and 10,000 values per blob.
+- Decode ARD inline audio URL JSON escapes once before HTTP(S) normalization.
+
 - Close opened media on response construction or header-setup failure without
   replacing the primary exception; retain streaming response ownership on success.
 - Traverse deep storage trees without recursion and reject invalid child names or

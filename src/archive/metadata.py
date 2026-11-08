@@ -57,13 +57,15 @@ def _ard_audio_urls_from_script(blob: str) -> list[str]:
     if "mediaResource" not in blob:
         return []
     urls: list[str] = []
+    seen: set[str] = set()
     for match in _ARD_MEDIA_AUDIO_URL_RE.finditer(blob):
         try:
             url = json.loads(match.group(1)).strip()
             url.encode("utf-8")  # Refuse unpaired JSON surrogate escapes before persistence.
         except ValueError:
             continue
-        if url and url not in urls:
+        if url and url not in seen:
+            seen.add(url)
             urls.append(url)
     return urls
 
@@ -94,6 +96,7 @@ class _MetadataHTMLParser(HTMLParser):
         self.meta: dict[str, str] = {}
         self.jsonld_blobs: list[str] = []
         self.media_candidates: list[ExtractedMediaCandidate] = []
+        self._seen_media_candidates: set[ExtractedMediaCandidate] = set()
         self.saw_article_tag: bool = False
         self._in_title = False
         self._in_jsonld = False
@@ -208,7 +211,8 @@ class _MetadataHTMLParser(HTMLParser):
             candidate_type=candidate_type,
             detection_source=detection_source,
         )
-        if candidate not in self.media_candidates:
+        if candidate not in self._seen_media_candidates:
+            self._seen_media_candidates.add(candidate)
             self.media_candidates.append(candidate)
 
 

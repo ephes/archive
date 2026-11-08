@@ -87,6 +87,10 @@ def ranged_file_response(
     file is served whole and ranges are not offered.
     """
 
+    def finalize(response: HttpResponse) -> HttpResponse:
+        response["Cache-Control"] = cache_control
+        return response
+
     transferred = file_closed = False
     try:
         byte_range = None
@@ -99,7 +103,7 @@ def ranged_file_response(
                 response = HttpResponse(status=416)
                 response["Content-Range"] = f"bytes */{size}"
                 response["Accept-Ranges"] = "bytes"
-                return response
+                return finalize(response)
 
         if byte_range is None:
             response = FileResponse(file_handle, content_type=content_type)
@@ -114,7 +118,7 @@ def ranged_file_response(
                 # Storage backends raise their own error types; any failure before
                 # the headers are sent is reported instead of a broken stream.
                 logger.warning("Seeking stored media for a range request failed", exc_info=True)
-                return HttpResponse("Audio is temporarily unavailable.", status=502)
+                return finalize(HttpResponse("Audio is temporarily unavailable.", status=502))
             length = end - start + 1
             response = FileResponse(
                 _LimitedReader(file_handle, length), status=206, content_type=content_type
@@ -127,7 +131,7 @@ def ranged_file_response(
             file_closed = True
             file_handle.close()
             response.streaming_content = ()
-        response["Cache-Control"] = cache_control
+        finalize(response)
         transferred = True
         return response
     finally:

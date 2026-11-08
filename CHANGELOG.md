@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Deduplicate discovered URLs and media-candidate identities with ordered set
+  membership while preserving first-seen output and distinct type/source provenance.
+- Preserve caller cache policy on unsatisfiable ranges and stored-media seek errors,
+  retaining range headers and file ownership. Public freshness also applies to
+  transient seek-error 502s; callers requiring immediate retries must use no-store.
+
 - Ignore malformed or over-budget JSON-LD blobs without losing independent metadata;
   bound iterative traversal to depth 32 and 10,000 values per blob.
 - Decode ARD inline audio URL JSON escapes once before HTTP(S) normalization.

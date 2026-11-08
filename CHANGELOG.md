@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Cover both stored-audio routes with real local HTTP byte-range, HEAD and
+  interrupted-client cleanup journeys using synthetic storage files.
+- Identify worker progress by item ID and stage, omitting raw URLs, title fallbacks
+  and stored error text; log metadata-fetch failures by exception category without
+  copying potentially credential-bearing exception text or traceback.
+
 - Deduplicate discovered URLs and media-candidate identities with ordered set
   membership while preserving first-seen output and distinct type/source provenance.
 - Preserve caller cache policy on unsatisfiable ranges and stored-media seek errors,

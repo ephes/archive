@@ -164,3 +164,49 @@ def test_stall_recovers_claim_that_only_needs_stage_normalization(monkeypatch):
     item.refresh_from_db()
     assert item.media_archive_status == EnrichmentStatus.PENDING
     assert item.processing_started_at is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("outcome", ["blank_title", "url_title", "failure"])
+def test_worker_output_uses_item_identity_without_url_secrets(monkeypatch, caplog, capsys, outcome):
+    from archive.metadata import ExtractedMetadata, MetadataExtractionError
+
+    url = "https://USER_SENTINEL:PASS_SENTINEL@example.com/page?private=QUERY_SENTINEL"
+    item = Item.objects.create(
+        original_url=url,
+        title=url if outcome == "url_title" else "",
+        enrichment_status=EnrichmentStatus.PENDING,
+        summary_status=EnrichmentStatus.COMPLETE,
+        transcript_status=EnrichmentStatus.COMPLETE,
+        media_archive_status=EnrichmentStatus.COMPLETE,
+        article_audio_status=EnrichmentStatus.COMPLETE,
+        summary_error=url,
+        transcript_error=url,
+        media_archive_error=url,
+        article_audio_error=url,
+    )
+    fetched = []
+
+    def fetch(original_url, *, timeout):
+        fetched.append(original_url)
+        if outcome == "failure":
+            raise MetadataExtractionError(f"Synthetic fetch failure for {original_url}")
+        return ExtractedMetadata()
+
+    monkeypatch.setattr("archive.services.extract_metadata_from_url", fetch)
+    stdout, stderr = StringIO(), StringIO()
+    if outcome == "failure":
+        with pytest.raises(CommandError, match="1 unsuccessful item"):
+            call_command("run_metadata_worker", once=True, limit=1, stdout=stdout, stderr=stderr)
+        assert "metadata_status=failed" in stderr.getvalue()
+        assert "MetadataExtractionError" in caplog.text
+    else:
+        call_command("run_metadata_worker", once=True, limit=1, stdout=stdout, stderr=stderr)
+        assert f"Completed item {item.pk}" in stdout.getvalue()
+    captured = capsys.readouterr()
+    output = stdout.getvalue() + stderr.getvalue() + caplog.text + captured.out + captured.err
+    assert fetched == [url]
+    assert f"Processing item {item.pk}" in stdout.getvalue()
+    assert "Processed 1 item(s)." in stdout.getvalue()
+    for sentinel in (url, "USER_SENTINEL", "PASS_SENTINEL", "QUERY_SENTINEL"):
+        assert sentinel not in output

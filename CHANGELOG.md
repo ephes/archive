@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Normalize invalid UTF-8, JSON recursion and integer-decoding failures to fixed
+  summary/transcription/article-audio errors with response cleanup.
+- Keep upstream error bodies, failed-job messages and raw transport details out of
+  normal stored errors and logs; retain HTTP status and fixed diagnostic categories.
+
 - Cover both stored-audio routes with real local HTTP byte-range, HEAD and
   interrupted-client cleanup journeys using synthetic storage files.
 - Identify worker progress by item ID and stage, omitting raw URLs, title fallbacks

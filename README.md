@@ -964,3 +964,18 @@ server for both source and generated article audio routes:
 `uv run pytest tests/test_stored_audio_http.py`. They check exact bytes and advertised
 lengths for full, bounded, suffix, open-ended, malformed and unsatisfiable requests,
 HEAD without body reads, and storage-reader cleanup after a client disconnects.
+
+### Upstream failure diagnostics
+
+Summary, transcription and article-audio JSON responses decode UTF-8 strictly.
+Malformed encoding, JSON recursion and integer-decoding limits become fixed stage
+errors. Responses close before worker failure/retry bookkeeping; invalid output
+publishes no generated fields or audio artifacts.
+
+Normal stored errors and logs include HTTP status or a fixed transport/limit
+category. They omit upstream error bodies, failed-job messages, raw transport
+exceptions and their exception chains, which can echo private prompts or URLs.
+No upstream request identifiers are currently retained in these diagnostics.
+Operators should use the stage, item ID, status and category to investigate in the
+upstream service through their existing authorized access. Existing historical
+error records are not rewritten by this change.

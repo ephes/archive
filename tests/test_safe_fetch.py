@@ -178,7 +178,7 @@ def test_metadata_fetch_refuses_internal_page(loopback_server, monkeypatch):
 
 def test_summary_source_fetch_refuses_internal_page(loopback_server, monkeypatch):
     monkeypatch.delenv("ARCHIVE_FETCH_PRIVATE_HOSTS", raising=False)
-    with pytest.raises(SummaryGenerationError, match="non-public network address"):
+    with pytest.raises(SummaryGenerationError, match="transport error"):
         extract_summary_source_from_url(loopback_server + "/", timeout=2)
     assert _Handler.hits == []
 
@@ -192,6 +192,6 @@ def test_transcription_media_fetch_refuses_internal_source(loopback_server, monk
         audio_url=loopback_server + "/episode.mp3",
         kind=ItemKind.PODCAST_EPISODE,
     )
-    with pytest.raises(TranscriptionGenerationError, match="non-public network address"):
+    with pytest.raises(TranscriptionGenerationError, match="transport error"):
         generate_item_transcript(item=item)
     assert _Handler.hits == []

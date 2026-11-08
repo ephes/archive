@@ -64,6 +64,12 @@ SQL operation propagates an error without reporting a successful rebuild.
 public visibility after repair, repeated rebuilding, refusal/failure paths and the
 empty/singular/plural success counts using synthetic, isolated SQLite data.
 
+Historical data migrations use the database selected by `migrate --database`, including
+queue initialization and the YouTube health seed. Populated FTS upgrade/rollback/upgrade
+journeys are covered by `tests/test_historical_migrations.py`; rolling back the indexed
+processing timestamp restores SQLite triggers after Django rebuilds the Item table.
+No manual search rebuild is needed for these journeys.
+
 ## Week JSON Feed
 
 `GET /feeds/week/<YYYY-Wnn>.json` returns public (`is_public=True`) items whose `shared_at`

@@ -4,19 +4,20 @@ from django.db import migrations, models
 
 
 def initialize_transcript_state(apps, schema_editor) -> None:
+    alias = schema_editor.connection.alias
     Item = apps.get_model("archive", "Item")
     transcribable_kinds = {"podcast_episode", "video"}
 
-    Item.objects.filter(transcript__gt="").update(
+    Item.objects.using(alias).filter(transcript__gt="").update(
         transcript_status="complete",
         transcript_generated=True,
     )
-    Item.objects.exclude(transcript__gt="").filter(
+    Item.objects.using(alias).exclude(transcript__gt="").filter(
         models.Q(kind__in=transcribable_kinds)
         | ~models.Q(audio_url="")
         | ~models.Q(media_url="")
     ).update(transcript_status="pending")
-    Item.objects.exclude(transcript__gt="").exclude(
+    Item.objects.using(alias).exclude(transcript__gt="").exclude(
         models.Q(kind__in=transcribable_kinds)
         | ~models.Q(audio_url="")
         | ~models.Q(media_url="")

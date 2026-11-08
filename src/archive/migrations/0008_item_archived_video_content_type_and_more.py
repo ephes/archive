@@ -8,10 +8,11 @@ VIDEO_SUFFIXES = (".mp4", ".m4v", ".mov", ".webm")
 
 
 def queue_existing_archivable_video(apps, schema_editor) -> None:
+    alias = schema_editor.connection.alias
     Item = apps.get_model("archive", "Item")
     candidate_ids: list[int] = []
 
-    for item in Item.objects.filter(
+    for item in Item.objects.using(alias).filter(
         archived_audio_path="",
         media_archive_status="complete",
     ).only("id", "original_url", "media_url"):
@@ -20,7 +21,7 @@ def queue_existing_archivable_video(apps, schema_editor) -> None:
             candidate_ids.append(item.id)
 
     if candidate_ids:
-        Item.objects.filter(id__in=candidate_ids).update(media_archive_status="pending")
+        Item.objects.using(alias).filter(id__in=candidate_ids).update(media_archive_status="pending")
 
 
 class Migration(migrations.Migration):

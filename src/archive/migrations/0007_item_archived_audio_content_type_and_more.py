@@ -8,6 +8,7 @@ AUDIO_SUFFIXES = (".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav")
 
 
 def queue_existing_archivable_audio(apps, schema_editor) -> None:
+    alias = schema_editor.connection.alias
     Item = apps.get_model("archive", "Item")
 
     audio_source_query = Q(audio_url__gt="")
@@ -19,7 +20,7 @@ def queue_existing_archivable_audio(apps, schema_editor) -> None:
         )
 
     (
-        Item.objects.filter(
+        Item.objects.using(alias).filter(
             archived_audio_path="",
             media_archive_status="complete",
         )

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import importlib
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from django.apps import apps as django_apps
+from django.db import connection
 from test_media_publication import fake_video_download
 
 from archive.models import (
@@ -295,7 +297,7 @@ def test_seed_migration_starts_youtube_clock_at_newest_archived_youtube_item() -
         original_url="https://youtu.be/unarchived", shared_at=NOW - timedelta(hours=1)
     )
 
-    seed(django_apps, None)
+    seed(django_apps, SimpleNamespace(connection=connection))
 
     state = ProcessingStepState.objects.get(step=YOUTUBE)
     assert state.last_success_at == NOW - timedelta(days=5)

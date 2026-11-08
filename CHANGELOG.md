@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bind historical queue/health data migrations to the selected database.
+- Preserve FTS insert/update/delete triggers when rolling back the indexed processing
+  timestamp; cover populated upgrade/rollback/upgrade and visibility journeys.
+
 - Cover both stored-audio routes with real local HTTP byte-range, HEAD and
   interrupted-client cleanup journeys using synthetic storage files.
 - Identify worker progress by item ID and stage, omitting raw URLs, title fallbacks

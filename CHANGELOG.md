@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Skip FTS updates when indexed text and row identity are unchanged, with a
+  reversible null-safe trigger migration.
+- Persist derived publication dates on partial saves while preserving empty-save
+  semantics and unrelated concurrent edits.
+
 - Bind historical queue/health data migrations to the selected database.
 - Preserve FTS insert/update/delete triggers when rolling back the indexed processing
   timestamp; cover populated upgrade/rollback/upgrade and visibility journeys.

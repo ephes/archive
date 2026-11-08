@@ -4,6 +4,7 @@ import sys
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import check_password
 from django.core.management.base import BaseCommand, CommandError
+from django.db import transaction
 
 PASSWORD_ENV_VAR = "ARCHIVE_ADMIN_PASSWORD"
 
@@ -44,21 +45,24 @@ class Command(BaseCommand):
             raise CommandError("password must not be empty")
 
         user_model = get_user_model()
-        user, created = user_model.objects.get_or_create(
-            username=username,
-            defaults={"email": email, "is_staff": True, "is_superuser": True},
-        )
-        user.email = email
-        user.is_staff = True
-        user.is_superuser = True
-        # Re-hashing an unchanged password changes the session auth hash and logs the
-        # user out everywhere, so only set it when it actually differs. The plain hasher
-        # check is used on purpose: user.check_password() would also re-hash and save a
-        # matching password whose hasher settings are outdated.
-        password_changed = created or not check_password(password, user.password)
-        if password_changed:
-            user.set_password(password)
-        user.save()
+        with transaction.atomic():
+            user, created = user_model.objects.select_for_update().get_or_create(
+                username=username,
+                defaults={"email": email, "is_staff": True, "is_superuser": True},
+            )
+            changed_fields = []
+            for field, value in (("email", email), ("is_staff", True), ("is_superuser", True)):
+                if getattr(user, field) != value:
+                    setattr(user, field, value)
+                    changed_fields.append(field)
+            # Preserve inactive accounts and unrelated fields. Avoid the user method's
+            # automatic hasher upgrade: a matching password must retain its session hash.
+            password_changed = created or not check_password(password, user.password)
+            if password_changed:
+                user.set_password(password)
+                changed_fields.append("password")
+            if changed_fields:
+                user.save(update_fields=changed_fields)
 
         action = "Created" if created else "Updated"
         detail = "" if created or password_changed else " (password unchanged)"

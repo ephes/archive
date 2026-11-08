@@ -157,3 +157,70 @@ def test_blank_username_fails(monkeypatch):
 
     with pytest.raises(CommandError, match="username must not be empty"):
         run("--username", "   ")
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("fault", ["hash", "save"])
+def test_failed_provisioning_rolls_back_new_account(monkeypatch, fault):
+    user_model = get_user_model()
+    monkeypatch.setenv("ARCHIVE_ADMIN_PASSWORD", "synthetic-secret")
+    original_save = user_model.save
+    fault_seen = []
+
+    def fail_hash(self, password):
+        fault_seen.append(True)
+        raise RuntimeError("hash failed")
+
+    def fail_save(self, *args, **kwargs):
+        if not kwargs.get("force_insert"):
+            fault_seen.append(True)
+            raise RuntimeError("save failed")
+        return original_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        user_model,
+        "set_password" if fault == "hash" else "save",
+        fail_hash if fault == "hash" else fail_save,
+    )
+    with pytest.raises(RuntimeError, match=f"{fault} failed"):
+        run("--username", "owner")
+    assert fault_seen
+    assert not user_model.objects.filter(username="owner").exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_provisioning_locks_current_row_and_saves_only_changed_fields(monkeypatch):
+    from django.db import connection
+    from django.db.models.query import QuerySet
+
+    user_model = get_user_model()
+    user = user_model.objects.create_user(username="owner", password="old-secret")
+    original_lock = QuerySet.select_for_update
+    original_save = user_model.save
+    locks, saved_fields = [], []
+    monkeypatch.setenv("ARCHIVE_ADMIN_PASSWORD", "current-secret")
+
+    def lock_current(self, *args, **kwargs):
+        if self.model is user_model:
+            assert connection.in_atomic_block
+            # An edit committed before lock acquisition must be read by provisioning.
+            current = user_model.objects.get(pk=user.pk)
+            current.set_password("current-secret")
+            user_model.objects.filter(pk=user.pk).update(
+                password=current.password, is_active=False, first_name="Current"
+            )
+            locks.append(current.password)
+        return original_lock(self, *args, **kwargs)
+
+    def save_fields(self, *args, **kwargs):
+        saved_fields.append(set(kwargs.get("update_fields") or ()))
+        return original_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(QuerySet, "select_for_update", lock_current)
+    monkeypatch.setattr(user_model, "save", save_fields)
+    run("--username", "owner", "--email", "owner@example.com")
+    user.refresh_from_db()
+    assert locks == [user.password]
+    assert user.is_active is False
+    assert user.first_name == "Current"
+    assert saved_fields == [{"email", "is_staff", "is_superuser"}]

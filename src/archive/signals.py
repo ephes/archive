@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from functools import partial
 
 from django.db import transaction
@@ -12,6 +13,17 @@ from archive.media_storage import (
 )
 from archive.models import Item
 
+logger = logging.getLogger(__name__)
+
+
+def _cleanup_after_delete(paths: tuple[str, ...], *, using: str) -> None:
+    try:
+        delete_unreferenced_archive_media_paths(paths, using=using)
+    except Exception:
+        # The row deletion has committed. Leave objects for reference-safe recovery;
+        # backend exception text and object keys may contain private information.
+        logger.warning("Archive media cleanup failed after deletion; retry the orphan sweep.")
+
 
 @receiver(post_delete, sender=Item)
 def cleanup_deleted_item_archive_media(sender, instance: Item, using: str, **kwargs) -> None:
@@ -20,6 +32,6 @@ def cleanup_deleted_item_archive_media(sender, instance: Item, using: str, **kwa
         return
 
     transaction.on_commit(
-        partial(delete_unreferenced_archive_media_paths, paths, using=using),
+        partial(_cleanup_after_delete, paths, using=using),
         using=using,
     )

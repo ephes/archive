@@ -26,7 +26,9 @@ Public endpoints:
   unsatisfiable range with `416`, so podcast apps and browsers can seek and resume. Multiple ranges, `If-Range`
   and anything malformed get the whole file. `/items/<id>/article-audio/` (generated article audio)
   supports the same ranges. Both endpoints accept `HEAD` with whole-file GET headers and no body;
-  Range is ignored on HEAD.
+  Range is ignored on HEAD. The response owns an opened file only after construction
+  and header setup succeed; setup failures close it while preserving the primary error.
+  Successful streaming keeps the file open until the response closes.
 - `/feeds/podcast.xml` podcast-style feed for items with stable local audio enclosures
 - `/feeds/podcast/page/<n>.xml` older podcast feed pages when more than 50 eligible items exist
 - `/api/health/` unauthenticated JSON processing health for monitoring (step counts and timestamps
@@ -807,8 +809,10 @@ that commits the item references, so an uploaded object is always either reserve
 or referenced. Orphan cleanup spools the complete object inventory to temporary disk
 storage before deleting anything, streams database references in bounded batches using
 the same whitespace normalization as other media paths, then processes sorted unique
-candidates. References are scanned once rather than once per object batch. Temporary disk use grows with the inventory;
-Python candidate memory stays bounded. An incomplete listing aborts without deletion.
+candidates. References are scanned once rather than once per object batch. Temporary
+disk use grows with the inventory; Python candidate memory stays bounded. An incomplete
+listing aborts without deletion. Storage traversal uses an explicit stack for deep trees and rejects empty, dot, parent, separator-containing or NUL child names
+with a bounded diagnostic; an unavailable child subtree also aborts before deletion.
 Summary reference counts include distinct nonblank paths across all three media fields,
 even when their objects are missing. Orphan cleanup treats this listing only as candidates:
 for each candidate it checks the reservation first and the item references second,

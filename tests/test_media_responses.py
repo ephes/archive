@@ -262,3 +262,133 @@ def test_archived_head_has_get_headers_closes_file_without_reading(
     assert response["Accept-Ranges"] == "bytes"
     assert b"".join(response.streaming_content) == b""
     assert handle.closed
+
+
+@pytest.mark.parametrize("header", [None, "bytes=2-4"])
+@pytest.mark.parametrize("fault", ["constructor", "inference", "headers"])
+@pytest.mark.parametrize("close_error", [False, True])
+def test_response_construction_failure_closes_owned_handle_once(
+    monkeypatch, caplog, header, fault, close_error
+):
+    from django.http import FileResponse
+    from django.test import RequestFactory
+
+    from archive import media_responses
+
+    failure = RuntimeError("response setup failed")
+
+    class OwnedFile(io.BytesIO):
+        closes = 0
+
+        def close(self):
+            self.closes += 1
+            super().close()
+            if close_error:
+                raise RuntimeError("secondary close failure")
+
+    handle = OwnedFile(PAYLOAD)
+
+    def fail(*args, **kwargs):
+        raise failure
+
+    if fault == "constructor":
+        monkeypatch.setattr(media_responses, "FileResponse", fail)
+    elif fault == "inference":
+        monkeypatch.setattr(FileResponse, "set_headers", fail)
+    else:
+        original_setitem = FileResponse.__setitem__
+
+        def fail_headers(self, name, value):
+            if name == "Cache-Control":
+                raise failure
+            original_setitem(self, name, value)
+
+        monkeypatch.setattr(FileResponse, "__setitem__", fail_headers)
+    request = RequestFactory().get("/media", headers={"Range": header} if header else {})
+    with pytest.raises(RuntimeError) as caught:
+        media_responses.ranged_file_response(
+            request,
+            file_handle=handle,
+            size=len(PAYLOAD),
+            content_type="audio/mpeg",
+            cache_control="public, max-age=3600",
+        )
+    assert caught.value is failure
+    assert handle.closed
+    assert handle.closes == 1
+    if close_error:
+        assert "response preparation failed (RuntimeError)" in caplog.text
+        assert "secondary close failure" not in caplog.text
+
+
+@pytest.mark.parametrize("fault", ["seek", "tell"])
+def test_response_file_probe_failure_releases_handle(monkeypatch, fault):
+    from django.test import RequestFactory
+
+    from archive.media_responses import ranged_file_response
+
+    handle = TrackedFile(PAYLOAD)
+    failure = RuntimeError("file probe failed")
+    closes = []
+    original_close = handle.close
+
+    def close():
+        closes.append(True)
+        original_close()
+
+    def fail(*args):
+        raise failure
+
+    monkeypatch.setattr(handle, "close", close)
+    monkeypatch.setattr(handle, fault, fail)
+    if fault == "seek":
+        response = ranged_file_response(
+            RequestFactory().get("/media", headers={"Range": "bytes=2-4"}),
+            file_handle=handle,
+            size=9,
+            content_type="audio/mpeg",
+            cache_control="public",
+        )
+        assert response.status_code == 502
+    else:
+        with pytest.raises(RuntimeError) as caught:
+            ranged_file_response(
+                RequestFactory().get("/media"),
+                file_handle=handle,
+                size=9,
+                content_type="audio/mpeg",
+                cache_control="public",
+            )
+        assert caught.value is failure
+    assert handle.closed
+    assert closes == [True]
+
+
+@pytest.mark.parametrize("header", [None, "bytes=2-4"])
+def test_successful_response_transfers_file_until_response_close(db, monkeypatch, header):
+    from django.test import RequestFactory
+
+    from archive.media_responses import ranged_file_response
+
+    handle = TrackedFile(PAYLOAD)
+    closes = []
+    original_close = handle.close
+
+    def close():
+        closes.append(True)
+        original_close()
+
+    monkeypatch.setattr(handle, "close", close)
+    response = ranged_file_response(
+        RequestFactory().get("/media", headers={"Range": header} if header else {}),
+        file_handle=handle,
+        size=9,
+        content_type="audio/mpeg",
+        cache_control="public",
+    )
+    assert not handle.closed
+    assert b"".join(response.streaming_content) == (PAYLOAD[2:5] if header else PAYLOAD)
+    assert closes == []
+    response.close()
+    response.close()
+    assert closes == [True]

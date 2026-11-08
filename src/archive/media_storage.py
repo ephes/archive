@@ -88,20 +88,28 @@ def iter_archive_media_object_names(prefix: str = "") -> Iterator[str]:
 
 
 def _iter_storage_object_names(*, storage, prefix: str) -> Iterator[str]:
-    try:
-        directories, files = storage.listdir(prefix)
-    except (FileNotFoundError, NotADirectoryError):
-        return
+    pending = [prefix]
+    while pending:
+        current = pending.pop()
+        try:
+            directories, files = storage.listdir(current)
+        except (FileNotFoundError, NotADirectoryError):
+            if current == prefix:
+                return
+            raise ValueError("Incomplete archive media listing: subtree unavailable") from None
 
-    normalized_prefix = prefix.strip("/")
-    for file_name in files:
-        object_name = "/".join(part for part in (normalized_prefix, file_name) if part)
-        if object_name:
-            yield object_name
-
-    for directory_name in directories:
-        child_prefix = "/".join(part for part in (normalized_prefix, directory_name) if part)
-        yield from _iter_storage_object_names(storage=storage, prefix=child_prefix)
+        for names in (directories, files):
+            for name in names:
+                if (
+                    not isinstance(name, str)
+                    or name in ("", ".", "..")
+                    or any(char in name for char in ("/", "\\", "\0"))
+                ):
+                    raise ValueError("Invalid archive media listing: expected a child name")
+        for name in sorted(files):
+            yield f"{current}/{name}" if current else name
+        for name in sorted(directories, reverse=True):
+            pending.append(f"{current}/{name}" if current else name)
 
 
 def _normalized_unique_paths(paths: Iterable[str]) -> Iterator[str]:

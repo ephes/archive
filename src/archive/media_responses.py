@@ -87,44 +87,56 @@ def ranged_file_response(
     file is served whole and ranges are not offered.
     """
 
-    byte_range = None
-    # Without a validator (ETag/Last-Modified) an If-Range can never match, so
-    # such a request gets the whole file (RFC 9110 section 13.1.5).
-    if request.method == "GET" and size > 0 and "If-Range" not in request.headers:
-        try:
-            byte_range = parse_single_byte_range(request.headers.get("Range", ""), size)
-        except UnsatisfiableRange:
-            file_handle.close()
-            response = HttpResponse(status=416)
-            response["Content-Range"] = f"bytes */{size}"
-            response["Accept-Ranges"] = "bytes"
-            return response
+    transferred = file_closed = False
+    try:
+        byte_range = None
+        # Without a validator (ETag/Last-Modified) an If-Range can never match, so
+        # such a request gets the whole file (RFC 9110 section 13.1.5).
+        if request.method == "GET" and size > 0 and "If-Range" not in request.headers:
+            try:
+                byte_range = parse_single_byte_range(request.headers.get("Range", ""), size)
+            except UnsatisfiableRange:
+                response = HttpResponse(status=416)
+                response["Content-Range"] = f"bytes */{size}"
+                response["Accept-Ranges"] = "bytes"
+                return response
 
-    if byte_range is None:
-        response = FileResponse(file_handle, content_type=content_type)
-        if size > 0:
-            response["Content-Length"] = str(size)
+        if byte_range is None:
+            response = FileResponse(file_handle, content_type=content_type)
+            if size > 0:
+                response["Content-Length"] = str(size)
+                response["Accept-Ranges"] = "bytes"
+        else:
+            start, end = byte_range
+            try:
+                file_handle.seek(start)
+            except Exception:
+                # Storage backends raise their own error types; any failure before
+                # the headers are sent is reported instead of a broken stream.
+                logger.warning("Seeking stored media for a range request failed", exc_info=True)
+                return HttpResponse("Audio is temporarily unavailable.", status=502)
+            length = end - start + 1
+            response = FileResponse(
+                _LimitedReader(file_handle, length), status=206, content_type=content_type
+            )
+            response["Content-Range"] = f"bytes {start}-{end}/{size}"
+            response["Content-Length"] = str(length)
             response["Accept-Ranges"] = "bytes"
-    else:
-        start, end = byte_range
-        try:
-            file_handle.seek(start)
-        except Exception:
-            # Storage backends raise their own error types; any failure before
-            # the headers are sent is reported instead of a broken stream.
+        if request.method == "HEAD":
+            # Keep GET headers, release the file without iterating its body.
+            file_closed = True
             file_handle.close()
-            logger.warning("Seeking stored media for a range request failed", exc_info=True)
-            return HttpResponse("Audio is temporarily unavailable.", status=502)
-        length = end - start + 1
-        response = FileResponse(
-            _LimitedReader(file_handle, length), status=206, content_type=content_type
-        )
-        response["Content-Range"] = f"bytes {start}-{end}/{size}"
-        response["Content-Length"] = str(length)
-        response["Accept-Ranges"] = "bytes"
-    if request.method == "HEAD":
-        # Keep GET headers, release the file without iterating its body.
-        file_handle.close()
-        response.streaming_content = ()
-    response["Cache-Control"] = cache_control
-    return response
+            response.streaming_content = ()
+        response["Cache-Control"] = cache_control
+        transferred = True
+        return response
+    finally:
+        if not transferred and not file_closed:
+            try:
+                file_handle.close()
+            except Exception as exc:
+                # Cleanup must not replace the response setup/storage failure.
+                logger.warning(
+                    "Closing stored media during response preparation failed (%s)",
+                    type(exc).__name__,
+                )

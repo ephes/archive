@@ -271,7 +271,10 @@ printf '%s\n' "$PASSWORD" | just manage ensure_admin_user --username owner --pas
 
 The password is only re-hashed when it differs from the stored one, so re-running the command on
 every deploy no longer logs the user out. `--password` still works for compatibility but is
-deprecated and prints a warning.
+deprecated and prints a warning. Provisioning runs in one transaction, locks the current
+account before comparing credentials, and saves only changed provisioning fields. Failure
+rolls back a newly created account. Existing inactive accounts stay inactive; reactivation
+requires a separate operator action.
 
 ## Configuration
 
@@ -794,7 +797,9 @@ a durable database transaction and cannot be nested inside an application
 transaction. Superseded objects are deleted only after commit. A failure that
 surfaces during or after the commit (for example the worker's processing alarm)
 never deletes the new objects when their references were committed; at worst the
-superseded objects stay behind as ordinary orphans.
+superseded objects stay behind as ordinary orphans. Item-deletion cleanup failures are
+logged without backend details and do not fail the already committed deletion or prevent
+later commit callbacks. Retained objects can be reclaimed with the orphan sweep.
 
 A `PendingArchiveMediaUpload` reservation commits before each storage write and
 protects its namespace. Publication removes the reservation in the same transaction

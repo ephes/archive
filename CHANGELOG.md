@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Provision admin accounts atomically from a locked current row, preserve inactive
+  accounts and unchanged password hashes, and save only changed provisioning fields.
+- Isolate post-deletion media cleanup failures from committed item deletion; log a
+  safe recovery diagnostic and leave retained objects for the orphan sweep.
+
 - Protect search-index repair with real SQLite drift, repeat-rebuild, visibility,
   refusal/failure and success-count regressions; command behavior is unchanged.
 

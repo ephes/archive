@@ -163,3 +163,38 @@ def test_cleanup_archive_media_orphans_delete_removes_only_orphans() -> None:
     assert storages["archive_media"].exists(orphaned_path) is False
 
     _delete_archive_media(referenced_audio_path, referenced_video_path)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_post_delete_storage_failure_is_recoverable(monkeypatch, caplog):
+    path = "items/failed-cleanup/audio.mp3"
+    item = Item.objects.create(
+        original_url="https://example.com/cleanup-fault", archived_audio_path=path
+    )
+    pk = item.pk
+    _save_archive_media(path)
+    storage = storages["archive_media"]
+    original_delete = storage.delete
+    faults, callbacks = [], []
+
+    def fail_delete(name):
+        faults.append(name)
+        raise RuntimeError("private-backend-details")
+
+    monkeypatch.setattr(storage, "delete", fail_delete)
+    with transaction.atomic():
+        item.delete()
+        transaction.on_commit(lambda: callbacks.append(True))
+    assert faults == [path]
+    assert callbacks == [True]
+    assert not Item.objects.filter(pk=pk).exists()
+    assert storage.exists(path)
+    assert "orphan sweep" in caplog.text
+    assert "private-backend-details" not in caplog.text
+    assert path not in caplog.text
+
+    monkeypatch.setattr(storage, "delete", original_delete)
+    call_command(
+        "cleanup_archive_media_orphans", "--delete", "--min-age-seconds", "0", stdout=StringIO()
+    )
+    assert not storage.exists(path)

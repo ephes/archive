@@ -354,3 +354,72 @@ def test_sweep_preserves_whitespace_normalized_references(monkeypatch, padding):
     call_command("cleanup_archive_media_orphans", "--delete", "--min-age-seconds", "0", stdout=out)
     assert storages["archive_media"].exists(path)
     assert "referenced=1 objects=1 orphaned=0 deleted=0" in out.getvalue()
+
+
+@pytest.mark.parametrize("depth", [1, 1200])
+def test_storage_listing_handles_deep_trees_without_recursion(monkeypatch, depth):
+    from archive.media_storage import iter_archive_media_object_names
+
+    calls = []
+
+    def listdir(prefix):
+        calls.append(prefix)
+        level = prefix.count("/") + 1 if prefix else 0
+        return (["d"], []) if level < depth else ([], ["audio.mp3"])
+
+    monkeypatch.setattr(storages["archive_media"], "listdir", listdir)
+    assert list(iter_archive_media_object_names()) == ["d/" * depth + "audio.mp3"]
+    assert len(calls) == depth + 1
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("child", ["", ".", "..", "/", "items/child", "items", "a\\b", "a\x00b"])
+def test_invalid_storage_listing_never_reaches_delete(monkeypatch, child):
+    calls, deleted = [], []
+
+    def listdir(prefix):
+        calls.append(prefix)
+        if len(calls) > 3:
+            pytest.fail("listing did not reject a non-advancing child promptly")
+        if prefix == "":
+            return ["items"], ["orphan.mp3"]
+        if child == "items":
+            # A backend returning the current full prefix (contains a separator).
+            if prefix == "items":
+                return ["nested"], []
+            return [prefix], []
+        return [child], []
+
+    monkeypatch.setattr(storages["archive_media"], "listdir", listdir)
+    monkeypatch.setattr(
+        "archive.management.commands.cleanup_archive_media_orphans.delete_unreferenced_archive_media_paths",
+        lambda paths: deleted.extend(paths),
+    )
+    with pytest.raises(ValueError, match="Invalid archive media listing"):
+        call_command(
+            "cleanup_archive_media_orphans", "--delete", "--min-age-seconds", "0", stdout=StringIO()
+        )
+    assert deleted == []
+    assert len(calls) <= 3
+
+
+@pytest.mark.django_db(transaction=True)
+def test_disappearing_storage_subtree_aborts_before_delete(monkeypatch):
+    deleted = []
+
+    def listdir(prefix):
+        if not prefix:
+            return ["gone"], ["orphan.mp3"]
+        raise FileNotFoundError("private backend path")
+
+    monkeypatch.setattr(storages["archive_media"], "listdir", listdir)
+    monkeypatch.setattr(
+        "archive.management.commands.cleanup_archive_media_orphans.delete_unreferenced_archive_media_paths",
+        lambda paths: deleted.extend(paths),
+    )
+    with pytest.raises(ValueError, match="Incomplete archive media listing") as caught:
+        call_command(
+            "cleanup_archive_media_orphans", "--delete", "--min-age-seconds", "0", stdout=StringIO()
+        )
+    assert "private backend path" not in str(caught.value)
+    assert deleted == []

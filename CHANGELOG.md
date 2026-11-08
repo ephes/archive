@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Close opened media on response construction or header-setup failure without
+  replacing the primary exception; retain streaming response ownership on success.
+- Traverse deep storage trees without recursion and reject invalid child names or
+  incomplete subtrees before the orphan sweep can delete any objects.
+
 - Bound orphan-sweep memory with a temporary disk inventory and batched database
   reference streaming; retain path normalization, sorted unique reports and finish
   listing before deletion.

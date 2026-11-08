@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Bound health-event retention pruning to 100 expired events per outcome, preserving
+  exact recent counts and ongoing failure streaks while later outcomes drain backlogs.
+- Recover at most 100 stale items per worker iteration, oldest first, and recheck
+  selected attempt timestamps before resetting processing states.
+- Cover killed-worker/reopened-SQLite recovery at claim and media-publication barriers,
+  including fresh leases, delayed superseded results and shared media references.
+
 - Reject generated summaries and tags beyond documented per-field/count limits
   before publication, retaining operator content and existing retry behavior.
 - Preserve nested HTML container text once in order for summary and article-audio

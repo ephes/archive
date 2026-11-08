@@ -67,14 +67,19 @@ def delete_unreferenced_archive_media_paths(
 
 
 def referenced_archive_media_paths() -> set[str]:
+    return set(iter_archive_media_reference_paths())
+
+
+def iter_archive_media_reference_paths() -> Iterator[str]:
+    """Stream normalized references without retaining paths or whole model rows."""
     from archive.models import Item
 
-    referenced_paths: set[str] = set()
-    for field_name in ARCHIVE_MEDIA_PATH_FIELDS:
-        referenced_paths.update(
-            _normalized_unique_paths(Item.objects.values_list(field_name, flat=True).iterator())
-        )
-    return referenced_paths
+    rows = Item.objects.order_by().values_list(*ARCHIVE_MEDIA_PATH_FIELDS).iterator(chunk_size=128)
+    for row in rows:
+        for raw_path in row:
+            path = str(raw_path or "").strip()
+            if path:
+                yield path
 
 
 def iter_archive_media_object_names(prefix: str = "") -> Iterator[str]:

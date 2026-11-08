@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
 from django.core.files.storage import storages
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from archive.media_storage import (
     ARCHIVE_MEDIA_STORAGE_ALIAS,
     delete_unreferenced_archive_media_paths,
     iter_archive_media_object_names,
-    referenced_archive_media_paths,
+    iter_archive_media_reference_paths,
 )
 
 
@@ -20,7 +25,7 @@ class Command(BaseCommand):
             "--min-age-seconds",
             type=int,
             default=3600,
-            help="Additional age grace (default: one hour); pending uploads are always protected.",
+            help="Age grace (default: one hour; zero disables); pending uploads stay protected.",
         )
         parser.add_argument(
             "--delete",
@@ -29,48 +34,63 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options) -> None:
+        min_age = options["min_age_seconds"]
+        if min_age < 0:
+            raise CommandError("--min-age-seconds must be non-negative (zero disables age grace)")
         delete_mode = options["delete"]
         mode_label = "delete" if delete_mode else "dry-run"
-        referenced_paths = referenced_archive_media_paths()
-        object_names = sorted(set(iter_archive_media_object_names()))
-        orphaned_paths = [
-            object_name for object_name in object_names if object_name not in referenced_paths
-        ]
+        orphaned_count = deleted_count = 0
 
-        if delete_mode:
-            self.stdout.write("Delete mode: removing orphaned archive media objects.")
-        else:
-            self.stdout.write("Dry-run mode: reporting orphaned archive media objects only.")
+        # Spool to disk before doing anything destructive. This gives sorted,
+        # unique output with bounded memory and no deletions on incomplete listing.
+        with (
+            TemporaryDirectory(prefix="archive-media-") as directory,
+            closing(sqlite3.connect(Path(directory) / "inventory.sqlite3")) as inventory,
+        ):
+            inventory.execute("CREATE TABLE refs (name TEXT PRIMARY KEY) WITHOUT ROWID")
+            inventory.executemany(
+                "INSERT OR IGNORE INTO refs VALUES (?)",
+                ((name,) for name in iter_archive_media_reference_paths()),
+            )
+            referenced_count = inventory.execute("SELECT COUNT(*) FROM refs").fetchone()[0]
+            inventory.execute("CREATE TABLE objects (name TEXT PRIMARY KEY) WITHOUT ROWID")
+            inventory.executemany(
+                "INSERT OR IGNORE INTO objects VALUES (?)",
+                ((name,) for name in iter_archive_media_object_names()),
+            )
+            object_count = inventory.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
+            if delete_mode:
+                self.stdout.write("Delete mode: removing orphaned archive media objects.")
+            else:
+                self.stdout.write("Dry-run mode: reporting orphaned archive media objects only.")
+            objects = inventory.execute(
+                "SELECT objects.name FROM objects LEFT JOIN refs ON objects.name = refs.name "
+                "WHERE refs.name IS NULL ORDER BY objects.name"
+            )
+            for (path,) in objects:
+                orphaned_count += 1
+                self.stdout.write(f"ORPHAN {path}")
+                if delete_mode and self._is_old_enough(path, min_age):
+                    # Recheck reservations and references in the final transaction.
+                    deleted_count += len(delete_unreferenced_archive_media_paths((path,)))
 
-        if orphaned_paths:
-            for orphaned_path in orphaned_paths:
-                self.stdout.write(f"ORPHAN {orphaned_path}")
-        else:
+        if not orphaned_count:
             self.stdout.write("No orphaned archive media objects found.")
-
-        deleted_paths: list[str] = []
-        if delete_mode and orphaned_paths:
-            for path in orphaned_paths:
-                if not self._is_old_enough(path, options["min_age_seconds"]):
-                    continue
-                # The snapshot above only selects candidates. Reservations and
-                # references are verified again, transactionally, per object.
-                deleted_paths.extend(delete_unreferenced_archive_media_paths((path,)))
-            deleted_label = "object" if len(deleted_paths) == 1 else "objects"
+        elif delete_mode:
+            deleted_label = "object" if deleted_count == 1 else "objects"
             self.stdout.write(
                 self.style.SUCCESS(
-                    f"Deleted {len(deleted_paths)} orphaned archive media {deleted_label}."
+                    f"Deleted {deleted_count} orphaned archive media {deleted_label}."
                 )
             )
-        elif orphaned_paths:
+        else:
             self.stdout.write("Re-run with --delete to remove the orphaned archive media objects.")
-
         self.stdout.write(
             "Summary: "
-            f"referenced={len(referenced_paths)} "
-            f"objects={len(object_names)} "
-            f"orphaned={len(orphaned_paths)} "
-            f"deleted={len(deleted_paths)} "
+            f"referenced={referenced_count} "
+            f"objects={object_count} "
+            f"orphaned={orphaned_count} "
+            f"deleted={deleted_count} "
             f"mode={mode_label}"
         )
 
@@ -79,8 +99,8 @@ class Command(BaseCommand):
             return True
         try:
             modified = storages[ARCHIVE_MEDIA_STORAGE_ALIAS].get_modified_time(path)
+            return (timezone.now() - modified).total_seconds() >= min_age_seconds
         except Exception:
             # Unknown age (unsupported backend, object already gone, backend
             # error such as an S3 404): keep the object and continue the sweep.
             return False
-        return (timezone.now() - modified).total_seconds() >= min_age_seconds

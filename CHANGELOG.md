@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Reject generated summaries and tags beyond documented per-field/count limits
+  before publication, retaining operator content and existing retry behavior.
+- Preserve nested HTML container text once in order for summary and article-audio
+  sources, including short headings and blockquote tails.
+
 - Normalize invalid UTF-8, JSON recursion and integer-decoding failures to fixed
   summary/transcription/article-audio errors with response cleanup.
 - Keep upstream error bodies, failed-job messages and raw transport details out of

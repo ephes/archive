@@ -353,7 +353,12 @@ The metadata worker's `--timeout` (default 15 seconds) is one total fetch budget
 including DNS, connection, redirects and HTML body reads. A guarded downloader
 subprocess is killed and reaped on expiry; public-address validation, DNS pinning
 and the 1 MiB metadata window still apply. Parsing keeps incremental charset and
-body media-candidate support within that byte window.
+body media-candidate support within that byte window. Each JSON-LD blob is
+limited to 10,000 values and depth 32 (root depth 0), including nested fields.
+Malformed JSON, decoder resource/domain errors and blobs exceeding either bound
+are ignored as a whole; other blobs and HTML metadata remain available. ARD inline
+media URLs are decoded once as JSON strings, then restricted to HTTP(S) using the
+same relative-URL normalization as other media candidates. Malformed strings, including unpaired Unicode surrogate escapes, are skipped.
 
 Credential-bearing summary, transcription and article-audio requests only follow
 redirects on the initial HTTP(S) origin (scheme, host and effective port).

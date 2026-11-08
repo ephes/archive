@@ -26,6 +26,8 @@ from django.utils.dateparse import parse_date, parse_datetime
 AUDIO_SUFFIXES = (".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav")
 VIDEO_SUFFIXES = (".mp4", ".m4v", ".mov", ".webm", ".m3u8")
 MAX_METADATA_BYTES = 1024 * 1024
+MAX_JSONLD_DEPTH = 32
+MAX_JSONLD_NODES = 10000
 _METADATA_CHUNK_SIZE = 8192
 REQUEST_HEADERS = {
     "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
@@ -43,7 +45,7 @@ class MetadataExtractionError(RuntimeError):
 #       "audioURL": "//wdrmedien-a.akamaihd.net/…_MP3-128.mp3" } } }
 # Their og:audio tag deceptively points at the HTML page itself, so the
 # enclosure is only discoverable from this script payload.
-_ARD_MEDIA_AUDIO_URL_RE = re.compile(r'"audioURL"\s*:\s*"([^"]+)"')
+_ARD_MEDIA_AUDIO_URL_RE = re.compile(r'"audioURL"\s*:\s*("(?:[^"\\]|\\.)*")')
 
 
 def _ard_audio_urls_from_script(blob: str) -> list[str]:
@@ -56,7 +58,11 @@ def _ard_audio_urls_from_script(blob: str) -> list[str]:
         return []
     urls: list[str] = []
     for match in _ARD_MEDIA_AUDIO_URL_RE.finditer(blob):
-        url = match.group(1).strip()
+        try:
+            url = json.loads(match.group(1)).strip()
+            url.encode("utf-8")  # Refuse unpaired JSON surrogate escapes before persistence.
+        except ValueError:
+            continue
         if url and url not in urls:
             urls.append(url)
     return urls
@@ -465,24 +471,32 @@ def _extract_jsonld_metadata(blobs: list[str], base_url: str) -> ExtractedMetada
 def _iter_jsonld_records(blob: str) -> list[dict]:
     try:
         data = json.loads(blob)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError, OverflowError):
         return []
 
     records: list[dict] = []
+    # Validate every value, including fields consumed by recursive scalar helpers.
+    # Only root/list records and their @graph descendants supply metadata.
+    stack = [(data, 0, True)]
+    visited = 0
+    while stack:
+        value, depth, is_record = stack.pop()
+        visited += 1
+        if depth > MAX_JSONLD_DEPTH or visited > MAX_JSONLD_NODES:
+            return []
+        if isinstance(value, (list, dict)):
+            if visited + len(stack) + len(value) > MAX_JSONLD_NODES:
+                return []
+            if isinstance(value, list):
+                stack.extend((item, depth + 1, is_record) for item in reversed(value))
+            else:
+                if is_record:
+                    records.append(value)
+                stack.extend(
+                    (item, depth + 1, is_record and key == "@graph")
+                    for key, item in reversed(value.items())
+                )
 
-    def visit(value) -> None:
-        if isinstance(value, list):
-            for item in value:
-                visit(item)
-            return
-        if not isinstance(value, dict):
-            return
-        records.append(value)
-        graph = value.get("@graph")
-        if graph:
-            visit(graph)
-
-    visit(data)
     return records
 
 

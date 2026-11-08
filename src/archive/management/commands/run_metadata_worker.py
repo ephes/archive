@@ -115,7 +115,7 @@ class Command(BaseCommand):
                 if item is None:
                     break
                 processed += 1
-                self.stdout.write(f"Processing item {item.pk}: {item.original_url}")
+                self.stdout.write(f"Processing item {item.pk}: enrichment pass.")
                 claimed_started_at = item.processing_started_at
                 try:
                     with self._item_processing_timeout(stale_processing_after):
@@ -150,34 +150,23 @@ class Command(BaseCommand):
                 item.refresh_from_db(
                     fields=[
                         "enrichment_status",
-                        "enrichment_error",
                         "transcript_status",
-                        "transcript_error",
                         "media_archive_status",
-                        "media_archive_error",
                         "summary_status",
-                        "summary_error",
                         "article_audio_status",
-                        "article_audio_error",
-                        "title",
                     ]
                 )
                 if success:
-                    self.stdout.write(f"Completed item {item.pk}: {item.display_title}")
+                    self.stdout.write(f"Completed item {item.pk}: enrichment pass.")
                 else:
                     unsuccessful += 1
                     self.stderr.write(
                         "Background enrichment did not fully succeed for item "
                         f"{item.pk}; metadata_status={item.enrichment_status}; "
-                        f"metadata_error={item.enrichment_error}; "
                         f"media_archive_status={item.media_archive_status}; "
-                        f"media_archive_error={item.media_archive_error}; "
                         f"transcript_status={item.transcript_status}; "
-                        f"transcript_error={item.transcript_error}; "
                         f"summary_status={item.summary_status}; "
-                        f"summary_error={item.summary_error}; "
-                        f"article_audio_status={item.article_audio_status}; "
-                        f"article_audio_error={item.article_audio_error}"
+                        f"article_audio_status={item.article_audio_status}"
                     )
             if options["once"]:
                 self.stdout.write(f"Processed {processed} item(s).")

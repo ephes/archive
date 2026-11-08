@@ -869,7 +869,7 @@ def _enrich_item_metadata_fields(item: Item, timeout: int = 15) -> bool:
     try:
         metadata = extract_metadata_from_url(item.original_url, timeout=timeout)
     except Exception as exc:
-        logger.exception("Metadata extraction failed for item %s", item.pk)
+        logger.error("Metadata extraction failed for item %s (%s)", item.pk, type(exc).__name__)
         record_step_outcome(ProcessingStep.METADATA, succeeded=False, item_id=item.pk)
         return _mark_metadata_failure(item, str(exc))
 

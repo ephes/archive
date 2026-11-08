@@ -410,6 +410,14 @@ Metadata extraction plus transcription plus summary/tag generation runs in a sep
 just manage run_metadata_worker --once
 ```
 
+Worker progress identifies the item ID and enrichment pass, with per-stage status
+and final counts. It omits saved URLs, titles (which can fall back to URLs), and
+stored error text from command output. Metadata-fetch failure logs identify the
+item and exception category without exception text or traceback, so URL credentials
+and private query values are not copied into those logs. Inspect stored item errors
+in the authenticated admin when investigating a failed stage; there is no raw-URL
+progress/debug mode.
+
 `--once` processes up to `--limit` available items, continuing past failed or stalled items.
 It prints the processed count, then exits nonzero if any attempted item failed or stalled.
 An empty pass or a pass whose attempts all succeed exits zero. Continuous mode keeps polling
@@ -949,3 +957,10 @@ uploads are discarded. Failed uploads are discarded through the reference-aware 
 was interrupted. If compensation cannot verify the database, or the process is killed,
 a protected reservation can remain; follow the reservation recovery procedure above. To intentionally regenerate
 article audio, clear its stored file/size/type as well as its artifact/job state first.
+
+
+Stored-audio HTTP regression journeys use synthetic files and a loopback Django WSGI
+server for both source and generated article audio routes:
+`uv run pytest tests/test_stored_audio_http.py`. They check exact bytes and advertised
+lengths for full, bounded, suffix, open-ended, malformed and unsatisfiable requests,
+HEAD without body reads, and storage-reader cleanup after a client disconnects.

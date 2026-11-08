@@ -1482,7 +1482,7 @@ def test_run_metadata_worker_requeues_current_item_when_processing_stalls(monkey
         )
 
     assert recovered_ids == [item.pk]
-    assert f"Processing item {item.pk}: https://example.com/stalled" in stdout.getvalue()
+    assert f"Processing item {item.pk}: enrichment pass." in stdout.getvalue()
     assert "re-queued its in-flight work" in stderr.getvalue()
 
 

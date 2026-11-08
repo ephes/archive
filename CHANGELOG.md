@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Skip FTS updates when indexed text and row identity are unchanged, with a
+  reversible null-safe trigger migration.
+- Persist derived publication dates on partial saves while preserving empty-save
+  semantics and unrelated concurrent edits.
+
 - Cover both stored-audio routes with real local HTTP byte-range, HEAD and
   interrupted-client cleanup journeys using synthetic storage files.
 - Identify worker progress by item ID and stage, omitting raw URLs, title fallbacks

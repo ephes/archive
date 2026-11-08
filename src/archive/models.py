@@ -217,15 +217,23 @@ class Item(models.Model):
         )
 
     def save(self, *args, **kwargs) -> None:
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            update_fields = set(update_fields)
+            kwargs["update_fields"] = update_fields
+            if not update_fields:
+                return super().save(*args, **kwargs)
+
         if self.is_public and self.published_at is None:
             self.published_at = self.shared_at
+            if update_fields is not None:
+                update_fields.add("published_at")
 
-        update_fields = kwargs.get("update_fields")
         target_processing_started_at = self._processing_started_at_value()
         if self.processing_started_at != target_processing_started_at:
             self.processing_started_at = target_processing_started_at
             if update_fields is not None:
-                kwargs["update_fields"] = sorted({*(update_fields or ()), "processing_started_at"})
+                update_fields.add("processing_started_at")
         super().save(*args, **kwargs)
 
     def _processing_started_at_value(self):

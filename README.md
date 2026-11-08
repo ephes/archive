@@ -64,6 +64,10 @@ SQL operation propagates an error without reporting a successful rebuild.
 public visibility after repair, repeated rebuilding, refusal/failure paths and the
 empty/singular/plural success counts using synthetic, isolated SQLite data.
 
+FTS UPDATE triggers compare indexed text and row identity with null-safe equality;
+status/retry/publication-only writes do no index work. Migration 0019 reversibly
+installs this guard. Visibility continues to be checked against Item rows at query time.
+
 ## Week JSON Feed
 
 `GET /feeds/week/<YYYY-Wnn>.json` returns public (`is_public=True`) items whose `shared_at`
@@ -91,6 +95,10 @@ may treat `published_at` as always present and `>= shared_at`. The response shap
   ]
 }
 ```
+
+Partial model saves also persist a newly derived publication date, including
+`save(update_fields=["is_public"])`. An empty `update_fields` remains a no-op;
+unrelated columns are never added to the partial write.
 
 The endpoint deliberately omits `notes`, `transcript`, `long_summary`, and `detail_url`;
 consumers should link only to `original_url`.

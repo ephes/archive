@@ -28,7 +28,13 @@ Public endpoints:
   supports the same ranges. Both endpoints accept `HEAD` with whole-file GET headers and no body;
   Range is ignored on HEAD. The response owns an opened file only after construction
   and header setup succeed; setup failures close it while preserving the primary error.
-  Successful streaming keeps the file open until the response closes.
+  Successful streaming keeps the file open until the response closes. Cache policy
+  applies to full/ranged responses, unsatisfiable ranges and pre-stream seek failures;
+  the response helper preserves the caller's public or private policy on every outcome.
+  This includes transient seek-error 502s: the public routes' one-hour policy can
+  cache those errors for an hour too. Callers needing immediate error retries must
+  supply a no-store policy. Storage-open/backfill failures before this helper retain
+  their separate existing behavior.
 - `/feeds/podcast.xml` podcast-style feed for items with stable local audio enclosures
 - `/feeds/podcast/page/<n>.xml` older podcast feed pages when more than 50 eligible items exist
 - `/api/health/` unauthenticated JSON processing health for monitoring (step counts and timestamps
@@ -359,6 +365,8 @@ Malformed JSON, decoder resource/domain errors and blobs exceeding either bound
 are ignored as a whole; other blobs and HTML metadata remain available. ARD inline
 media URLs are decoded once as JSON strings, then restricted to HTTP(S) using the
 same relative-URL normalization as other media candidates. Malformed strings, including unpaired Unicode surrogate escapes, are skipped.
+URL/candidate deduplication uses sets while preserving first-seen order. The same
+URL may retain distinct candidate types or detection sources.
 
 Credential-bearing summary, transcription and article-audio requests only follow
 redirects on the initial HTTP(S) origin (scheme, host and effective port).

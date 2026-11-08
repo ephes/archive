@@ -157,7 +157,7 @@ def test_archived_audio_answers_an_unsatisfiable_range_with_416(
     assert response.status_code == 416
     assert response["Content-Range"] == "bytes */9"
     assert response["Accept-Ranges"] == "bytes"
-    assert "Cache-Control" not in response
+    assert response["Cache-Control"] == "public, max-age=3600"
     assert response.content == b""
     assert handle.closed
 
@@ -392,3 +392,45 @@ def test_successful_response_transfers_file_until_response_close(db, monkeypatch
     response.close()
     response.close()
     assert closes == [True]
+
+
+@pytest.mark.parametrize("cache_control", ["private, no-store", "public, max-age=3600"])
+@pytest.mark.parametrize("outcome", [200, 206, 416, 502])
+def test_all_range_outcomes_keep_caller_cache_policy_and_close_once(db, cache_control, outcome):
+    from django.test import RequestFactory
+
+    from archive.media_responses import ranged_file_response
+
+    class OwnedFile(TrackedFile):
+        closes = 0
+
+        def close(self):
+            self.closes += 1
+            super().close()
+
+    handle = OwnedFile(PAYLOAD)
+    if outcome == 502:
+        handle.seek_error = OSError("synthetic seek failure")
+    headers = {} if outcome == 200 else {"Range": "bytes=2-4"}
+    if outcome == 416:
+        headers = {"Range": "bytes=9-"}
+    response = ranged_file_response(
+        RequestFactory().get("/media", headers=headers),
+        file_handle=handle,
+        size=len(PAYLOAD),
+        content_type="audio/mpeg",
+        cache_control=cache_control,
+    )
+    assert response.status_code == outcome
+    assert response["Cache-Control"] == cache_control
+    if outcome in (200, 206):
+        assert handle.closes == 0
+        assert b"".join(response.streaming_content) == (PAYLOAD if outcome == 200 else b"3-a")
+    else:
+        assert handle.closes == 1
+    if outcome == 416:
+        assert response["Content-Range"] == "bytes */9"
+    response.close()
+    response.close()
+    assert handle.closed
+    assert handle.closes == 1

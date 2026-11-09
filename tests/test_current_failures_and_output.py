@@ -8,7 +8,7 @@ from test_attempt_ownership import idle_item
 
 from archive import services, views
 from archive.models import EnrichmentStatus as Status
-from archive.models import Item, ItemKind
+from archive.models import Item, ItemKind, ProcessingEvent
 from archive.summaries import GeneratedSummary
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -81,6 +81,7 @@ def test_stale_failure_preserves_current_state(monkeypatch, stage, change):
     enrich(item)
     item.refresh_from_db()
     assert snapshot
+    assert not ProcessingEvent.objects.filter(item_id=item.pk).exists()
     for field in (*updates, f"{stage}_error", f"{stage}_status"):
         assert getattr(item, field) == getattr(snapshot[0], field)
     if stage in {"summary", "media_archive"}:
@@ -89,7 +90,13 @@ def test_stale_failure_preserves_current_state(monkeypatch, stage, change):
 
 @pytest.mark.parametrize("stage", ["summary", "media_archive"])
 def test_failures_from_stale_instances_increment_current_retry_count(monkeypatch, stage):
-    item = attempt(stage)
+    # Direct calls without a worker lease still serialize counter updates from
+    # stale instances. Claimed attempts instead require an exact timestamp match.
+    item = idle_item(
+        kind=ItemKind.PODCAST_EPISODE,
+        audio_url="https://example.test/audio.mp3",
+        **{f"{stage}_status": Status.PENDING},
+    )
     stale = Item.objects.get(pk=item.pk)
     generator, enrich = STAGE_CALLS[stage]
 
@@ -191,3 +198,34 @@ def test_rss_replaces_forbidden_xml_characters_without_changing_stored_text(clie
     item.refresh_from_db()
     assert item.title == title
     assert item.short_summary == item.long_summary == description
+
+
+@pytest.mark.parametrize("stage", ["summary", "media_archive"])
+def test_recovered_attempt_cannot_change_a_newer_settled_failure(monkeypatch, stage):
+    old = attempt(stage)
+    old_started_at = old.processing_started_at
+    assert services.recover_processing_item(old.pk, expected_started_at=old_started_at) == 1
+    newer = services.claim_pending_item()
+    assert newer.pk == old.pk
+    assert newer.processing_started_at != old_started_at
+    generator, enrich = STAGE_CALLS[stage]
+
+    def fail_newer(**kwargs):
+        raise OSError("newer failure")
+
+    monkeypatch.setattr(services, generator, fail_newer)
+    assert not enrich(newer)
+    settled = Item.objects.get(pk=old.pk)
+    assert settled.processing_started_at is None
+    events = ProcessingEvent.objects.filter(item_id=old.pk).count()
+
+    def fail_older(**kwargs):
+        raise OSError("older failure")
+
+    monkeypatch.setattr(services, generator, fail_older)
+    assert enrich(old)
+    current = Item.objects.get(pk=old.pk)
+    assert getattr(current, f"{stage}_retry_count") == 1
+    assert getattr(current, f"{stage}_error") == "newer failure"
+    assert getattr(current, f"{stage}_retry_at") == getattr(settled, f"{stage}_retry_at")
+    assert ProcessingEvent.objects.filter(item_id=old.pk).count() == events

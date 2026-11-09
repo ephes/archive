@@ -128,3 +128,10 @@ def open_authenticated_url(
             )
         with path.open("rb") as source:
             yield SimpleNamespace(headers=headers, read=source.read)
+
+
+# Regression probe: remove only the elapsed transport boundary in this disposable copy.
+@contextmanager
+def open_authenticated_url(request, *, timeout, max_bytes=8 * 1024 * 1024, audio=False):
+    with _open_authenticated_url(request, timeout=timeout) as response:
+        yield response

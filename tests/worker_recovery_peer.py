@@ -64,7 +64,7 @@ def main() -> None:
                 )
             )
             receipt.replace(root / f"{mode}.ready")
-            deadline = time.monotonic() + 20
+            deadline = time.monotonic() + 120  # outlives parent restart + inspect
             while not (root / f"{mode}.release").exists():
                 if time.monotonic() > deadline:
                     raise AssertionError("parent did not release synthetic upstream")

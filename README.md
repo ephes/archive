@@ -64,6 +64,16 @@ SQL operation propagates an error without reporting a successful rebuild.
 public visibility after repair, repeated rebuilding, refusal/failure paths and the
 empty/singular/plural success counts using synthetic, isolated SQLite data.
 
+Historical data migrations use the database selected by `migrate --database`, including
+queue initialization and the YouTube health seed. Populated FTS upgrade/rollback/upgrade
+journeys are covered by `tests/test_historical_migrations.py`; rolling back the indexed
+processing timestamp restores SQLite triggers after Django rebuilds the Item table.
+No manual search rebuild is needed for these journeys.
+
+FTS UPDATE triggers compare indexed text and row identity with null-safe equality;
+status/retry/publication-only writes do no index work. Migration 0019 reversibly
+installs this guard. Visibility continues to be checked against Item rows at query time.
+
 ## Week JSON Feed
 
 `GET /feeds/week/<YYYY-Wnn>.json` returns public (`is_public=True`) items whose `shared_at`
@@ -91,6 +101,10 @@ may treat `published_at` as always present and `>= shared_at`. The response shap
   ]
 }
 ```
+
+Partial model saves also persist a newly derived publication date, including
+`save(update_fields=["is_public"])`. An empty `update_fields` remains a no-op;
+unrelated columns are never added to the partial write.
 
 The endpoint deliberately omits `notes`, `transcript`, `long_summary`, and `detail_url`;
 consumers should link only to `original_url`.
@@ -964,3 +978,41 @@ server for both source and generated article audio routes:
 `uv run pytest tests/test_stored_audio_http.py`. They check exact bytes and advertised
 lengths for full, bounded, suffix, open-ended, malformed and unsatisfiable requests,
 HEAD without body reads, and storage-reader cleanup after a client disconnects.
+
+### Upstream failure diagnostics
+
+Summary, transcription and article-audio JSON responses decode UTF-8 strictly.
+Malformed encoding, JSON recursion and integer-decoding limits become fixed stage
+errors. Responses close before worker failure/retry bookkeeping; invalid output
+publishes no generated fields or audio artifacts.
+
+Normal stored errors and logs include HTTP status or a fixed transport/limit
+category. They omit upstream error bodies, failed-job messages, raw transport
+exceptions and their exception chains, which can echo private prompts or URLs.
+Fetch-policy refusals keep their fixed text as `blocked destination: ...`; other
+transport and local read failures name only the exception class, for example
+`transport error (FileNotFoundError)`.
+No upstream request identifiers are currently retained in these diagnostics.
+Operators should use the stage, item ID, status and category to investigate in the
+upstream service through their existing authorized access. Existing historical
+error records are not rewritten by this change.
+
+### Generated summary text
+
+Generated short summaries allow at most 239 Unicode characters (under 240), long
+summaries 8,000 characters, and tag arrays at most 8 entries with 64 characters per
+normalized lowercase tag. Whitespace is normalized before measuring text; tag
+count is checked before deduplication. At least one nonempty tag is required.
+Excess output is rejected as a summary-stage failure and uses the existing retry
+policy; it is never silently truncated. Operator-authored fields are unchanged.
+
+HTML source extraction for summaries and article audio preserves leading, nested
+and trailing text from paragraphs, blockquotes, headings, lists and preformatted
+containers in document order, once each. Block boundaries separate text; inline
+markup preserves its text and line breaks separate words. Omitted end tags follow
+HTML5 rules: a new `<li>` closes the open item, a closing list closes its items and
+block elements close an open `<p>`, so later page chrome is not captured. Top-level
+list items whose whole text (nested content included) is under 25 characters are
+dropped as navigation/share noise; paragraphs,
+headings and nested items are kept at any length. Navigation, scripts and the
+existing ignored containers remain excluded.

@@ -12,7 +12,12 @@ from urllib.request import Request
 from django.conf import settings
 from django.db import models, transaction
 
-from archive.api_responses import read_api_error, read_api_response
+from archive.api_responses import (
+    InvalidAPIJSON,
+    decode_api_json,
+    read_api_response,
+    safe_api_error,
+)
 from archive.media_archival import save_reserved_media_file
 from archive.media_storage import (
     delete_unreferenced_archive_media_paths,
@@ -150,7 +155,12 @@ def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
                     if content_type not in {"audio/mpeg", "audio/mp3"}:
                         raise ArticleAudioGenerationError("Article audio artifact is not MP3 audio")
                     raw_length = response.headers.get("Content-Length")
-                    expected_size = int(raw_length) if raw_length is not None else None
+                    try:
+                        expected_size = int(raw_length) if raw_length is not None else None
+                    except ValueError:
+                        raise ArticleAudioGenerationError(
+                            "Article audio artifact has an invalid Content-Length"
+                        ) from None
                     if (
                         expected_size is not None
                         and expected_size > settings.ARCHIVE_ARTICLE_AUDIO_MAX_BYTES
@@ -231,18 +241,19 @@ def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
                     logger.exception("Failed to discard unpublished article audio %s", stored_name)
             raise
     except HTTPError as exc:
-        message = read_api_error(exc)
         raise ArticleAudioGenerationError(
-            f"Article audio artifact request failed: HTTP {exc.code}: {message}"
-        ) from exc
+            f"Article audio artifact request failed: {safe_api_error(exc)}"
+        ) from None
     except (OSError, HTTPException) as exc:
-        raise ArticleAudioGenerationError(f"Article audio artifact request failed: {exc}") from exc
+        raise ArticleAudioGenerationError(
+            f"Article audio artifact request failed: {safe_api_error(exc)}"
+        ) from None
     except Exception as exc:
         if isinstance(exc, ArticleAudioGenerationError):
             raise
         raise ArticleAudioGenerationError(
             "Article audio storage is temporarily unavailable"
-        ) from exc
+        ) from None
 
 
 def _truncate_script(value: str, *, max_chars: int) -> str:
@@ -329,16 +340,15 @@ def _poll_synthesis_job(job_id: str, timeout: int) -> ArticleAudioJobUpdate:
 def _request_json(request: Request, timeout: int, error_prefix: str) -> dict[str, object]:
     try:
         with urlopen(request, timeout=timeout) as response:
-            payload = json.loads(read_api_response(response).decode("utf-8"))
+            payload = decode_api_json(read_api_response(response))
     except HTTPError as exc:
-        message = read_api_error(exc)
-        raise ArticleAudioGenerationError(f"{error_prefix}: HTTP {exc.code}: {message}") from exc
+        raise ArticleAudioGenerationError(f"{error_prefix}: {safe_api_error(exc)}") from None
     except URLError as exc:
-        raise ArticleAudioGenerationError(f"{error_prefix}: {exc.reason}") from exc
+        raise ArticleAudioGenerationError(f"{error_prefix}: {safe_api_error(exc)}") from None
     except OSError as exc:
-        raise ArticleAudioGenerationError(f"{error_prefix}: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise ArticleAudioGenerationError(f"{error_prefix}: invalid JSON response") from exc
+        raise ArticleAudioGenerationError(f"{error_prefix}: {safe_api_error(exc)}") from None
+    except InvalidAPIJSON:
+        raise ArticleAudioGenerationError(f"{error_prefix}: invalid JSON response") from None
 
     if not isinstance(payload, dict):
         raise ArticleAudioGenerationError(f"{error_prefix}: response was not an object")
@@ -364,15 +374,10 @@ def _parse_job_update(payload: dict[str, object]) -> ArticleAudioJobUpdate:
         return ArticleAudioJobUpdate(job_id=job_id, state=state, artifact_path=artifact_path)
 
     if state == "failed":
-        error = payload.get("error")
-        if isinstance(error, dict):
-            error_message = str(error.get("message", "")).strip()
-        else:
-            error_message = ""
         return ArticleAudioJobUpdate(
             job_id=job_id,
             state=state,
-            error_message=error_message or "Article audio job failed",
+            error_message="Article audio job failed",
         )
 
     return ArticleAudioJobUpdate(job_id=job_id, state=state)
@@ -382,4 +387,4 @@ def _api_url(path: str) -> str:
     try:
         return api_url(settings.ARCHIVE_ARTICLE_AUDIO_API_BASE, path)
     except OSError as exc:
-        raise ArticleAudioGenerationError(str(exc)) from exc
+        raise ArticleAudioGenerationError(safe_api_error(exc)) from None

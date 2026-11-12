@@ -4,16 +4,17 @@ from django.db import migrations, models
 
 
 def initialize_article_audio_state(apps, schema_editor) -> None:
+    alias = schema_editor.connection.alias
     Item = apps.get_model("archive", "Item")
 
-    Item.objects.filter(article_audio_artifact_path__gt="").update(
+    Item.objects.using(alias).filter(article_audio_artifact_path__gt="").update(
         article_audio_status="complete",
         article_audio_generated=True,
     )
-    Item.objects.exclude(article_audio_artifact_path__gt="").filter(kind="article").update(
+    Item.objects.using(alias).exclude(article_audio_artifact_path__gt="").filter(kind="article").update(
         article_audio_status="pending"
     )
-    Item.objects.exclude(article_audio_artifact_path__gt="").exclude(kind="article").update(
+    Item.objects.using(alias).exclude(article_audio_artifact_path__gt="").exclude(kind="article").update(
         article_audio_status="complete"
     )
 

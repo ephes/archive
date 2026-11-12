@@ -15,7 +15,12 @@ from urllib.request import Request
 
 from django.conf import settings
 
-from archive.api_responses import read_api_error, read_api_response
+from archive.api_responses import (
+    InvalidAPIJSON,
+    decode_api_json,
+    read_api_response,
+    safe_api_error,
+)
 from archive.classification import resolve_media_sources_for_item
 from archive.media_archival import MediaArchivalError, open_archived_audio, open_archived_video
 from archive.metadata import REQUEST_HEADERS
@@ -197,11 +202,17 @@ def _download_remote_media(source_url: str, timeout: int) -> DownloadedMedia:
                 )
             payload = response.read(MAX_TRANSCRIPTION_BYTES + 1)
     except HTTPError as exc:
-        raise TranscriptionGenerationError(f"Media download failed: HTTP {exc.code}") from exc
+        raise TranscriptionGenerationError(
+            f"Media download failed: {safe_api_error(exc)}"
+        ) from None
     except URLError as exc:
-        raise TranscriptionGenerationError(f"Media download failed: {exc.reason}") from exc
+        raise TranscriptionGenerationError(
+            f"Media download failed: {safe_api_error(exc)}"
+        ) from None
     except OSError as exc:
-        raise TranscriptionGenerationError(f"Media download failed: {exc}") from exc
+        raise TranscriptionGenerationError(
+            f"Media download failed: {safe_api_error(exc)}"
+        ) from None
 
     if len(payload) > MAX_TRANSCRIPTION_BYTES:
         raise TranscriptionGenerationError("Media source exceeded 25 MiB transcription limit")
@@ -239,7 +250,9 @@ def _read_archived_media(item: Item, source: TranscriptionSource) -> DownloadedM
     except MediaArchivalError as exc:
         raise TranscriptionGenerationError(str(exc)) from exc
     except OSError as exc:
-        raise TranscriptionGenerationError(f"Archived {source_label} read failed: {exc}") from exc
+        raise TranscriptionGenerationError(
+            f"Archived {source_label} read failed: {safe_api_error(exc)}"
+        ) from None
 
     if len(payload) > MAX_TRANSCRIPTION_BYTES:
         if source.kind == "archived_audio":
@@ -307,9 +320,7 @@ def _check_batch_transcript_coverage(
     try:
         gaps = find_transcript_gaps(payload.get("segments"), max_gap_seconds=max_gap_seconds)
     except TranscriptionGenerationError as exc:
-        raise TranscriptionGenerationError(
-            f"Batch transcription job {completed.job_id}: {exc}"
-        ) from exc
+        raise TranscriptionGenerationError(f"Batch transcription evidence: {exc}") from None
     if not gaps:
         return
     start, end = max(gaps, key=lambda gap: gap[1] - gap[0])
@@ -525,15 +536,10 @@ def _parse_batch_transcription_job_update(
         )
 
     if state == "failed":
-        error = payload.get("error")
-        if isinstance(error, dict):
-            error_message = str(error.get("message", "")).strip()
-        else:
-            error_message = ""
         return BatchTranscriptionJobUpdate(
             job_id=job_id,
             state=state,
-            error_message=error_message or "Batch transcription job failed",
+            error_message="Batch transcription job failed",
         )
 
     return BatchTranscriptionJobUpdate(job_id=job_id, state=state)
@@ -566,7 +572,9 @@ def _iter_file_multipart_formdata(
         except MediaArchivalError as exc:
             raise TranscriptionGenerationError(str(exc)) from exc
         except OSError as exc:
-            raise TranscriptionGenerationError(f"Archived audio read failed: {exc}") from exc
+            raise TranscriptionGenerationError(
+                f"Archived audio read failed: {safe_api_error(exc)}"
+            ) from None
         yield suffix
 
     return body()
@@ -668,29 +676,30 @@ def _request_transcription(media: DownloadedMedia, prompt: str, timeout: int) ->
 
     try:
         with urlopen(request, timeout=timeout) as response:
-            payload = read_api_response(response).decode("utf-8", errors="replace")
+            payload = read_api_response(response)
             content_type = (response.headers.get_content_type() or "").lower()
     except HTTPError as exc:
-        message = read_api_error(exc)
         raise TranscriptionGenerationError(
-            f"Transcription API request failed: HTTP {exc.code}: {message}"
-        ) from exc
+            f"Transcription API request failed: {safe_api_error(exc)}"
+        ) from None
     except URLError as exc:
         raise TranscriptionGenerationError(
-            f"Transcription API request failed: {exc.reason}"
-        ) from exc
+            f"Transcription API request failed: {safe_api_error(exc)}"
+        ) from None
     except OSError as exc:
-        raise TranscriptionGenerationError(f"Transcription API request failed: {exc}") from exc
+        raise TranscriptionGenerationError(
+            f"Transcription API request failed: {safe_api_error(exc)}"
+        ) from None
 
     if "json" not in content_type:
-        return payload
+        return payload.decode("utf-8", errors="replace")
 
     try:
-        parsed = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        raise TranscriptionGenerationError("Transcription API returned invalid JSON") from exc
+        parsed = decode_api_json(payload)
+    except InvalidAPIJSON:
+        raise TranscriptionGenerationError("Transcription API returned invalid JSON") from None
 
-    transcript = parsed.get("text")
+    transcript = parsed.get("text") if isinstance(parsed, dict) else None
     if not isinstance(transcript, str):
         raise TranscriptionGenerationError(
             "Transcription API response did not include transcript text"
@@ -729,16 +738,15 @@ def _encode_multipart_formdata(fields: dict[str, str], media: DownloadedMedia) -
 def _request_json(request: Request, timeout: float, error_prefix: str) -> dict[str, object]:
     try:
         with urlopen(request, timeout=timeout) as response:
-            payload = json.loads(read_api_response(response).decode("utf-8"))
+            payload = decode_api_json(read_api_response(response))
     except HTTPError as exc:
-        message = read_api_error(exc)
-        raise TranscriptionGenerationError(f"{error_prefix}: HTTP {exc.code}: {message}") from exc
+        raise TranscriptionGenerationError(f"{error_prefix}: {safe_api_error(exc)}") from None
     except URLError as exc:
-        raise TranscriptionGenerationError(f"{error_prefix}: {exc.reason}") from exc
+        raise TranscriptionGenerationError(f"{error_prefix}: {safe_api_error(exc)}") from None
     except OSError as exc:
-        raise TranscriptionGenerationError(f"{error_prefix}: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise TranscriptionGenerationError(f"{error_prefix}: invalid JSON response") from exc
+        raise TranscriptionGenerationError(f"{error_prefix}: {safe_api_error(exc)}") from None
+    except InvalidAPIJSON:
+        raise TranscriptionGenerationError(f"{error_prefix}: invalid JSON response") from None
 
     if not isinstance(payload, dict):
         raise TranscriptionGenerationError(f"{error_prefix}: response was not an object")
@@ -749,7 +757,7 @@ def _api_url(path: str) -> str:
     try:
         return api_url(settings.ARCHIVE_TRANSCRIPTION_API_BASE, path)
     except OSError as exc:
-        raise TranscriptionGenerationError(str(exc)) from exc
+        raise TranscriptionGenerationError(safe_api_error(exc)) from None
 
 
 def _normalize_transcript(value: str) -> str:

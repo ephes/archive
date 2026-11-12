@@ -495,7 +495,7 @@ def test_generate_item_transcript_reports_failed_batch_job_for_oversized_archive
 
     monkeypatch.setattr("archive.transcriptions.urlopen", fake_urlopen)
 
-    with pytest.raises(TranscriptionGenerationError, match="batch boom"):
+    with pytest.raises(TranscriptionGenerationError, match="Batch transcription job failed"):
         generate_item_transcript(item=item)
 
 

@@ -1736,7 +1736,9 @@ def test_video_archive_migration_requeues_existing_querystring_urls() -> None:
         media_archive_status=EnrichmentStatus.PENDING,
     )
 
-    migration.queue_existing_archivable_video(_MigrationApps(), None)
+    migration.queue_existing_archivable_video(
+        _MigrationApps(), SimpleNamespace(connection=connection)
+    )
 
     eligible.refresh_from_db()
     assert eligible.media_archive_status == EnrichmentStatus.PENDING

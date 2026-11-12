@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- Reject generated summaries and tags beyond documented per-field/count limits
+  before publication, retaining operator content and existing retry behavior.
+- Preserve nested HTML container text once in order for summary and article-audio
+  sources, including short headings and blockquote tails.
+- Close omitted `<li>`/`<p>` end tags per HTML5 so later page chrome is not captured,
+  separate text at block boundaries, and drop top-level list items whose whole text is
+  under 25 characters.
+
+- Normalize invalid UTF-8, JSON recursion and integer-decoding failures to fixed
+  summary/transcription/article-audio errors with response cleanup.
+- Keep upstream error bodies, failed-job messages and raw transport details out of
+  normal stored errors and logs; retain HTTP status and fixed diagnostic categories.
+- Report fetch-policy refusals as `blocked destination` and name the exception class
+  for other transport/local read failures.
+- Reject malformed article-audio `Content-Length` headers with a fixed error that
+  omits the header text.
+
+- Skip FTS updates when indexed text and row identity are unchanged, with a
+  reversible null-safe trigger migration.
+- Persist derived publication dates on partial saves while preserving empty-save
+  semantics and unrelated concurrent edits.
+
+- Bind historical queue/health data migrations to the selected database.
+- Preserve FTS insert/update/delete triggers when rolling back the indexed processing
+  timestamp; cover populated upgrade/rollback/upgrade and visibility journeys.
+
 - Cover both stored-audio routes with real local HTTP byte-range, HEAD and
   interrupted-client cleanup journeys using synthetic storage files.
 - Identify worker progress by item ID and stage, omitting raw URLs, title fallbacks

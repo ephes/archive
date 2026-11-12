@@ -63,9 +63,9 @@ def test_error_body_limit(monkeypatch, module, error, call):
     monkeypatch.setattr(module, "urlopen", fail)
     with pytest.raises(error, match="HTTP 500") as caught:
         call()
-    assert response.sizes == [MAX_API_ERROR_BYTES]
+    assert response.sizes == []
     assert response.closed
-    assert str(caught.value).count("x") == MAX_API_ERROR_BYTES
+    assert "x" not in str(caught.value)
 
 
 @pytest.mark.parametrize("module", [article_audio, transcriptions])
@@ -90,5 +90,5 @@ def test_audio_artifact_error_body_limit(monkeypatch, settings):
     item = Item(article_audio_artifact_path="/artifact")
     with pytest.raises(article_audio.ArticleAudioGenerationError, match="HTTP 500"):
         article_audio.store_generated_article_audio(item)
-    assert response.sizes == [MAX_API_ERROR_BYTES]
+    assert response.sizes == []
     assert response.closed

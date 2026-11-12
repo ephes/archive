@@ -344,3 +344,33 @@ def test_generate_item_article_audio_requires_configured_api_key(settings) -> No
 
     with pytest.raises(ArticleAudioGenerationError, match="not configured"):
         generate_item_article_audio(item=item)
+
+
+@pytest.mark.django_db
+def test_store_generated_article_audio_hides_malformed_content_length(
+    monkeypatch, settings
+) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/article",
+        kind=ItemKind.ARTICLE,
+        article_audio_artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+    )
+    settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = "tts-token"
+    settings.ARCHIVE_ARTICLE_AUDIO_API_BASE = "https://voxhelm.example.test/v1"
+
+    def fake_urlopen(request, timeout, **kwargs):
+        response = _FakeResponse(b"ID3-audio", content_type="audio/mpeg", url=request.full_url)
+        monkeypatch.setattr(
+            response.headers,
+            "get",
+            lambda name: "secret-upstream-text" if name == "Content-Length" else None,
+        )
+        return response
+
+    monkeypatch.setattr("archive.article_audio.urlopen", fake_urlopen)
+
+    with pytest.raises(ArticleAudioGenerationError, match="invalid Content-Length") as caught:
+        store_generated_article_audio(item=item)
+    assert caught.value.__cause__ is None
+    assert "secret-upstream-text" not in str(caught.value)
+    assert not item.article_audio_file

@@ -675,10 +675,26 @@ def recover_processing_item(item_id: int, *, expected_started_at: datetime | Non
     )
 
 
+STALE_RECOVERY_BATCH_SIZE = 100
+
+
 def recover_stale_processing_items(*, stale_before: datetime) -> int:
-    return _recover_processing_items(
-        _processing_item_query() & Q(processing_started_at__lte=stale_before)
-    )
+    """Recover one oldest-first batch; later worker passes drain the backlog."""
+    with transaction.atomic():
+        attempts = list(
+            Item.objects.select_for_update()
+            .filter(_processing_item_query(), processing_started_at__lte=stale_before)
+            .order_by("processing_started_at", "pk")
+            .values_list("pk", "processing_started_at")[:STALE_RECOVERY_BATCH_SIZE]
+        )
+        if not attempts:
+            return 0
+        selected = Q()
+        for pk, started_at in attempts:
+            selected |= Q(pk=pk, processing_started_at=started_at)
+        return _recover_processing_items(
+            selected & _processing_item_query() & Q(processing_started_at__lte=stale_before)
+        )
 
 
 def _processing_item_query() -> Q:

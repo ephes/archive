@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 HEALTH_WINDOW = timedelta(hours=24)
 EVENT_RETENTION = timedelta(days=30)
+EVENT_PRUNE_BATCH_SIZE = 100
 
 
 def media_archive_step(item: Item) -> str:
@@ -98,7 +99,12 @@ def _record_step_outcome(
 
 def _prune_events(*, cutoff: datetime) -> None:
     """Prune old attempts; exact streak membership lives independently of retries."""
-    ProcessingEvent.objects.filter(occurred_at__lt=cutoff).delete()
+    expired = (
+        ProcessingEvent.objects.filter(occurred_at__lt=cutoff)
+        .order_by("occurred_at", "pk")
+        .values("pk")[:EVENT_PRUNE_BATCH_SIZE]
+    )
+    ProcessingEvent.objects.filter(pk__in=expired).delete()
 
 
 def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:

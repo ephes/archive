@@ -155,7 +155,12 @@ def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
                     if content_type not in {"audio/mpeg", "audio/mp3"}:
                         raise ArticleAudioGenerationError("Article audio artifact is not MP3 audio")
                     raw_length = response.headers.get("Content-Length")
-                    expected_size = int(raw_length) if raw_length is not None else None
+                    try:
+                        expected_size = int(raw_length) if raw_length is not None else None
+                    except ValueError:
+                        raise ArticleAudioGenerationError(
+                            "Article audio artifact has an invalid Content-Length"
+                        ) from None
                     if (
                         expected_size is not None
                         and expected_size > settings.ARCHIVE_ARTICLE_AUDIO_MAX_BYTES
@@ -248,7 +253,7 @@ def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
             raise
         raise ArticleAudioGenerationError(
             "Article audio storage is temporarily unavailable"
-        ) from exc  # Local storage fault: keep the cause for operator logs.
+        ) from None
 
 
 def _truncate_script(value: str, *, max_chars: int) -> str:

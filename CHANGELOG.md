@@ -7,14 +7,17 @@
 - Preserve nested HTML container text once in order for summary and article-audio
   sources, including short headings and blockquote tails.
 - Close omitted `<li>`/`<p>` end tags per HTML5 so later page chrome is not captured,
-  separate text at block boundaries, and drop top-level list items under 25 characters.
+  separate text at block boundaries, and drop top-level list items whose whole text is
+  under 25 characters.
 
 - Normalize invalid UTF-8, JSON recursion and integer-decoding failures to fixed
   summary/transcription/article-audio errors with response cleanup.
 - Keep upstream error bodies, failed-job messages and raw transport details out of
   normal stored errors and logs; retain HTTP status and fixed diagnostic categories.
 - Report fetch-policy refusals as `blocked destination` and name the exception class
-  for other transport/local read failures; keep the cause for article-audio storage faults.
+  for other transport/local read failures.
+- Reject malformed article-audio `Content-Length` headers with a fixed error that
+  omits the header text.
 
 - Skip FTS updates when indexed text and row identity are unchanged, with a
   reversible null-safe trigger migration.

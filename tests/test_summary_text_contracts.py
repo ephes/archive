@@ -152,3 +152,30 @@ def test_short_top_level_list_items_are_dropped_as_noise():
         "Short",
         "Short paragraph.",
     ]
+
+
+@pytest.mark.parametrize(
+    "html,expected",
+    [
+        (
+            "<ul><li>Outer item long enough to be kept here<ul><li>Inner</li></ul>"
+            " and more</li></ul>",
+            ["Outer item long enough to be kept here", "Inner", "and more"],
+        ),
+        (
+            "<ul><li>Label:<p>A paragraph inside the item</p></li></ul>",
+            ["Label:", "A paragraph inside the item"],
+        ),
+        ("<ul><li>Tags<ul><li>a</li><li>b</li></ul></li></ul><p>Body.</p>", ["Body."]),
+        (
+            "<li>Unclosed long top-level list item at end",
+            ["Unclosed long top-level list item at end"],
+        ),
+        ("<li>Short unclosed", []),
+    ],
+    ids=["tail", "label", "short-nested", "unclosed-long", "unclosed-short"],
+)
+def test_list_item_noise_floor_applies_to_whole_item(html, expected):
+    source = summaries.extract_summary_source_from_html(html)
+    chunks = source.extracted_text.split("\n\n") if source.extracted_text else []
+    assert chunks == expected

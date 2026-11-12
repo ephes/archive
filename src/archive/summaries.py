@@ -89,6 +89,8 @@ class _SummaryHTMLParser(HTMLParser):
         # Open text containers, plus list markers opened inside a container.
         self._text_containers: list[str] = []
         self._current_parts: list[str] = []
+        # Index of the first chunk emitted by the open top-level <li>, if any.
+        self._top_level_item_start: int | None = None
 
     def handle_starttag(self, tag: str, attrs) -> None:
         lowered = tag.lower()
@@ -119,6 +121,8 @@ class _SummaryHTMLParser(HTMLParser):
             self._close_through("li", boundary=self._LIST_TAGS)
         if lowered in self._TEXT_TAGS:
             self._flush_text()
+            if lowered == "li" and not self._text_containers:
+                self._top_level_item_start = len(self.text_chunks)
             self._text_containers.append(lowered)
         elif lowered in self._LIST_TAGS and self._text_containers:
             self._flush_text()
@@ -161,27 +165,34 @@ class _SummaryHTMLParser(HTMLParser):
             if open_tag == tag:
                 self._flush_text()
                 del self._text_containers[index:]
+                self._finish_top_level_item()
                 return
 
     def _close_through_all(self) -> None:
         if self._text_containers:
             self._flush_text()
             self._text_containers.clear()
+            self._finish_top_level_item()
+
+    def _finish_top_level_item(self) -> None:
+        """Drop a closed top-level <li> whose whole text, nested parts included, is short."""
+        start = self._top_level_item_start
+        if start is None or self._text_containers:
+            return
+        self._top_level_item_start = None
+        item_text = " ".join(self.text_chunks[start:])
+        if len(item_text) < self._MIN_TOP_LEVEL_LIST_ITEM_CHARS:
+            del self.text_chunks[start:]
 
     def _flush_text(self) -> None:
         text = _normalize_text("".join(self._current_parts))
         self._current_parts = []
-        if not text:
-            return
-        if (
-            self._text_containers == ["li"]
-            and len(text) < self._MIN_TOP_LEVEL_LIST_ITEM_CHARS
-        ):
-            return
-        self.text_chunks.append(text)
+        if text:
+            self.text_chunks.append(text)
 
     def close(self) -> None:
         super().close()
+        self._close_through_all()
         self._flush_text()
 
 

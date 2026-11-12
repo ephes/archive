@@ -2,7 +2,9 @@
 
 import json
 from typing import Protocol
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
+
+from archive.safe_fetch import BlockedFetchError
 
 
 class ReadableResponse(Protocol):
@@ -60,5 +62,14 @@ def safe_api_error(exc: BaseException) -> str:
             pass  # Cleanup must not replace the fixed primary diagnostic.
         code = exc.code
         return f"HTTP {code}" if isinstance(code, int) and 100 <= code <= 599 else "HTTP error"
+    if isinstance(exc, URLError) and isinstance(exc.reason, BaseException):
+        exc = exc.reason
     message = str(exc)
-    return message if message in _SAFE_TRANSPORT_ERRORS else "transport error"
+    if message in _SAFE_TRANSPORT_ERRORS:
+        return message
+    if isinstance(exc, BlockedFetchError):
+        # Raised only with fixed policy texts; never echoes the requested URL.
+        return f"blocked destination: {message}"
+    # The exception class name distinguishes local read faults from network failures
+    # without copying its message, which can contain paths, hosts or upstream text.
+    return f"transport error ({type(exc).__name__})"

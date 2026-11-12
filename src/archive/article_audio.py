@@ -248,7 +248,7 @@ def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
             raise
         raise ArticleAudioGenerationError(
             "Article audio storage is temporarily unavailable"
-        ) from None
+        ) from exc  # Local storage fault: keep the cause for operator logs.
 
 
 def _truncate_script(value: str, *, max_chars: int) -> str:

@@ -989,6 +989,10 @@ publishes no generated fields or audio artifacts.
 Normal stored errors and logs include HTTP status or a fixed transport/limit
 category. They omit upstream error bodies, failed-job messages, raw transport
 exceptions and their exception chains, which can echo private prompts or URLs.
+Fetch-policy refusals keep their fixed text as `blocked destination: ...`; other
+transport and local read failures name only the exception class, for example
+`transport error (FileNotFoundError)`. Local article-audio storage faults keep their
+exception chain in operator logs.
 No upstream request identifiers are currently retained in these diagnostics.
 Operators should use the stage, item ID, status and category to investigate in the
 upstream service through their existing authorized access. Existing historical
@@ -1006,5 +1010,9 @@ policy; it is never silently truncated. Operator-authored fields are unchanged.
 HTML source extraction for summaries and article audio preserves leading, nested
 and trailing text from paragraphs, blockquotes, headings, lists and preformatted
 containers in document order, once each. Block boundaries separate text; inline
-markup preserves its text and line breaks separate words. Navigation, scripts
-and the existing ignored containers remain excluded.
+markup preserves its text and line breaks separate words. Omitted end tags follow
+HTML5 rules: a new `<li>` closes the open item, a closing list closes its items and
+block elements close an open `<p>`, so later page chrome is not captured. Top-level
+list items under 25 characters are dropped as navigation/share noise; paragraphs,
+headings and nested items are kept at any length. Navigation, scripts and the
+existing ignored containers remain excluded.

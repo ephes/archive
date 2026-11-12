@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
@@ -64,12 +65,28 @@ class _SummaryHTMLParser(HTMLParser):
         "svg",
     }
     _TEXT_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "li", "p", "blockquote", "pre"}
+    _LIST_TAGS = {"ul", "ol"}
+    # Elements whose start or end tag implicitly closes an open <p> (HTML5 parsing rules).
+    _P_CLOSING_TAGS = _TEXT_TAGS | _LIST_TAGS | {
+        "address", "article", "aside", "details", "dialog", "div", "dl", "dd", "dt",
+        "fieldset", "figcaption", "figure", "header", "hgroup", "hr", "main", "menu",
+        "section", "summary", "table", "tbody", "td", "th", "thead", "tfoot", "tr",
+    }
+    # Text inside these elements flows with its neighbours; any other element separates.
+    _INLINE_TAGS = {
+        "a", "abbr", "b", "bdi", "bdo", "cite", "code", "data", "del", "dfn", "em", "i",
+        "ins", "kbd", "mark", "q", "s", "samp", "small", "span", "strong", "sub", "sup",
+        "time", "u", "var", "wbr",
+    }
+    # Short top-level list items are usually navigation, share or tag-list noise.
+    _MIN_TOP_LEVEL_LIST_ITEM_CHARS = 25
 
     def __init__(self) -> None:
         super().__init__()
         self.meta_description = ""
         self.text_chunks: list[str] = []
         self._ignored_depth = 0
+        # Open text containers, plus list markers opened inside a container.
         self._text_containers: list[str] = []
         self._current_parts: list[str] = []
 
@@ -94,10 +111,19 @@ class _SummaryHTMLParser(HTMLParser):
                 self.meta_description = _normalize_text(attr_map.get("content", ""))
             return
 
-        if self._ignored_depth == 0 and lowered in self._TEXT_TAGS:
+        if self._ignored_depth > 0:
+            return
+        if lowered in self._P_CLOSING_TAGS:
+            self._close_through("p")
+        if lowered == "li":
+            self._close_through("li", boundary=self._LIST_TAGS)
+        if lowered in self._TEXT_TAGS:
             self._flush_text()
             self._text_containers.append(lowered)
-        elif self._ignored_depth == 0 and lowered == "br" and self._text_containers:
+        elif lowered in self._LIST_TAGS and self._text_containers:
+            self._flush_text()
+            self._text_containers.append(lowered)
+        elif self._text_containers and lowered not in self._INLINE_TAGS:
             self._current_parts.append(" ")
 
     def handle_endtag(self, tag: str) -> None:
@@ -105,22 +131,54 @@ class _SummaryHTMLParser(HTMLParser):
         if lowered in self._IGNORED_TAGS and self._ignored_depth > 0:
             self._ignored_depth -= 1
             return
+        if self._ignored_depth > 0:
+            return
 
-        if self._ignored_depth == 0 and lowered in self._text_containers:
-            self._flush_text()
+        if lowered in self._LIST_TAGS:
+            if lowered in self._text_containers:
+                self._close_through(lowered)
+            else:
+                # A list opened outside any container closes every item still open in it.
+                self._close_through_all()
+        elif lowered in self._text_containers:
             # Also tolerate omitted inner closing tags without retaining a stale container.
-            while self._text_containers.pop() != lowered:
-                pass
+            self._close_through(lowered)
+        else:
+            if lowered in self._P_CLOSING_TAGS:
+                self._close_through("p")
+            if self._text_containers and lowered not in self._INLINE_TAGS:
+                self._current_parts.append(" ")
 
     def handle_data(self, data: str) -> None:
         if self._ignored_depth == 0 and self._text_containers:
             self._current_parts.append(data)
 
+    def _close_through(self, tag: str, *, boundary: Collection[str] = ()) -> None:
+        for index in range(len(self._text_containers) - 1, -1, -1):
+            open_tag = self._text_containers[index]
+            if open_tag in boundary:
+                return
+            if open_tag == tag:
+                self._flush_text()
+                del self._text_containers[index:]
+                return
+
+    def _close_through_all(self) -> None:
+        if self._text_containers:
+            self._flush_text()
+            self._text_containers.clear()
+
     def _flush_text(self) -> None:
         text = _normalize_text("".join(self._current_parts))
-        if text:
-            self.text_chunks.append(text)
         self._current_parts = []
+        if not text:
+            return
+        if (
+            self._text_containers == ["li"]
+            and len(text) < self._MIN_TOP_LEVEL_LIST_ITEM_CHARS
+        ):
+            return
+        self.text_chunks.append(text)
 
     def close(self) -> None:
         super().close()

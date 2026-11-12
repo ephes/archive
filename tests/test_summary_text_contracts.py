@@ -101,3 +101,54 @@ def test_nested_html_reaches_article_audio_source(monkeypatch):
     text = article_audio._best_effort_article_audio_source_text(item, timeout=1)
     script = article_audio.build_article_audio_script(item, source_text=text)
     assert " ".join(script.split()) == "Leading Inner sentence. Trailing."
+
+
+@pytest.mark.parametrize(
+    "html,expected",
+    [
+        (
+            "<ul><li>First omitted-end list item text<li>Second omitted-end list item</ul>"
+            "<div>Cookie banner</div><span>Share</span>",
+            ["First omitted-end list item text", "Second omitted-end list item"],
+        ),
+        (
+            "<p>Unclosed paragraph one<p>Unclosed paragraph two</p><button>Accept</button>",
+            ["Unclosed paragraph one", "Unclosed paragraph two"],
+        ),
+        (
+            "<div><p>Inside a div without its end tag</div><aside>Promo</aside>",
+            ["Inside a div without its end tag"],
+        ),
+        (
+            "<blockquote><ul><li>Outer item<ul><li>Inner item</ul> outer tail</ul></blockquote>",
+            ["Outer item", "Inner item", "outer tail"],
+        ),
+    ],
+    ids=["li", "p", "div", "nested-list"],
+)
+def test_omitted_end_tags_close_containers(html, expected):
+    source = summaries.extract_summary_source_from_html(html)
+    assert source.extracted_text.split("\n\n") == expected
+
+
+def test_block_boundaries_separate_and_inline_markup_joins():
+    html = (
+        "<blockquote><div>Alpha</div><div>Beta</div><a>Gam</a><b>ma</b>"
+        "<td>Delta</td></blockquote>"
+    )
+    source = summaries.extract_summary_source_from_html(html)
+    assert source.extracted_text == "Alpha Beta Gamma Delta"
+
+
+def test_short_top_level_list_items_are_dropped_as_noise():
+    html = (
+        "<ul><li>Share</li><li>Advertisement</li>"
+        "<li>A full list item sentence that carries article content.</li></ul>"
+        "<h2>Short</h2><p>Short paragraph.</p>"
+    )
+    source = summaries.extract_summary_source_from_html(html)
+    assert source.extracted_text.split("\n\n") == [
+        "A full list item sentence that carries article content.",
+        "Short",
+        "Short paragraph.",
+    ]

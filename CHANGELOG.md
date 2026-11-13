@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Index capture deduplication by persisted normalized-URL digest and capture time,
+  verifying full identity on digest matches and preserving newest-match semantics.
+- Backfill all existing URL identities in bounded migration batches; keep digests
+  synchronized on model, literal queryset and bulk URL writes. Apply migration 0020
+  before starting updated app/workers; populated rollback/upgrade and FTS are covered.
+
+- Validate capture dedupe windows as integers from zero (disabled) to 365 days at
+  startup and before capture transactions, with fixed configuration diagnostics.
+
+- Bound reclassification runs to their starting ID horizon; later captures are left
+  for the next invocation, preserving selectors, limits and locked row revalidation.
+
+- Redact private URL components in reclassification diagnostics, including selected media,
+  while retaining item IDs and safe HTTP(S) origins.
+
 - Bound health-event retention pruning to 100 expired events per outcome, preserving
   exact recent counts and ongoing failure streaks while later outcomes drain backlogs.
 - Recover at most 100 stale items per worker iteration, oldest first, and recheck

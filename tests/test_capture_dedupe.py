@@ -243,3 +243,82 @@ def test_private_duplicate_form_shows_notice_without_broken_public_link(client, 
     assert Item.objects.count() == 1
     existing.refresh_from_db()
     assert existing.is_public is False
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("size", [10, 250])
+def test_unmatched_capture_normalizes_only_new_identity(client, monkeypatch, size):
+    from unittest.mock import Mock
+
+    import archive.capture as capture
+
+    Item.objects.bulk_create([Item(original_url=f"https://example.com/{n}") for n in range(size)])
+    normalize = Mock(wraps=capture.normalize_capture_url)
+    monkeypatch.setattr(capture, "normalize_capture_url", normalize)
+    _, response = share(client, "api", "https://example.com/new")
+    assert response.status_code == 201
+    assert normalize.call_count <= 2
+
+
+@pytest.mark.django_db
+def test_digest_collision_still_compares_full_identity(client, monkeypatch):
+    from archive.capture_identity import capture_url_digest
+
+    older = Item.objects.create(original_url="https://example.com/target")
+    newer = Item.objects.create(original_url="https://example.com/other")
+    digest = capture_url_digest(older.original_url)
+    Item.objects.filter(pk=newer.pk).update(capture_url_digest=digest)
+    monkeypatch.setattr("archive.capture.capture_url_digest", lambda url: digest)
+    pk, response = share(client, "api", older.original_url)
+    assert pk == older.pk
+    assert response.status_code == 200
+    distinct, response = share(client, "api", "https://example.com/third")
+    assert distinct not in {older.pk, newer.pk}
+    assert response.status_code == 201
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("write", ["save", "partial", "update", "bulk_update", "bulk_create"])
+def test_digest_tracks_url_writes(client, write):
+    from archive.capture_identity import capture_url_digest
+
+    item = Item.objects.create(original_url="https://example.com/before")
+    item.original_url = "HTTPS://EXAMPLE.COM:443/after?q=1#x"
+    if write == "save":
+        item.save()
+    elif write == "partial":
+        item.save(update_fields=["original_url"])
+    elif write == "update":
+        Item.objects.filter(pk=item.pk).update(original_url=item.original_url)
+    elif write == "bulk_update":
+        Item.objects.bulk_update([item], ["original_url"])
+    else:
+        item = Item.objects.bulk_create([Item(original_url=item.original_url)])[0]
+    item.refresh_from_db()
+    assert item.capture_url_digest == capture_url_digest(item.original_url)
+    pk, response = share(client, "api", "https://example.com/after?q=1#different")
+    assert response.status_code == 200
+    assert pk == item.pk
+
+
+@pytest.mark.django_db
+def test_partial_save_never_uses_unsaved_url_for_digest(client):
+    item = Item.objects.create(original_url="https://example.com/stored")
+    digest = item.capture_url_digest
+    item.original_url = "https://example.com/not-saved"
+    item.title = "Changed"
+    item.save(update_fields=["title"])
+    item.save(update_fields=[])
+    item.refresh_from_db()
+    assert item.capture_url_digest == digest
+    assert item.original_url == "https://example.com/stored"
+    assert share(client, "api", item.original_url)[0] == item.pk
+
+
+@pytest.mark.django_db
+def test_url_expression_updates_require_explicit_identity():
+    from django.db.models import F
+
+    item = Item.objects.create(original_url="https://example.com/stored")
+    with pytest.raises(ValueError, match="matching capture_url_digest"):
+        Item.objects.filter(pk=item.pk).update(original_url=F("original_url"))

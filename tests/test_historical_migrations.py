@@ -142,3 +142,75 @@ assert {k: getattr(Item.objects.get(pk=row.pk), k) for k in content} == content
 exercise(migrate(latest))
 connections.close_all()
 ''')
+
+
+def test_capture_digest_populated_migration_rehearsal(tmp_path):
+    run_journey(tmp_path, r'''
+import copy
+import django
+from django.conf import settings
+from django.db import connections
+from django.db.migrations.executor import MigrationExecutor
+
+django.setup()
+from archive.capture import capture_item
+from archive.capture_identity import capture_url_digest
+from archive.models import Item as CurrentItem
+pre = [("archive", "0019_fts_content_update_guard")]
+settings.DATABASES["secondary"] = copy.deepcopy(settings.DATABASES["default"])
+settings.DATABASES["secondary"]["NAME"] += ".secondary"
+for alias in ("default", "secondary"):
+    db = connections[alias]
+    executor = MigrationExecutor(db)
+    latest = executor.loader.graph.leaf_nodes("archive")
+    executor.migrate(pre)
+    Item = executor.loader.project_state(pre).apps.get_model("archive", "Item")
+    urls = ["HTTPS://USER:Pass@Example.COM:443/Path?x=%31&&y=+#frag",
+            "http://[ABCD::1]:80/x", "https://example.com/x?", "https://example.com:bad/legacy"]
+    urls += [f"https://example.com/{alias}/{n}" for n in range(501)]
+    Item.objects.using(alias).bulk_create([
+        Item(original_url=url, title="Migrationmarker", notes="synthetic") for url in urls])
+    before = list(Item.objects.using(alias).order_by("pk").values_list(
+        "pk", "original_url", "notes"))
+    # Upgrade / rollback / upgrade on populated files, preserving FTS triggers.
+    for target in (latest, pre, latest):
+        executor = MigrationExecutor(db)
+        executor.migrate(target)
+        Model = executor.loader.project_state(target).apps.get_model("archive", "Item")
+        assert list(Model.objects.using(alias).order_by("pk").values_list(
+            "pk", "original_url", "notes")) == before
+        with db.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM archive_item_fts WHERE archive_item_fts MATCH %s",
+                           ["Migrationmarker"])
+            assert cursor.fetchone()[0] == len(urls)
+        added = Model.objects.using(alias).create(
+            original_url="https://example.com/new", title="Insertedmarker")
+        with db.cursor() as cursor:
+            cursor.execute("SELECT rowid FROM archive_item_fts WHERE archive_item_fts MATCH %s",
+                           ["Insertedmarker"])
+            assert cursor.fetchall() == [(added.pk,)]
+        Model.objects.using(alias).filter(pk=added.pk).update(title="Updatedmarker")
+        with db.cursor() as cursor:
+            cursor.execute("SELECT rowid FROM archive_item_fts WHERE archive_item_fts MATCH %s",
+                           ["Updatedmarker"])
+            assert cursor.fetchall() == [(added.pk,)]
+        added.delete(using=alias)
+        with db.cursor() as cursor:
+            cursor.execute("SELECT rowid FROM archive_item_fts WHERE archive_item_fts MATCH %s",
+                           ["Updatedmarker"])
+            assert cursor.fetchall() == []
+        if target == latest:
+            assert all(row.capture_url_digest == capture_url_digest(row.original_url)
+                       for row in Model.objects.using(alias).all())
+            with db.cursor() as cursor:
+                cursor.execute("EXPLAIN QUERY PLAN SELECT id, original_url FROM archive_item "
+                               "WHERE capture_url_digest=%s AND shared_at >= %s "
+                               "ORDER BY shared_at DESC, id DESC",
+                               [capture_url_digest(urls[0]), "2000-01-01"])
+                assert "archive_capture_digest_time" in str(cursor.fetchall())
+# Runtime capture finds the pre-existing migrated item without enrichment/network.
+existing = CurrentItem.objects.order_by("pk").first()
+row, created = capture_item(CurrentItem(original_url=existing.original_url))
+assert not created and row.pk == existing.pk
+connections.close_all()
+''')

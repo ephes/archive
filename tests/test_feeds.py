@@ -278,7 +278,7 @@ def test_weekly_items_json_returns_empty_items_for_empty_week(client) -> None:
     response = client.get(reverse("archive:weekly-items-json", kwargs={"week": "2026-W01"}))
 
     assert response.status_code == 200
-    assert response.json() == {"week": "2026-W01", "items": []}
+    assert response.json() == {"week": "2026-W01", "next": None, "items": []}
 
 
 @pytest.mark.django_db

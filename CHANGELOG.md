@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Paginate week JSON in 50-row keyset pages with signed `next` continuations and a
+  narrow public-field projection; document whole-week consumer traversal.
+- Refuse public search queries over 512 characters, 32 terms or 64 characters per
+  lowercased term before SQLite FTS execution, with bounded validation output.
+
 - Index capture deduplication by persisted normalized-URL digest and capture time,
   verifying full identity on digest matches and preserving newest-match semantics.
 - Backfill all existing URL identities in bounded migration batches; keep digests

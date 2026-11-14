@@ -7,7 +7,9 @@
     <p class="kicker">Public archive search</p>
     <h2>Search the archive</h2>
     <p class="search-meta">
-        {% if search_query %}
+        {% if search_error %}
+            {{ search_error }}
+        {% elif search_query %}
             {{ result_count }} result{{ result_count|pluralize }} for “{{ search_query }}”.
         {% else %}
             Search across titles, summaries, notes, and transcripts.
@@ -15,7 +17,9 @@
     </p>
 </section>
 
-{% if search_query and results %}
+{% if search_error %}
+    <section class="empty"><p>Shorten your search and try again.</p></section>
+{% elif search_query and results %}
     <section class="cards">
         {% for item in results %}
             <article class="card">

@@ -47,6 +47,11 @@ and selects only that page's ids with `LIMIT/OFFSET`; only those items are loade
 Results keep full-text relevance (`bm25`) order, then newest `shared_at` and highest id
 for ties. Totals remain exact. Blank or punctuation-only queries return no results;
 invalid page text selects the first page, and out-of-range numbers select the last page.
+Queries allow at most 512 Unicode characters (including whitespace/punctuation), 32
+word terms and 64 characters per lowercased term. Over-limit queries return a normal
+search page with HTTP 400 and a fixed validation message before any FTS SQL runs.
+Accepted queries retain case-insensitive word-prefix AND matching; punctuation
+separates terms. Rejected query text echoed by the page is limited to 512 characters.
 The final batched object fetch rechecks public visibility, skipping rows made private or
 deleted since the FTS ID read while preserving rank. Concurrent changes can leave a page
 partially filled; this cannot revoke content already fetched.
@@ -84,11 +89,13 @@ may treat `published_at` as always present and `>= shared_at`. The response shap
 ```json
 {
   "week": "2026-W27",
+  "next": null,
   "items": [
     {
       "id": 123,
       "kind": "article",
       "kind_display": "Article",
+      "classification_rule": "explicit_kind",
       "title": "Example item",
       "original_url": "https://example.com/item",
       "short_summary": "Short public summary.",
@@ -101,6 +108,33 @@ may treat `published_at` as always present and `>= shared_at`. The response shap
   ]
 }
 ```
+
+Each response contains at most 50 items ordered by `shared_at`, then `id`, ascending.
+`next` is a relative URL for the next page, or `null` when complete. Consumers must
+follow it until `null` to read the whole week, for example:
+
+```python
+from urllib.parse import urljoin
+from urllib.request import urlopen
+import json
+
+url = "https://archive.example/feeds/week/2026-W27.json"
+while url:
+    with urlopen(url, timeout=30) as response:
+        page = json.load(response)
+    for item in page["items"]:
+        print(item["original_url"])
+    url = urljoin(url, page["next"]) if page["next"] else None
+```
+
+The opaque `cursor` is signed and bound to the week; malformed or altered cursors
+return HTTP 400. Pages use keyset continuation rather than increasing offsets and
+load only emitted fields, excluding transcript/processing bodies. This bounds rows
+per request; response bytes still depend on the public text stored in those rows.
+Pagination is a live view: newly private/deleted items disappear, and concurrent
+changes to `shared_at` may move items between pages. Read an unchanged week to get
+every public item exactly once. External consumers must deploy the pagination update
+alongside the app; there is no unbounded compatibility mode.
 
 Partial model saves also persist a newly derived publication date, including
 `save(update_fields=["is_public"])`. An empty `update_fields` remains a no-op;

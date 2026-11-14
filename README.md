@@ -258,9 +258,12 @@ migration backfills **all** existing URLs in batches of 500 using frozen normali
 rules, then creates the index. Allow disk space for the added 64-character digest
 and index, and take the usual database backup first. No network/enrichment runs.
 The column has a database default of `''`, so a writer still running pre-0020 code
-can insert after the migration; such rows carry an empty digest and are not found by
-capture deduplication until the URL is saved again by current code (no 500s during
-a migrate-then-restart window).
+can insert after the migration instead of failing with a 500; such rows carry an empty
+digest and are not found by capture deduplication until current code saves them with a
+full `save()` or with `original_url` in `update_fields` (worker/enrichment saves of other
+fields keep the empty digest). The writer stop above avoids such rows; if one was skipped,
+list them with `Item.objects.filter(capture_url_digest="")` in `just manage shell` and
+call `save()` on each.
 Rollback removes the digest/index and preserves items and search data; use the older
 application with the older schema. A populated file-backed upgrade/rollback/upgrade
 rehearsal (including FTS and a second database) runs in

@@ -65,6 +65,10 @@ SEARCH_MAX_CHARS = 512
 SEARCH_MAX_TERMS = 32
 SEARCH_MAX_TERM_CHARS = 64
 SEARCH_TOKEN_RE = re.compile(r"\w+")
+SEARCH_LIMIT_MESSAGE = (
+    f"Search allows at most {SEARCH_MAX_CHARS} characters, {SEARCH_MAX_TERMS} terms "
+    f"and {SEARCH_MAX_TERM_CHARS} characters per term."
+)
 
 
 class ArchiveLoginView(LoginView):
@@ -152,14 +156,10 @@ def _feed_page(items, page: int):
 
 def _build_search_match_query(raw_query: str) -> str:
     if len(raw_query) > SEARCH_MAX_CHARS:
-        raise ValidationError(
-            "Search allows at most 512 characters, 32 terms and 64 characters per term."
-        )
+        raise ValidationError(SEARCH_LIMIT_MESSAGE)
     tokens = SEARCH_TOKEN_RE.findall(raw_query.lower())
     if len(tokens) > SEARCH_MAX_TERMS or any(len(t) > SEARCH_MAX_TERM_CHARS for t in tokens):
-        raise ValidationError(
-            "Search allows at most 512 characters, 32 terms and 64 characters per term."
-        )
+        raise ValidationError(SEARCH_LIMIT_MESSAGE)
     return " AND ".join(f"{token}*" for token in tokens)
 
 
@@ -540,10 +540,15 @@ def item_article_audio(request: HttpRequest, pk: int) -> HttpResponse:
         audio_file = item.article_audio_file.open("rb")
     except Http404:
         raise
-    except Exception:
+    except Exception as exc:
         if not eligible.exists():
             raise Http404("Article audio is not available") from None
-        logger.warning("Article audio is temporarily unavailable for item %s", item.pk)
+        # Log only the exception class: messages may carry remote URLs or paths.
+        logger.warning(
+            "Article audio is temporarily unavailable for item %s (%s)",
+            item.pk,
+            type(exc).__name__,
+        )
         response = HttpResponse("Article audio is temporarily unavailable.", status=503)
         response["Retry-After"] = "60"
         return response

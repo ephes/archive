@@ -4,6 +4,7 @@
 
 - Recheck public article-audio visibility and artifact/copy identity after lazy
   preparation and storage open; close acquired handles on retired responses.
+  Transient preparation failures log only the exception class, not its message.
 - Keep committed kind changes successful when post-commit source-media cleanup
   fails; log a fixed category and retain objects for reference-safe orphan recovery.
 

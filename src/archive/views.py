@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import re
+from contextlib import suppress
 from datetime import UTC
 from urllib.parse import urlencode
 
@@ -526,14 +527,36 @@ def item_article_audio(request: HttpRequest, pk: int) -> HttpResponse:
     if not item.has_generated_article_audio:
         raise Http404("Article audio is not available")
 
+    # Preparation can download remotely. Keep the request's artifact identity;
+    # workers may still prepare private items independently of this public route.
+    eligible = Item.objects.filter(
+        pk=pk, is_public=True, article_audio_artifact_path=item.article_audio_artifact_path
+    )
     try:
         store_generated_article_audio(item=item)
+        current_copy = eligible.filter(article_audio_file=item.article_audio_file.name)
+        if not item.article_audio_file or not current_copy.exists():
+            raise Http404("Article audio is not available")
         audio_file = item.article_audio_file.open("rb")
+    except Http404:
+        raise
     except Exception:
-        logger.exception("Article audio is temporarily unavailable for item %s", item.pk)
+        if not eligible.exists():
+            raise Http404("Article audio is not available") from None
+        logger.warning("Article audio is temporarily unavailable for item %s", item.pk)
         response = HttpResponse("Article audio is temporarily unavailable.", status=503)
         response["Retry-After"] = "60"
         return response
+
+    # Storage open may also block. Reauthorize immediately before handing the
+    # acquired handle to the response, and close it on every refusal/error path.
+    try:
+        if not current_copy.exists():
+            raise Http404("Article audio is not available")
+    except BaseException:
+        with suppress(Exception):
+            audio_file.close()
+        raise
 
     return ranged_file_response(
         request,

@@ -423,3 +423,54 @@ def test_disappearing_storage_subtree_aborts_before_delete(monkeypatch):
         )
     assert "private backend path" not in str(caught.value)
     assert deleted == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_kind_change_cleanup_failure_preserves_committed_outcome(monkeypatch, caplog):
+    from archive.models import ItemKind
+    from archive.services import request_item_reprocess
+
+    audio_path = "items/kind-change/private-audio.mp3"
+    video_path = "items/kind-change/private-video.mp4"
+    item = Item.objects.create(
+        original_url="https://example.com/story",
+        kind=ItemKind.VIDEO,
+        classification_rule="media_candidate_video",
+        archived_audio_path=audio_path,
+        archived_video_path=video_path,
+    )
+    keeper = Item.objects.create(
+        original_url="https://example.com/keeper",
+        archived_audio_path=audio_path,
+    )
+    _save_archive_media(audio_path)
+    _save_archive_media(video_path)
+    storage = storages["archive_media"]
+    original_delete = storage.delete
+    attempts, callbacks = [], []
+
+    def fail_delete(name):
+        attempts.append(name)
+        raise OSError("private-backend-url")
+
+    monkeypatch.setattr(storage, "delete", fail_delete)
+    with transaction.atomic():
+        result = request_item_reprocess(item)
+        transaction.on_commit(lambda: callbacks.append("committed"))
+    assert result.pk == item.pk
+    item.refresh_from_db()
+    assert item.kind == ItemKind.LINK
+    assert not item.archived_audio_path and not item.archived_video_path
+    assert attempts == [video_path]
+    assert callbacks == ["committed"]
+    assert storage.exists(audio_path) and storage.exists(video_path)
+    assert "orphan sweep" in caplog.text
+    assert not any(text in caplog.text for text in (audio_path, video_path, "private-backend-url"))
+
+    monkeypatch.setattr(storage, "delete", original_delete)
+    call_command(
+        "cleanup_archive_media_orphans", "--delete", "--min-age-seconds", "0", stdout=StringIO()
+    )
+    assert not storage.exists(video_path)
+    assert storage.exists(audio_path)
+    assert Item.objects.get(pk=keeper.pk).archived_audio_path == audio_path

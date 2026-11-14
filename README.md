@@ -927,7 +927,11 @@ surfaces during or after the commit (for example the worker's processing alarm)
 never deletes the new objects when their references were committed; at worst the
 superseded objects stay behind as ordinary orphans. Item-deletion cleanup failures are
 logged without backend details and do not fail the already committed deletion or prevent
-later commit callbacks. Retained objects can be reclaimed with the orphan sweep.
+later commit callbacks. The same guarantee applies to stale source-media cleanup after
+reprocessing changes an item's kind: the committed classification and cleared media
+references remain authoritative, callers report success, and later callbacks still run.
+Cleanup logs use a fixed category without keys, URLs or exception details; referenced
+objects remain protected. Retained objects can be reclaimed with the orphan sweep.
 
 A `PendingArchiveMediaUpload` reservation commits before each storage write and
 protects its namespace. Publication removes the reservation in the same transaction
@@ -1039,7 +1043,12 @@ orphan cleanup. No historical downloads run during migration.
 When Voxhelm generation completes, the worker downloads the MP3 into a temporary disk
 file in 64 KiB chunks, then saves it in the configured `archive_media` storage under
 `article-audio/`. Older generated items are lazily copied on their first GET or HEAD.
-Subsequent requests use storage without contacting Voxhelm. Downloads use a 30-second
+Subsequent requests use storage without contacting Voxhelm. Public GET/HEAD requests
+recheck the row's public visibility and original artifact identity after preparation,
+before opening the stored copy, and again after storage open before response handoff.
+A deleted/hidden row, changed artifact or replaced copy returns 404; any acquired handle
+is closed on refusal. This cannot revoke bytes after response handoff. Worker downloads
+remain independent of public visibility. Downloads use a 30-second
 whole-transfer elapsed budget (the worker uses its article-audio timeout) and the existing
 `ARCHIVE_ARTICLE_AUDIO_MAX_BYTES` cap. Empty, oversized, truncated or non-MP3 responses
 are rejected without publishing a partial copy. Content type and declared oversized

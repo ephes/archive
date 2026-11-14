@@ -5,6 +5,8 @@ from django.db import models
 from django.urls import reverse
 from django.utils import timezone
 
+from archive.capture_identity import capture_url_digest
+
 
 class ItemKind(models.TextChoices):
     PODCAST_EPISODE = "podcast_episode", "Podcast episode"
@@ -32,7 +34,52 @@ def article_audio_storage():
     return storages["archive_media"]
 
 
+class ItemQuerySet(models.QuerySet):
+    """Keep persisted capture identities in sync through ordinary ORM writes."""
+
+    def update(self, **kwargs):
+        if "original_url" in kwargs:
+            if isinstance(kwargs["original_url"], str):
+                kwargs["capture_url_digest"] = capture_url_digest(kwargs["original_url"])
+            elif "capture_url_digest" not in kwargs:
+                raise ValueError("URL expression updates require a matching capture_url_digest")
+        return super().update(**kwargs)
+
+    def bulk_create(
+        self,
+        objs,
+        batch_size=None,
+        ignore_conflicts=False,
+        update_conflicts=False,
+        update_fields=None,
+        unique_fields=None,
+    ):
+        objs = list(objs)
+        for obj in objs:
+            obj.capture_url_digest = capture_url_digest(obj.original_url)
+        if update_fields is not None and "original_url" in update_fields:
+            update_fields = set(update_fields) | {"capture_url_digest"}
+        return super().bulk_create(
+            objs,
+            batch_size=batch_size,
+            ignore_conflicts=ignore_conflicts,
+            update_conflicts=update_conflicts,
+            update_fields=update_fields,
+            unique_fields=unique_fields,
+        )
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        objs = list(objs)
+        if "original_url" in fields:
+            for obj in objs:
+                obj.capture_url_digest = capture_url_digest(obj.original_url)
+            fields = set(fields) | {"capture_url_digest"}
+        return super().bulk_update(objs, fields, batch_size=batch_size)
+
+
 class Item(models.Model):
+    objects = ItemQuerySet.as_manager()
+
     kind = models.CharField(
         max_length=32,
         choices=ItemKind.choices,
@@ -73,6 +120,7 @@ class Item(models.Model):
     )
     is_public = models.BooleanField(default=True)
     original_url = models.URLField()
+    capture_url_digest = models.CharField(max_length=64, default="", db_default="", editable=False)
     title = models.CharField(max_length=500, blank=True)
     shared_at = models.DateTimeField(default=timezone.now, db_index=True)
     published_at = models.DateTimeField(blank=True, null=True)
@@ -122,6 +170,11 @@ class Item(models.Model):
 
     class Meta:
         ordering = ("-shared_at", "-id")
+        indexes = [
+            models.Index(
+                fields=["capture_url_digest", "shared_at"], name="archive_capture_digest_time"
+            ),
+        ]
 
     def __str__(self) -> str:
         return self.display_title
@@ -223,6 +276,11 @@ class Item(models.Model):
             kwargs["update_fields"] = update_fields
             if not update_fields:
                 return super().save(*args, **kwargs)
+
+        if update_fields is None or "original_url" in update_fields:
+            self.capture_url_digest = capture_url_digest(self.original_url)
+            if update_fields is not None:
+                update_fields.add("capture_url_digest")
 
         if self.is_public and self.published_at is None:
             self.published_at = self.shared_at

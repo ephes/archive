@@ -117,7 +117,7 @@ def test_selection_streams_only_ids_and_urls(size, monkeypatch, django_assert_nu
         "host": ["example.com"],
         "limit": None,
     }
-    with django_assert_num_queries(size // 200 + 1):
+    with django_assert_num_queries(size // 200 + 2):
         ids = list(reclassify_items.Command()._matching_items(options))
     assert len(ids) == size
     assert all(isinstance(pk, int) for pk in ids)
@@ -187,3 +187,73 @@ connections.close_all()
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_replay_diagnostics_hide_private_url_components(apply):
+    url = "https://test-user:test-password@example.com/private-token.mp3?signature=secret-query#secret-frag"
+    item = Item.objects.create(original_url=url, audio_url=url)
+    output = StringIO()
+    args = ["--all", *(["--apply"] if apply else [])]
+    call_command("reclassify_items", *args, stdout=output)
+    if not apply:
+        call_command("reclassify_items", "--all", "--apply", stdout=StringIO())
+    # Exercise UNCHANGED as well as WOULD UPDATE / UPDATED.
+    call_command("reclassify_items", *args, stdout=output)
+    text = output.getvalue()
+    assert f"item {item.pk}" in text
+    assert "https://example.com" in text
+    assert "UNCHANGED" in text
+    for secret in ("test-user", "test-password", "private-token", "secret-query", "secret-frag"):
+        assert secret not in text
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_replay_stops_at_starting_horizon_despite_new_batches(monkeypatch, apply):
+    Item.objects.bulk_create([Item(original_url=f"https://example.com/{n}") for n in range(400)])
+    original_ids = set(Item.objects.values_list("pk", flat=True))
+    process = reclassify_items.Command._process_item
+    processed = []
+
+    def insert_while_processing(self, item, options):
+        processed.append(item.pk)
+        if len(processed) % 200 == 1 and len(processed) < 800:
+            Item.objects.bulk_create(
+                [
+                    Item(original_url=f"https://example.com/later-{len(processed)}-{n}")
+                    for n in range(200)
+                ]
+            )
+        return process(self, item, options)
+
+    monkeypatch.setattr(reclassify_items.Command, "_process_item", insert_while_processing)
+    args = ["--all", *(["--apply"] if apply else [])]
+    output = StringIO()
+    call_command("reclassify_items", *args, stdout=output)
+    assert set(processed) == original_ids
+    assert "inspected=400" in output.getvalue()
+    later_ids = set(Item.objects.values_list("pk", flat=True)) - original_ids
+    processed.clear()
+    monkeypatch.setattr(reclassify_items.Command, "_process_item", process)
+    second = StringIO()
+    call_command("reclassify_items", *args, stdout=second)
+    assert f"inspected={len(original_ids) + len(later_ids)}" in second.getvalue()
+
+
+@pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.parametrize("host_filter", [False, True])
+def test_replay_malformed_legacy_url_has_fixed_diagnostic(apply, host_filter):
+    from django.core.management.base import CommandError
+
+    item = Item.objects.create(original_url="https://[private-token]/private-path?signature=secret")
+    args = [
+        "--all",
+        *(["--apply"] if apply else []),
+        *(["--host", "example.com"] if host_filter else []),
+    ]
+    with pytest.raises(CommandError) as error:
+        call_command("reclassify_items", *args, stdout=StringIO())
+    assert f"item {item.pk}" in str(error.value)
+    assert "private" not in str(error.value)
+    assert "secret" not in str(error.value)
+    assert error.value.__suppress_context__

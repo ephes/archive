@@ -235,27 +235,35 @@ def test_stored_article_deleted_only_when_unreferenced(article, voxhelm):
     assert not storage.exists(name)
 
 
-@pytest.mark.django_db(transaction=True)
-def test_migration_nullable_legacy_insert_and_reverse():
-    from django.db import connection
-    from django.db.migrations.executor import MigrationExecutor
+def test_migration_nullable_legacy_insert_and_reverse(tmp_path):
+    from test_historical_migrations import run_journey
 
-    before = [("archive", "0014_pendingarchivemediaupload")]
-    after = [("archive", "0015_item_article_audio_content_type_and_more")]
-    executor = MigrationExecutor(connection)
-    legacy = executor.loader.project_state(before).apps.get_model("archive", "Item")
-    # Old model inserts omit the new columns, as old workers do after migration.
-    row = legacy.objects.create(original_url="https://example.com/legacy", title="Legacy")
-    migrated = Item.objects.get(pk=row.pk)
-    assert not migrated.article_audio_file
-    assert migrated.article_audio_size_bytes is None
-    assert migrated.article_audio_content_type is None
-    try:
-        executor.migrate(before)
-        assert legacy.objects.get(pk=row.pk).title == "Legacy"
-    finally:
-        MigrationExecutor(connection).migrate(after)
-    assert Item.objects.get(pk=row.pk).title == "Legacy"
+    # Exercise the actual historical schema; later NOT NULL columns deliberately
+    # require newer writers and must not change this migration-0015 contract.
+    run_journey(tmp_path, r'''
+import django
+from django.db import connection, connections
+from django.db.migrations.executor import MigrationExecutor
+
+django.setup()
+before = [("archive", "0014_pendingarchivemediaupload")]
+after = [("archive", "0015_item_article_audio_content_type_and_more")]
+executor = MigrationExecutor(connection)
+executor.migrate(after)
+legacy = executor.loader.project_state(before).apps.get_model("archive", "Item")
+Item = executor.loader.project_state(after).apps.get_model("archive", "Item")
+# Old model inserts omit the nullable 0015 columns after that migration.
+row = legacy.objects.create(original_url="https://example.com/legacy", title="Legacy")
+migrated = Item.objects.get(pk=row.pk)
+assert not migrated.article_audio_file
+assert migrated.article_audio_size_bytes is None
+assert migrated.article_audio_content_type is None
+MigrationExecutor(connection).migrate(before)
+assert legacy.objects.get(pk=row.pk).title == "Legacy"
+MigrationExecutor(connection).migrate(after)
+assert Item.objects.get(pk=row.pk).title == "Legacy"
+connections.close_all()
+''')
 
 
 def test_worker_copy_failure_retains_complete_artifact_then_lazy_retry(

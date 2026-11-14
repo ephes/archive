@@ -237,12 +237,45 @@ form values and explaining that those changes were not saved.
 Repeats leave all existing fields and enrichment states untouched, including failed or
 completed jobs: they do not queue summary, transcription, or audio work again. The window
 starts at the item's `shared_at` and is not extended by repeats. After it expires, sharing
-the URL deliberately creates a new item. A non-positive setting disables deduplication.
+the URL deliberately creates a new item. Set `0` to disable deduplication. The
+supported range is the integer interval
+`0..31536000` (365 days); negative, noninteger and larger values raise a fixed
+configuration error at startup, before requests are served. Direct settings overrides
+are checked again before capture opens its write transaction. Invalid values are
+never copied into the error message.
 Comparison ignores only scheme/host case, default HTTP/HTTPS ports, and fragments. Paths,
 credentials, and every query parameter (including tracking parameters, order, and encoding)
-are preserved. Existing and admin-created items participate without a migration; capture
-compares recent URLs using the existing `shared_at` index, so lookup cost grows with the
-number of shares in the configured window. Direct admin creation still allows duplicates.
+are preserved. Existing and admin-created items participate through a persisted
+SHA-256 digest of
+the normalized URL. An index on `(capture_url_digest, shared_at)` selects recent
+matching identities; full normalized equality is still verified, so digest collisions
+cannot merge distinct URLs. Unrelated recent shares require no URL comparisons.
+Direct admin creation still allows duplicates, and newest-match ordering is unchanged.
+
+Apply migration `0020_item_capture_url_digest_and_more` before starting the updated
+app/workers. Stop writers for the migration rehearsal/rollout; the atomic SQLite
+migration backfills **all** existing URLs in batches of 500 using frozen normalization
+rules, then creates the index. Allow disk space for the added 64-character digest
+and index, and take the usual database backup first. No network/enrichment runs.
+The column has a database default of `''`, so a writer still running pre-0020 code
+can insert after the migration instead of failing with a 500; such rows carry an empty
+digest and are not found by capture deduplication until current code saves them with a
+full `save()` or with `original_url` in `update_fields` (worker/enrichment saves of other
+fields keep the empty digest). The writer stop above avoids such rows; if one was skipped,
+stop the app and workers again and repair them in `just manage shell` with
+`for item in Item.objects.filter(capture_url_digest=""): item.save(update_fields=["original_url"])`.
+This writes the URL, its digest and the timestamps `Item.save` recomputes from the loaded
+row's visibility/status, so it must not race running writers.
+Rollback removes the digest/index and preserves items and search data; use the older
+application with the older schema. A populated file-backed upgrade/rollback/upgrade
+rehearsal (including FTS and a second database) runs in
+`uv run pytest tests/test_historical_migrations.py -k capture_digest`.
+
+Model saves (including URL-only partial saves), queryset literal-URL updates, bulk
+creation and bulk URL updates maintain the digest. Unrelated partial/empty saves
+leave it untouched. URL expression updates must explicitly supply the corresponding
+digest; raw SQL writers must do the same. Normalization changes require a digest
+data migration; do not change these identity rules independently of stored hashes.
 
 `PATCH /api/items/<id>/` uses the same bearer token authentication and currently supports minimal kind updates, for example `{"kind":"quote"}`. Invalid kind values are rejected with `400`; valid updates are recorded as an operator classification override.
 
@@ -326,7 +359,8 @@ Important values:
 - `DJANGO_CSRF_TRUSTED_ORIGINS`
 - `DJANGO_DB_PATH`
 - `ARCHIVE_API_TOKEN`
-- `ARCHIVE_CAPTURE_DEDUPE_SECONDS` defaults to `86400` (24 hours)
+- `ARCHIVE_CAPTURE_DEDUPE_SECONDS` defaults to `86400` (24 hours); integer range
+  `0..31536000` (365 days), with `0` disabling deduplication
 - `ARCHIVE_SUMMARY_API_KEY`
 - `ARCHIVE_SUMMARY_API_BASE` defaults to `https://api.openai.com/v1`
 - `ARCHIVE_SUMMARY_MODEL` defaults to `gpt-4o-mini`
@@ -781,8 +815,15 @@ back to a generic `link` classification until the next metadata enrichment pass 
 
 Historical replay workflow:
 
-Selection streams only IDs and URLs in bounded batches, in ID order. Each item is
-re-read under a transaction/row lock before deciding and applying classification
+Replay diagnostics identify items by ID and HTTP(S) origin only. Credentials, paths,
+queries and fragments are redacted, including selected-media changes. Use the item
+ID in the authenticated editor to inspect the original stored URL. Malformed legacy
+URLs fail with a fixed item-ID diagnostic, without raw parser details.
+
+Selection captures an initial maximum matching ID and streams only IDs and URLs
+up to that horizon in bounded batches, in ID order. Captures inserted after that
+horizon belong to the next invocation, so a busy archive cannot extend a run forever.
+Each item is re-read under a transaction/row lock before deciding and applying classification
 and normalization, so edits and completed worker results since selection are used.
 Deleted rows are skipped. Each selection batch is fully fetched before processing,
 so no live selection cursor pins a stale SQLite snapshot. Dry-runs use current rows

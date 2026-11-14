@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from contextlib import nullcontext
 from typing import Any
@@ -7,6 +8,7 @@ from urllib.parse import urlparse
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.db.models import Max
 
 from archive.classification import (
     CURRENT_CLASSIFICATION_ENGINE_VERSION,
@@ -20,6 +22,21 @@ from archive.services import (
     normalize_item_downstream_state,
     set_item_classification,
 )
+
+
+def diagnostic_origin(url: str) -> str:
+    """Retain only a validated HTTP origin, never credentials/path/query/fragment."""
+    try:
+        parts = urlparse(url)
+        host = parts.hostname or ""
+        if parts.scheme not in {"http", "https"} or not re.fullmatch(r"[a-zA-Z0-9.:-]+", host):
+            return "[URL omitted]"
+        authority = f"[{host}]" if ":" in host else host
+        if parts.port is not None:
+            authority += f":{parts.port}"
+        return f"{parts.scheme}://{authority}/[redacted]"
+    except ValueError:
+        return "[URL omitted]"
 
 
 class Command(BaseCommand):
@@ -144,14 +161,19 @@ class Command(BaseCommand):
 
     def _process_item(self, item: Item, options: dict[str, Any]) -> tuple[bool, list[str]]:
         lines = []
-        decision = classify_item(
-            original_url=item.original_url,
-            current_kind=item.kind,
-            audio_url=item.audio_url,
-            media_url=item.media_url,
-            existing_rule=item.classification_rule,
-            existing_evidence=item.classification_evidence,
-        )
+        try:
+            decision = classify_item(
+                original_url=item.original_url,
+                current_kind=item.kind,
+                audio_url=item.audio_url,
+                media_url=item.media_url,
+                existing_rule=item.classification_rule,
+                existing_evidence=item.classification_evidence,
+            )
+        except ValueError:
+            raise CommandError(
+                f"Cannot classify item {item.pk}: invalid classification input."
+            ) from None
         change_descriptions = self._change_descriptions(
             item=item,
             decision=decision,
@@ -160,7 +182,7 @@ class Command(BaseCommand):
 
         if change_descriptions:
             label = "UPDATED" if options["apply"] else "WOULD UPDATE"
-            lines.append(f"{label} item {item.pk}: {item.original_url}")
+            lines.append(f"{label} item {item.pk}: {diagnostic_origin(item.original_url)}")
             for description in change_descriptions:
                 lines.append(f"  - {description}")
             if options["apply"]:
@@ -170,7 +192,7 @@ class Command(BaseCommand):
                 if update_fields:
                     item.save(update_fields=sorted(set(update_fields)))
         else:
-            lines.append(f"UNCHANGED item {item.pk}: {item.original_url}")
+            lines.append(f"UNCHANGED item {item.pk}: {diagnostic_origin(item.original_url)}")
             lines.append(
                 "  - "
                 f"kind={item.kind}; "
@@ -195,6 +217,10 @@ class Command(BaseCommand):
                 classification_engine_version__lt=CURRENT_CLASSIFICATION_ENGINE_VERSION
             )
 
+        horizon = queryset.aggregate(max_id=Max("pk"))["max_id"]
+        if horizon is None:
+            return
+        queryset = queryset.filter(pk__lte=horizon)
         allowed_hosts = {host.strip().lower() for host in options["host"] if host.strip()}
         limit = options["limit"]
         matched = 0
@@ -206,8 +232,13 @@ class Command(BaseCommand):
             if not batch:
                 return
             for item_id, original_url in batch:
-                if allowed_hosts and urlparse(original_url).netloc.lower() not in allowed_hosts:
-                    continue
+                if allowed_hosts:
+                    try:
+                        host = urlparse(original_url).netloc.lower()
+                    except ValueError:
+                        raise CommandError(f"Cannot select item {item_id}: invalid URL.") from None
+                    if host not in allowed_hosts:
+                        continue
                 yield item_id
                 matched += 1
                 if limit is not None and matched >= limit:
@@ -254,10 +285,12 @@ class Command(BaseCommand):
         proposed_selected_media = selected_media_from_evidence(decision.evidence)
         for key in ("audio", "video"):
             if current_selected_media[key] != proposed_selected_media[key]:
+                current_origin = diagnostic_origin(current_selected_media[key])
+                proposed_origin = diagnostic_origin(proposed_selected_media[key])
                 descriptions.append(
                     f"selected_{key}: "
-                    f"{current_selected_media[key] or 'none'} -> "
-                    f"{proposed_selected_media[key] or 'none'}"
+                    f"{current_origin if current_selected_media[key] else 'none'} -> "
+                    f"{proposed_origin if proposed_selected_media[key] else 'none'}"
                 )
 
         if (

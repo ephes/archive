@@ -26,14 +26,8 @@
                 <p class="pill">{{ item.get_kind_display }}</p>
                 <h3 class="card-title"><a href="{{ item.get_absolute_url }}">{{ item.display_title }}</a></h3>
                 <p class="meta">{{ item.shared_at|date:"j M Y, H:i" }}{% if item.source %} · {{ item.source }}{% endif %}</p>
-                {% if item.short_summary %}
-                    <p>{{ item.short_summary|linebreaksbr }}</p>
-                {% elif item.notes %}
-                    <p>{{ item.notes|linebreaksbr }}</p>
-                {% elif item.long_summary %}
-                    <p>{{ item.long_summary|linebreaksbr }}</p>
-                {% elif item.transcript %}
-                    <p>{{ item.transcript|truncatechars:240|linebreaksbr }}</p>
+                {% if item.card_excerpt %}
+                    <p>{{ item.card_excerpt|truncatechars:excerpt_chars|linebreaksbr }}</p>
                 {% endif %}
             </article>
         {% endfor %}

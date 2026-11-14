@@ -186,3 +186,30 @@ def test_capture_accepts_model_length_boundaries_and_long_notes(client):
     item = Item.objects.get()
     for name, value in payload.items():
         assert getattr(item, "original_url" if name == "url" else name) == value
+
+
+@pytest.mark.parametrize("method,path", [("post", "/api/items/"), ("patch", "/api/items/1/")])
+@pytest.mark.parametrize(
+    "members",
+    [
+        '"url":"https://example.com/a","url":"https://example.com/b"',
+        '"url":"https://example.com/b","url":"https://example.com/a"',
+        '"kind":"article","kind":"quote"',
+        '"kind":"quote","kind":"article"',
+        '"notes":"first","notes":"second"',
+        '"notes":"second","notes":"first"',
+        '"ignored":{"nested":[{"key":1,"key":2}]}',
+        '"ignored":{"nested":[{"key":2,"key":1}]}',
+        '"notes":"first","no\\u0074es":"second"',
+    ],
+)
+def test_capture_refuses_duplicate_json_members_before_work(
+    client, no_capture, method, path, members
+):
+    # The default URL/kind keep unrelated validation from masking duplicate handling.
+    body = '{"url":"https://example.com/story","kind":"quote",' + members + "}"
+    response = getattr(client, method)(path, body, content_type="application/json", headers=HEADERS)
+    assert response.status_code == 400
+    assert response.json() == {"error": "Invalid JSON"}
+    for call in no_capture:
+        call.assert_not_called()

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Fetch only search card columns and a database-bounded excerpt from the first
+  nonempty summary/notes/transcript fallback; display at most 240 characters while
+  retaining full-content ranking and detail pages.
+
+- Bound HTML week overviews to 50 cards per page in stable newest-time/id order,
+  with server-rendered page links retaining the selected week.
+
+- Reject duplicate JSON object members on capture and classifier updates before
+  classification or database work, including duplicates in ignored nested fields.
+
 - Share one transcription deadline across media loading, upload staging, submission,
   polling and coverage evidence; reject late results without starting subsequent
   requests or retrying ambiguous submissions inside the attempt. Remote media

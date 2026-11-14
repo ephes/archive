@@ -43,7 +43,12 @@ Public endpoints:
 ## Public search
 
 `/search/?q=<terms>&page=<n>` returns 20 public results per page. SQLite counts matches
-and selects only that page's ids with `LIMIT/OFFSET`; only those items are loaded.
+and selects only that page's ids with `LIMIT/OFFSET`; only those items' card
+columns are loaded. SQLite selects the first nonempty short summary, notes, long
+summary or transcript and returns at most 241 Unicode characters (at most 964 UTF-8
+bytes) as the card excerpt. The page displays at most 240 characters including an
+ellipsis when truncated. Full text and processing fields remain deferred; detail
+pages and full-text ranking still use the complete stored content.
 Results keep full-text relevance (`bm25`) order, then newest `shared_at` and highest id
 for ties. Totals remain exact. Blank or punctuation-only queries return no results;
 invalid page text selects the first page, and out-of-range numbers select the last page.
@@ -58,8 +63,14 @@ partially filled; this cannot revoke content already fetched.
 
 The overview discovers occupied ISO weeks with a timezone-aware database grouping in
 one query, returning one result per occupied week in newest-first order. Gaps and local
-DST/year boundaries are preserved. A second query selects only card fields (including
+DST/year boundaries are preserved. A count and a bounded page query select only card fields (including
 title/URL and summary/notes fallbacks), leaving transcripts and processing payloads deferred.
+`/?week=<YYYY-Wnn>&page=<n>` serves at most 50 cards, newest `shared_at` then highest
+id first. Page links retain the selected week; week links start at its first page.
+Missing/invalid page text selects page 1; nonpositive/out-of-range numbers select
+the last page. An empty archive shows an empty first page; an unoccupied week is
+rejected with HTTP 400 once there are occupied weeks. Pagination is a live view:
+concurrent inserts/deletions or timestamp edits can shift page boundaries.
 
 `just manage rebuild_search_index` repairs SQLite FTS drift from the current item rows.
 It leaves item content and visibility unchanged and can be run repeatedly. It refuses
@@ -259,7 +270,7 @@ and the current Django timezone so detail pages can render them.
 Malformed dates and conversions outside that range return `400` with
 `{"error":"Invalid original_published_at"}`.
 Both POST and PATCH authenticate before parsing JSON. Malformed JSON, invalid JSON byte
-encodings, and non-object bodies return `400` with `{"error":"Invalid JSON"}`;
+encodings, duplicate object members (including nested unknown fields), and non-object bodies return `400` with `{"error":"Invalid JSON"}`;
 valid UTF-8, UTF-16, and UTF-32 JSON retain support.
 
 Repeated shares through the API or authenticated web form resolve to the newest existing

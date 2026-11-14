@@ -22,10 +22,16 @@ from archive.api_responses import (
     safe_api_error,
 )
 from archive.classification import resolve_media_sources_for_item
-from archive.media_archival import MediaArchivalError, open_archived_audio, open_archived_video
+from archive.media_archival import (
+    DIRECT_MEDIA_BUDGET_EXCEEDED,
+    MediaArchivalError,
+    MediaSizeLimitError,
+    _open_direct_media,
+    open_archived_audio,
+    open_archived_video,
+)
 from archive.metadata import REQUEST_HEADERS
 from archive.models import Item
-from archive.safe_fetch import open_public_url
 from archive.upstream_http import api_url
 from archive.upstream_http import open_authenticated_url as urlopen
 from archive.upstream_jobs import artifact_path, wire_id, wire_state
@@ -213,9 +219,13 @@ def _download_remote_media(
             "Accept": "audio/*,video/*;q=0.9,*/*;q=0.8",
         },
     )
+    budget = _remaining(deadline) if deadline is not None else timeout
     try:
-        with open_public_url(
-            request, timeout=_remaining(deadline) if deadline is not None else timeout
+        # A disposable child process performs the fetch and is killed at the
+        # remaining pipeline budget, so DNS, redirects and drip-fed bodies all
+        # count against the one elapsed deadline.
+        with _open_direct_media(
+            request, timeout=budget, max_bytes=MAX_TRANSCRIPTION_BYTES
         ) as response:
             content_type = (response.headers.get_content_type() or "").lower()
             final_url = response.geturl() or source_url
@@ -225,14 +235,12 @@ def _download_remote_media(
                     f"Unsupported media type for transcription: {content_type or 'unknown'}"
                 )
             payload = response.read(MAX_TRANSCRIPTION_BYTES + 1)
-    except HTTPError as exc:
+    except MediaSizeLimitError:
         raise TranscriptionGenerationError(
-            f"Media download failed: {safe_api_error(exc)}"
+            "Media source exceeded 25 MiB transcription limit"
         ) from None
-    except URLError as exc:
-        raise TranscriptionGenerationError(
-            f"Media download failed: {safe_api_error(exc)}"
-        ) from None
+    except MediaArchivalError as exc:
+        raise TranscriptionGenerationError(_safe_download_failure(exc)) from None
     except OSError as exc:
         raise TranscriptionGenerationError(
             f"Media download failed: {safe_api_error(exc)}"
@@ -250,6 +258,16 @@ def _download_remote_media(
         content_type=guessed_content_type,
         payload=payload,
     )
+
+
+def _safe_download_failure(exc: MediaArchivalError) -> str:
+    # The downloader's raw messages can name hosts or upstream text; only fixed
+    # texts reach the stored transcription error.
+    if exc.safe_detail:
+        return f"Media download failed: {exc.safe_detail}"
+    if str(exc) == DIRECT_MEDIA_BUDGET_EXCEEDED:
+        return DIRECT_MEDIA_BUDGET_EXCEEDED
+    return "Media download failed: transport error"
 
 
 def _read_archived_media(item: Item, source: TranscriptionSource) -> DownloadedMedia:
@@ -583,9 +601,11 @@ def _parse_batch_transcription_job_update(
             )
         artifacts = result.get("artifacts")
         json_artifact_path = ""
-        if "artifacts" in result and not isinstance(artifacts, dict):
+        # Explicit nulls mean "no artifact", as for older services; only a
+        # present value of the wrong type is a malformed envelope.
+        if artifacts is not None and not isinstance(artifacts, dict):
             raise TranscriptionGenerationError("Invalid JSON segment artifact container")
-        if isinstance(artifacts, dict) and "json" in artifacts:
+        if isinstance(artifacts, dict) and artifacts.get("json") is not None:
             try:
                 json_artifact_path = artifact_path(artifacts["json"])
             except ValueError:

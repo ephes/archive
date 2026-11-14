@@ -23,10 +23,28 @@ class Response(io.BytesIO):
         (audio, audio._parse_job_update, audio.ArticleAudioGenerationError),
     ],
 )
-@pytest.mark.parametrize("value", [None, {}, [], True, "", "x" * 201, "../other", "bad\r\nid"])
+@pytest.mark.parametrize(
+    "value", [None, {}, [], True, "", "x" * 65, 10**64, "../other", "bad\r\nid"]
+)
 def test_job_ids_are_bounded_scalars(module, parse, error, value):
     with pytest.raises(error):
         parse({"id": value, "state": "queued"})
+
+
+@pytest.mark.parametrize(
+    "parse",
+    [tr._parse_batch_transcription_job_update, audio._parse_job_update],
+)
+def test_job_ids_up_to_the_stored_width_are_admitted(parse):
+    assert parse({"id": "x" * 64, "state": "queued"}).job_id == "x" * 64
+    assert parse({"id": 10**64 - 1, "state": "queued"}).job_id == "9" * 64
+
+
+@pytest.mark.django_db
+def test_longest_admitted_synthesis_job_id_fits_the_item_field():
+    field = Item._meta.get_field("article_audio_job_id")
+    update = audio._parse_job_update({"id": "x" * 64, "state": "queued"})
+    assert field.max_length >= len(update.job_id)
 
 
 @pytest.mark.parametrize(
@@ -45,6 +63,8 @@ def test_only_supported_states_are_admitted(parse, error, state):
 @pytest.mark.parametrize("value", [None, {}, [], 7, True, "x" * 2049, "/bad\npath"])
 @pytest.mark.parametrize("kind", ["audio", "transcript"])
 def test_artifacts_require_bounded_string_paths(kind, value):
+    if kind == "transcript" and value is None:
+        pytest.skip("an explicit null JSON artifact means no segment evidence")
     parse, error, result = (
         (audio._parse_job_update, audio.ArticleAudioGenerationError, {"artifacts": {"mp3": value}})
         if kind == "audio"
@@ -255,7 +275,20 @@ def test_staging_failure_closes_source_without_network(mode, monkeypatch, settin
     assert source.calls <= 2
 
 
-@pytest.mark.parametrize("container", [None, [], "", 7, True])
+@pytest.mark.parametrize("result_artifacts", [{"artifacts": None}, {"artifacts": {"json": None}}])
+def test_null_transcription_artifacts_mean_no_segment_evidence(result_artifacts):
+    update = tr._parse_batch_transcription_job_update(
+        {
+            "id": "job-a",
+            "state": "succeeded",
+            "result": {"text": "words", **result_artifacts},
+        }
+    )
+    assert update.transcript == "words"
+    assert update.json_artifact_path == ""
+
+
+@pytest.mark.parametrize("container", [[], "", 7, True])
 def test_transcription_artifacts_container_must_be_an_object(container):
     with pytest.raises(tr.TranscriptionGenerationError, match="artifact"):
         tr._parse_batch_transcription_job_update(

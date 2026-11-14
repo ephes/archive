@@ -10,6 +10,10 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 
+class _LimitExceeded(ValueError):
+    """The body grew past the caller's byte budget."""
+
+
 def _load_safe_fetch():
     # Isolated mode keeps this script's directory off sys.path, so load the
     # stdlib-only guard module by file path.
@@ -23,11 +27,27 @@ def _load_safe_fetch():
     return module
 
 
+def _safe_error(exc: BaseException, blocked: type[BaseException] | None) -> str:
+    """Fixed-shape diagnostic that never copies URLs, hosts or upstream text."""
+    if isinstance(exc, HTTPError):
+        code = exc.code
+        return f"HTTP {code}" if isinstance(code, int) and 100 <= code <= 599 else "HTTP error"
+    if isinstance(exc, URLError) and isinstance(exc.reason, BaseException):
+        exc = exc.reason
+    if blocked is not None and isinstance(exc, blocked):
+        # The fetch guard raises only fixed policy texts.
+        return f"blocked destination: {exc}"
+    return f"transport error ({type(exc).__name__})"
+
+
 def main() -> int:
+    blocked: type[BaseException] | None = None
     try:
         options = json.load(sys.stdin)
         request = Request(options["url"], headers=options["headers"])
-        with _load_safe_fetch().open_public_url(request, timeout=options["timeout"]) as response:
+        safe_fetch = _load_safe_fetch()
+        blocked = getattr(safe_fetch, "BlockedFetchError", None)
+        with safe_fetch.open_public_url(request, timeout=options["timeout"]) as response:
             metadata_mode = options.get("metadata", False)
             content_type = response.headers.get_content_type()
             if (
@@ -47,7 +67,7 @@ def main() -> int:
                         break
                     size += len(chunk)
                     if size > options["max_bytes"]:
-                        raise ValueError(
+                        raise _LimitExceeded(
                             "Media source exceeded the configured "
                             f"{options['max_bytes']}-byte archive limit"
                         )
@@ -62,13 +82,32 @@ def main() -> int:
                 )
             )
     except HTTPError as exc:
-        print(json.dumps({"error": str(exc), "http_status": exc.code}))
+        print(
+            json.dumps(
+                {
+                    "error": str(exc),
+                    "http_status": exc.code,
+                    "safe_error": _safe_error(exc, blocked),
+                }
+            )
+        )
         return 1
     except URLError as exc:
-        print(json.dumps({"error": str(exc), "url_reason": str(exc.reason)}))
+        print(
+            json.dumps(
+                {
+                    "error": str(exc),
+                    "url_reason": str(exc.reason),
+                    "safe_error": _safe_error(exc, blocked),
+                }
+            )
+        )
+        return 1
+    except _LimitExceeded as exc:
+        print(json.dumps({"error": str(exc), "limit_exceeded": True}))
         return 1
     except Exception as exc:
-        print(json.dumps({"error": str(exc)}))
+        print(json.dumps({"error": str(exc), "safe_error": _safe_error(exc, blocked)}))
         return 1
     return 0
 

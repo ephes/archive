@@ -113,7 +113,10 @@ def test_generate_item_transcript_downloads_media_and_parses_response(
         )
 
     monkeypatch.setattr("archive.transcriptions.urlopen", fake_urlopen)
-    monkeypatch.setattr("archive.transcriptions.open_public_url", fake_urlopen)
+    monkeypatch.setattr(
+        "archive.transcriptions._open_direct_media",
+        lambda request, *, timeout, max_bytes: fake_urlopen(request, timeout),
+    )
 
     transcript = generate_item_transcript(item=item)
 
@@ -130,8 +133,8 @@ def test_generate_item_transcript_rejects_oversized_media(monkeypatch, settings)
     settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
 
     monkeypatch.setattr(
-        "archive.transcriptions.open_public_url",
-        lambda request, timeout: _FakeResponse(
+        "archive.transcriptions._open_direct_media",
+        lambda request, *, timeout, max_bytes: _FakeResponse(
             b"x" * (MAX_TRANSCRIPTION_BYTES + 1),
             content_type="audio/mpeg",
             url=request.full_url,
@@ -641,7 +644,7 @@ def test_enabled_coverage_requires_json_artifact(monkeypatch, settings, artifact
     )
 
     settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = 600
-    if artifact is None or isinstance(artifact, dict) and "json" in artifact:
+    if isinstance(artifact, dict) and artifact.get("json") is not None:
         with pytest.raises(TranscriptionGenerationError, match="segment artifact"):
             _parse_batch_transcription_job_update(
                 {

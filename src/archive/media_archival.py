@@ -64,8 +64,16 @@ VIDEO_CONTENT_TYPE_SUFFIXES = {
 }
 
 
+DIRECT_MEDIA_BUDGET_EXCEEDED = "Media source exceeded the elapsed download budget"
+
+
 class MediaArchivalError(RuntimeError):
-    pass
+    # Fixed-shape download diagnostic (no URL, host or upstream text), when known.
+    safe_detail: str | None = None
+
+
+class MediaSizeLimitError(MediaArchivalError):
+    """A direct download stopped at its caller-supplied byte budget."""
 
 
 @dataclass(frozen=True)
@@ -114,7 +122,7 @@ def open_archived_video(item: Item):
 
 
 @contextmanager
-def _open_direct_media(request: Request, *, timeout: int):
+def _open_direct_media(request: Request, *, timeout: float, max_bytes: int | None = None):
     # subprocess.run kills and reaps the urllib process at the elapsed deadline,
     # including DNS, redirects and reads that keep resetting socket timeouts.
     deadline = monotonic() + timeout
@@ -122,13 +130,15 @@ def _open_direct_media(request: Request, *, timeout: int):
         path = Path(temp_dir) / "source"
         remaining = deadline - monotonic()
         if remaining <= 0:
-            raise MediaArchivalError("Media source exceeded the elapsed download budget")
+            raise MediaArchivalError(DIRECT_MEDIA_BUDGET_EXCEEDED)
         options = {
             "url": request.full_url,
             "headers": dict(request.header_items()),
             "path": str(path),
             "timeout": remaining,
-            "max_bytes": settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES,
+            "max_bytes": (
+                settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES if max_bytes is None else max_bytes
+            ),
         }
         try:
             result = run_download(
@@ -139,9 +149,9 @@ def _open_direct_media(request: Request, *, timeout: int):
                 timeout=remaining,
             )
         except subprocess.TimeoutExpired as exc:
-            raise MediaArchivalError("Media source exceeded the elapsed download budget") from exc
+            raise MediaArchivalError(DIRECT_MEDIA_BUDGET_EXCEEDED) from exc
         if monotonic() >= deadline:
-            raise MediaArchivalError("Media source exceeded the elapsed download budget")
+            raise MediaArchivalError(DIRECT_MEDIA_BUDGET_EXCEEDED)
         stderr_tail = result.stderr.strip().splitlines()[-1:] or ["no diagnostic output"]
         invalid_result = (
             f"Media downloader exited with code {result.returncode} without a valid result: "
@@ -157,7 +167,17 @@ def _open_direct_media(request: Request, *, timeout: int):
             detail = metadata.get("error")
             if not isinstance(detail, str) or not detail.strip():
                 raise MediaArchivalError(invalid_result)
-            raise MediaArchivalError(f"Media download failed: {detail}")
+            if metadata.get("limit_exceeded") is True:
+                raise MediaSizeLimitError(f"Media download failed: {detail}")
+            error = MediaArchivalError(f"Media download failed: {detail}")
+            safe_detail = metadata.get("safe_error")
+            if (
+                isinstance(safe_detail, str)
+                and 0 < len(safe_detail) <= 200
+                and safe_detail.isprintable()
+            ):
+                error.safe_detail = safe_detail
+            raise error
         if not all(isinstance(metadata.get(key), str) for key in ("url", "content_type")):
             raise MediaArchivalError(invalid_result)
         headers = Message()

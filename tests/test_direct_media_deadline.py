@@ -160,3 +160,82 @@ def test_direct_download_refuses_loopback_source_by_default(media_server, monkey
     with pytest.raises(MediaArchivalError, match="non-public network address"):
         archive_item_audio(item, timeout=2)
     assert not list(iter_archive_media_object_names())
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("path", ["/trickle.mp3", "/headers.mp3", "/redirect.mp3"])
+def test_remote_transcription_source_obeys_pipeline_deadline(
+    media_server, path, monkeypatch, settings, tmp_path
+):
+    from archive.transcriptions import TranscriptionGenerationError, generate_item_transcript
+
+    monkeypatch.setattr(
+        "archive.media_archival.TemporaryDirectory",
+        partial(tempfile.TemporaryDirectory, dir=tmp_path),
+    )
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "synthetic"
+    monkeypatch.setattr(
+        "archive.transcriptions._request_transcription",
+        lambda **kwargs: pytest.fail("a timed-out download must not reach transcription"),
+    )
+    item = Item.objects.create(
+        original_url=media_server + "/page",
+        audio_url=media_server + path,
+        kind=ItemKind.PODCAST_EPISODE,
+    )
+    started = time.monotonic()
+    with pytest.raises(TranscriptionGenerationError, match="elapsed download budget"):
+        generate_item_transcript(item, timeout=1)
+    assert time.monotonic() - started < 1.8
+    assert not list(tmp_path.glob("archive-*"))
+
+
+@pytest.mark.django_db(transaction=True)
+def test_remote_transcription_source_size_limit_uses_transcription_message(
+    media_server, monkeypatch, settings
+):
+    from archive import transcriptions as tr
+
+    monkeypatch.setattr(tr, "MAX_TRANSCRIPTION_BYTES", 3)
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "synthetic"
+    item = Item.objects.create(
+        original_url=media_server + "/page",
+        audio_url=media_server + "/fast.mp3",
+        kind=ItemKind.PODCAST_EPISODE,
+    )
+    with pytest.raises(tr.TranscriptionGenerationError, match="transcription limit"):
+        tr.generate_item_transcript(item, timeout=2)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_fast_remote_transcription_source_is_loaded(media_server, monkeypatch, settings):
+    from archive import transcriptions as tr
+
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "synthetic"
+    seen = []
+    monkeypatch.setattr(
+        tr, "_request_transcription", lambda **kwargs: seen.append(kwargs["media"]) or "words"
+    )
+    item = Item.objects.create(
+        original_url=media_server + "/page",
+        audio_url=media_server + "/fast.mp3",
+        kind=ItemKind.PODCAST_EPISODE,
+    )
+    assert tr.generate_item_transcript(item, timeout=2) == "words"
+    assert seen[0].payload == b"fast audio"
+    assert seen[0].content_type == "audio/mpeg"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_remote_transcription_failure_keeps_fixed_diagnostic(media_server, settings):
+    from archive.transcriptions import TranscriptionGenerationError, generate_item_transcript
+
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "synthetic"
+    item = Item.objects.create(
+        original_url=media_server + "/page",
+        audio_url=media_server + "/missing.mp3?signature=secret",
+        kind=ItemKind.PODCAST_EPISODE,
+    )
+    with pytest.raises(TranscriptionGenerationError) as caught:
+        generate_item_transcript(item, timeout=2)
+    assert str(caught.value) == "Media download failed: HTTP 404"

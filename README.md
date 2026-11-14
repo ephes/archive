@@ -410,7 +410,8 @@ Important values:
   artifact. Successful batch results must contain nonblank string text; other JSON
   types are rejected instead of converted to text. With a positive threshold, successful batch
   jobs must also return a nonblank string JSON artifact path and a readable, nonempty
-  segment list. Missing evidence fails with a retryable transcription error and preserves
+  segment list. An explicit `null` artifact container or `json` entry counts as no
+  artifact (accepted when the check is disabled); other non-string values are rejected. Missing evidence fails with a retryable transcription error and preserves
   existing stored content. Older services without segment artifacts require an explicit
   nonpositive threshold opt-out; coverage checking cannot verify their output.
 - `ARCHIVE_ARTICLE_AUDIO_API_KEY` defaults to `ARCHIVE_TRANSCRIPTION_API_KEY`
@@ -988,8 +989,8 @@ content is unchanged in both general and podcast feeds.
 
 ## Upstream API response limits
 
-Job and upload IDs must be nonnegative integers or 1–200 ASCII letters, digits,
-underscores or hyphens. Only `queued`, `running`, `succeeded` and `failed` job
+Job and upload IDs must be nonnegative integers or 1–64 ASCII letters, digits,
+underscores or hyphens (the stored job-ID width). Only `queued`, `running`, `succeeded` and `failed` job
 states are accepted. Every poll response must identify the requested job. Artifact
 paths must be nonblank strings of at most 2048 characters without controls;
 existing same-origin checks still apply when fetching them. Invalid envelopes
@@ -1016,7 +1017,10 @@ transport teardown. Timeout kills and reaps that process; no timed-out request
 thread remains. Each transcription attempt has one monotonic elapsed budget
 (`timeout`, normally 300 seconds) shared across source loading, staging, job
 submission, polling sleeps/requests, segment coverage evidence and final result
-admission. Every network step receives only the remaining time; expired attempts
+admission. Remote (non-archived) media sources are fetched in the same disposable
+download process as direct media archival, killed at the remaining budget, so DNS,
+redirects and drip-fed bodies cannot outlast it. Every network step receives only
+the remaining time; expired attempts
 start no further request and reject late success. Local storage reads check the
 same deadline before and after each read; a blocking storage call itself remains
 subject to the storage backend's own timeout. The separate worker stale-processing

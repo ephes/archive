@@ -413,6 +413,9 @@ def _download_supported_video_page_audio_source(
         "postprocessor_args": {
             "extractaudio+ffmpeg_o": ["-fs", str(settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES)]
         },
+        # The child's stdout counts toward the diagnostic budget; as a library,
+        # quiet alone still prints the progress bar, so turn it off explicitly.
+        "noprogress": True,
         "quiet": True,
         "restrictfilenames": True,
         "socket_timeout": timeout,

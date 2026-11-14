@@ -15,7 +15,9 @@
 - Bound extracted MP3 output with FFmpeg's size option and parent-side checks;
   refuse truncated/oversized output before uploading video or audio. Drain both
   diagnostic streams with separate 1 MiB budgets and fixed private-safe failures,
-  preserving the previous archived generation on extraction failure.
+  preserving the previous archived generation on extraction failure. Video-page
+  downloads turn off yt-dlp's progress bar, so long downloads do not use up the
+  diagnostic budget.
 
 - Continue orphan cleanup after independent filesystem/S3 deletion failures, report
   bounded failure counts and exit nonzero for incomplete sweeps. Preserve final

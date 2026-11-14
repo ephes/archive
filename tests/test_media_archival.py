@@ -380,6 +380,8 @@ def test_archive_item_audio_downloads_supported_youtube_page_audio_directly(
     assert _FakeYoutubeDL.instances[0].options["postprocessor_args"] == {
         "extractaudio+ffmpeg_o": ["-fs", str(settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES)]
     }
+    assert _FakeYoutubeDL.instances[0].options["noprogress"] is True
+    assert _FakeYoutubeDL.instances[0].options["quiet"] is True
     assert _FakeYoutubeDL.instances[0].options["js_runtimes"] == {
         "node": {},
         "deno": {},

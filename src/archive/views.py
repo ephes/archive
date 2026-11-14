@@ -4,10 +4,13 @@ import hmac
 import json
 import logging
 import re
+from contextlib import suppress
 from datetime import UTC
+from urllib.parse import urlencode
 
 from django.conf import settings
 from django.contrib.auth.views import LoginView, LogoutView
+from django.core import signing
 from django.core.exceptions import ValidationError
 from django.core.paginator import EmptyPage, Paginator
 from django.core.validators import URLValidator
@@ -56,8 +59,16 @@ logger = logging.getLogger(__name__)
 
 url_validator = URLValidator()
 FEED_PAGE_SIZE = 50
+WEEK_PAGE_SIZE = 50
 SEARCH_PAGE_SIZE = 20
+SEARCH_MAX_CHARS = 512
+SEARCH_MAX_TERMS = 32
+SEARCH_MAX_TERM_CHARS = 64
 SEARCH_TOKEN_RE = re.compile(r"\w+")
+SEARCH_LIMIT_MESSAGE = (
+    f"Search allows at most {SEARCH_MAX_CHARS} characters, {SEARCH_MAX_TERMS} terms "
+    f"and {SEARCH_MAX_TERM_CHARS} characters per term."
+)
 
 
 class ArchiveLoginView(LoginView):
@@ -144,7 +155,11 @@ def _feed_page(items, page: int):
 
 
 def _build_search_match_query(raw_query: str) -> str:
+    if len(raw_query) > SEARCH_MAX_CHARS:
+        raise ValidationError(SEARCH_LIMIT_MESSAGE)
     tokens = SEARCH_TOKEN_RE.findall(raw_query.lower())
+    if len(tokens) > SEARCH_MAX_TERMS or any(len(t) > SEARCH_MAX_TERM_CHARS for t in tokens):
+        raise ValidationError(SEARCH_LIMIT_MESSAGE)
     return " AND ".join(f"{token}*" for token in tokens)
 
 
@@ -329,8 +344,13 @@ def overview(request: HttpRequest) -> HttpResponse:
 
 @require_GET
 def search(request: HttpRequest) -> HttpResponse:
-    raw_query = (request.GET.get("q") or "").strip()
-    page_obj = _search_public_item_page(raw_query, request.GET.get("page") or 1)
+    raw_query = request.GET.get("q") or ""
+    search_error = ""
+    try:
+        page_obj = _search_public_item_page(raw_query, request.GET.get("page") or 1)
+    except ValidationError as exc:
+        search_error = exc.messages[0]
+        page_obj = Paginator([], SEARCH_PAGE_SIZE).get_page(1)
     items_by_id = Item.objects.filter(is_public=True).in_bulk(page_obj.object_list)
     results = [items_by_id[item_id] for item_id in page_obj.object_list if item_id in items_by_id]
 
@@ -338,11 +358,13 @@ def search(request: HttpRequest) -> HttpResponse:
         request,
         "archive/search.html",
         {
-            "search_query": raw_query,
+            "search_query": raw_query[:SEARCH_MAX_CHARS].strip(),
+            "search_error": search_error,
             "results": results,
             "page_obj": page_obj,
             "result_count": page_obj.paginator.count,
         },
+        status=400 if search_error else 200,
     )
 
 
@@ -400,10 +422,51 @@ def weekly_items_json(request: HttpRequest, week: str) -> JsonResponse:
         shared_at__gte=starts_at,
         shared_at__lt=ends_at,
     ).order_by("shared_at", "id")
+    cursor = request.GET.get("cursor")
+    if cursor is not None:
+        try:
+            if len(cursor) > 256:
+                raise ValueError
+            shared_at, item_id = signing.loads(cursor, salt=f"week-json:{page.token}")
+            shared_at = parse_datetime(shared_at)
+            if (
+                shared_at is None
+                or timezone.is_naive(shared_at)
+                or type(item_id) is not int
+                or not 0 < item_id < 2**63
+            ):
+                raise ValueError
+        except (signing.BadSignature, ValueError, TypeError):
+            return JsonResponse({"error": "Invalid cursor"}, status=400)
+        items = items.filter(Q(shared_at__gt=shared_at) | Q(shared_at=shared_at, id__gt=item_id))
+    page_items = list(
+        items.only(
+            "id",
+            "kind",
+            "classification_rule",
+            "title",
+            "original_url",
+            "short_summary",
+            "tags",
+            "source",
+            "author",
+            "shared_at",
+            "published_at",
+        )[: WEEK_PAGE_SIZE + 1]
+    )
+    next_url = None
+    if len(page_items) > WEEK_PAGE_SIZE:
+        page_items = page_items[:WEEK_PAGE_SIZE]
+        last = page_items[-1]
+        next_cursor = signing.dumps(
+            [last.shared_at.isoformat(), last.pk], salt=f"week-json:{page.token}"
+        )
+        next_url = request.path + "?" + urlencode({"cursor": next_cursor})
 
     return JsonResponse(
         {
             "week": page.token,
+            "next": next_url,
             "items": [
                 {
                     "id": item.pk,
@@ -419,7 +482,7 @@ def weekly_items_json(request: HttpRequest, week: str) -> JsonResponse:
                     "shared_at": item.shared_at.isoformat(),
                     "published_at": item.published_at.isoformat() if item.published_at else None,
                 }
-                for item in items
+                for item in page_items
             ],
         }
     )
@@ -464,14 +527,41 @@ def item_article_audio(request: HttpRequest, pk: int) -> HttpResponse:
     if not item.has_generated_article_audio:
         raise Http404("Article audio is not available")
 
+    # Preparation can download remotely. Keep the request's artifact identity;
+    # workers may still prepare private items independently of this public route.
+    eligible = Item.objects.filter(
+        pk=pk, is_public=True, article_audio_artifact_path=item.article_audio_artifact_path
+    )
     try:
         store_generated_article_audio(item=item)
+        current_copy = eligible.filter(article_audio_file=item.article_audio_file.name)
+        if not item.article_audio_file or not current_copy.exists():
+            raise Http404("Article audio is not available")
         audio_file = item.article_audio_file.open("rb")
-    except Exception:
-        logger.exception("Article audio is temporarily unavailable for item %s", item.pk)
+    except Http404:
+        raise
+    except Exception as exc:
+        if not eligible.exists():
+            raise Http404("Article audio is not available") from None
+        # Log only the exception class: messages may carry remote URLs or paths.
+        logger.warning(
+            "Article audio is temporarily unavailable for item %s (%s)",
+            item.pk,
+            type(exc).__name__,
+        )
         response = HttpResponse("Article audio is temporarily unavailable.", status=503)
         response["Retry-After"] = "60"
         return response
+
+    # Storage open may also block. Reauthorize immediately before handing the
+    # acquired handle to the response, and close it on every refusal/error path.
+    try:
+        if not current_copy.exists():
+            raise Http404("Article audio is not available")
+    except BaseException:
+        with suppress(Exception):
+            audio_file.close()
+        raise
 
     return ranged_file_response(
         request,

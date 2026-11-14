@@ -68,6 +68,15 @@ def infer_kind(url: str, explicit_kind: str = "", audio_url: str = "") -> str:
     return classify_infer_kind(url=url, explicit_kind=explicit_kind, audio_url=audio_url)
 
 
+def _cleanup_after_kind_change(paths: tuple[str, ...], *, using: str) -> None:
+    try:
+        delete_unreferenced_archive_media_paths(paths, using=using)
+    except Exception:
+        # The row change has committed; retain objects for reference-safe recovery.
+        # Never log storage exceptions or paths, which may contain private data.
+        logger.warning("Archive media cleanup failed after kind change; retry the orphan sweep.")
+
+
 def _clear_stale_archive_media(
     *,
     item: Item,
@@ -99,7 +108,7 @@ def _clear_stale_archive_media(
     using = item._state.db or "default"
 
     transaction.on_commit(
-        partial(delete_unreferenced_archive_media_paths, stale_paths, using=using),
+        partial(_cleanup_after_kind_change, stale_paths, using=using),
         using=using,
     )
 

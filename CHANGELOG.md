@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Recheck public article-audio visibility and artifact/copy identity after lazy
+  preparation and storage open; close acquired handles on retired responses.
+  Transient preparation failures log only the exception class, not its message.
+- Keep committed kind changes successful when post-commit source-media cleanup
+  fails; log a fixed category and retain objects for reference-safe orphan recovery.
+
+- Paginate week JSON in 50-row keyset pages with signed `next` continuations and a
+  narrow public-field projection; document whole-week consumer traversal.
+- Refuse public search queries over 512 characters, 32 terms or 64 characters per
+  lowercased term before SQLite FTS execution, with bounded validation output.
+
 - Index capture deduplication by persisted normalized-URL digest and capture time,
   verifying full identity on digest matches and preserving newest-match semantics.
 - Backfill all existing URL identities in bounded migration batches; keep digests

@@ -410,7 +410,8 @@ Important values:
   artifact. Successful batch results must contain nonblank string text; other JSON
   types are rejected instead of converted to text. With a positive threshold, successful batch
   jobs must also return a nonblank string JSON artifact path and a readable, nonempty
-  segment list. Missing evidence fails with a retryable transcription error and preserves
+  segment list. An explicit `null` artifact container or `json` entry counts as no
+  artifact (accepted when the check is disabled); other non-string values are rejected. Missing evidence fails with a retryable transcription error and preserves
   existing stored content. Older services without segment artifacts require an explicit
   nonpositive threshold opt-out; coverage checking cannot verify their output.
 - `ARCHIVE_ARTICLE_AUDIO_API_KEY` defaults to `ARCHIVE_TRANSCRIPTION_API_KEY`
@@ -988,6 +989,24 @@ content is unchanged in both general and podcast feeds.
 
 ## Upstream API response limits
 
+Job and upload IDs must be nonnegative integers or 1–64 ASCII letters, digits,
+underscores or hyphens (the stored job-ID width). Only `queued`, `running`, `succeeded` and `failed` job
+states are accepted. Every poll response must identify the requested job. Artifact
+paths must be nonblank strings of at most 2048 characters without controls;
+existing same-origin checks still apply when fetching them. Invalid envelopes
+fail the attempt before publishing generated content.
+
+Staged transcription uploads require positive saved source size no larger than
+`ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` (default 250 MiB). The owned temporary request
+body is fully written and its actual source length checked before authenticated
+network I/O starts. A short, replaced or growing source fails without submitting
+an upload/job; reads stop after at most one excess source byte. Read errors close
+the source and discard the partial staging file. Multipart filenames allow UTF-8
+up to 255 characters, excluding quotes, backslashes and controls. MIME values
+must be bare `type/subtype` tokens; header parameters are refused. Both length
+calculation and streaming use the same validated UTF-8 prefix.
+
+
 Summary, transcription (including plain-text transcripts), and article-audio JSON
 API responses are capped at 8 MiB. Larger responses fail with the stage's existing
 error and retry behavior. HTTP error diagnostics read at most 64 KiB. Binary
@@ -995,9 +1014,18 @@ article-audio downloads retain their separate configured media limit. Authentica
 exchanges run in a disposable transport process with one elapsed timeout covering
 DNS, connect, same-origin redirects, response reads (including errors), and
 transport teardown. Timeout kills and reaps that process; no timed-out request
-thread remains. Transcription polling passes only its remaining elapsed budget
-and rejects responses arriving at or after its deadline. The separate worker
-stale-processing recovery window is unchanged.
+thread remains. Each transcription attempt has one monotonic elapsed budget
+(`timeout`, normally 300 seconds) shared across source loading, staging, job
+submission, polling sleeps/requests, segment coverage evidence and final result
+admission. Remote (non-archived) media sources are fetched in the same disposable
+download process as direct media archival, killed at the remaining budget, so DNS,
+redirects and drip-fed bodies cannot outlast it. Every network step receives only
+the remaining time; expired attempts
+start no further request and reject late success. Local storage reads check the
+same deadline before and after each read; a blocking storage call itself remains
+subject to the storage backend's own timeout. The separate worker stale-processing
+recovery window is unchanged. A timed-out upstream job may still run remotely;
+Archive does not retry ambiguous submissions within an attempt.
 
 ## Login protection
 
@@ -1079,6 +1107,16 @@ server for both source and generated article audio routes:
 lengths for full, bounded, suffix, open-ended, malformed and unsatisfiable requests,
 HEAD without body reads, and storage-reader cleanup after a client disconnects.
 
+### Synthesis task identity
+
+Article-audio `task_ref` v3 hashes the canonical submitted job payload, including
+text, model, voice, language, output format and backend settings. Identical requests
+retain stable identity; changing synthesis configuration intentionally creates a
+different job when regenerating. Pending jobs continue polling their recorded job
+ID under configuration changes. To regenerate completed output, first clear the
+stored copy and artifact/job state as described above. The v3 identity applies
+only to new submissions; previously recorded jobs remain usable.
+
 ### Upstream failure diagnostics
 
 Summary, transcription and article-audio JSON responses decode UTF-8 strictly.
@@ -1092,6 +1130,9 @@ exceptions and their exception chains, which can echo private prompts or URLs.
 Fetch-policy refusals keep their fixed text as `blocked destination: ...`; other
 transport and local read failures name only the exception class, for example
 `transport error (FileNotFoundError)`.
+Best-effort article-source extraction logs only the item ID and fixed
+`source_extraction_failed` category, omitting raw exceptions and tracebacks;
+stored text remains the fallback for synthesis.
 No upstream request identifiers are currently retained in these diagnostics.
 Operators should use the stage, item ID, status and category to investigate in the
 upstream service through their existing authorized access. Existing historical

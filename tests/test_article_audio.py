@@ -106,8 +106,8 @@ def test_task_ref_changes_when_script_changes() -> None:
     second = _task_ref_for_script(item, "second script")
 
     assert first != second
-    assert first.startswith(f"archive-item-{item.pk}-article-audio-v2-")
-    assert second.startswith(f"archive-item-{item.pk}-article-audio-v2-")
+    assert first.startswith(f"archive-item-{item.pk}-article-audio-v3-")
+    assert second.startswith(f"archive-item-{item.pk}-article-audio-v3-")
 
 
 @pytest.mark.django_db
@@ -138,7 +138,7 @@ def test_generate_item_article_audio_submits_batch_job(monkeypatch, settings) ->
         assert payload["job_type"] == "synthesize"
         assert payload["output"]["formats"] == [DEFAULT_AUDIO_FORMAT]
         assert payload["input"]["text"] == "Article headline\n\nOriginal article body text."
-        assert payload["task_ref"].startswith(f"archive-item-{item.pk}-article-audio-v2-")
+        assert payload["task_ref"].startswith(f"archive-item-{item.pk}-article-audio-v3-")
         return _FakeResponse(
             json.dumps({"id": "job-123", "state": "queued"}).encode("utf-8"),
             content_type="application/json",

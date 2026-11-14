@@ -27,6 +27,7 @@ from archive.models import EnrichmentStatus, Item, ItemKind
 from archive.summaries import MAX_ARTICLE_AUDIO_SOURCE_CHARS, extract_summary_source_from_url
 from archive.upstream_http import api_url
 from archive.upstream_http import open_authenticated_url as urlopen
+from archive.upstream_jobs import artifact_path, wire_id, wire_state
 
 logger = logging.getLogger(__name__)
 
@@ -269,9 +270,29 @@ def _truncate_script(value: str, *, max_chars: int) -> str:
     return truncated
 
 
+def _synthesis_job_payload(item: Item, text: str) -> dict[str, object]:
+    return {
+        "job_type": "synthesize",
+        "priority": "normal",
+        "lane": "batch",
+        "backend": "auto",
+        "model": settings.ARCHIVE_ARTICLE_AUDIO_MODEL,
+        "language": settings.ARCHIVE_ARTICLE_AUDIO_LANGUAGE,
+        "voice": settings.ARCHIVE_ARTICLE_AUDIO_VOICE,
+        "input": {"kind": "text", "text": text},
+        "output": {"formats": [DEFAULT_AUDIO_FORMAT]},
+        "context": {"producer": "archive", "item_id": item.pk},
+    }
+
+
 def _task_ref_for_script(item: Item, text: str) -> str:
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-    return f"archive-item-{item.pk}-article-audio-v2-{digest}"
+    return _synthesis_task_ref(item, _synthesis_job_payload(item, text))
+
+
+def _synthesis_task_ref(item: Item, payload: dict[str, object]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return f"archive-item-{item.pk}-article-audio-v3-{digest}"
 
 
 def _best_effort_article_audio_source_text(item: Item, timeout: int) -> str:
@@ -281,31 +302,17 @@ def _best_effort_article_audio_source_text(item: Item, timeout: int) -> str:
             timeout=timeout,
             max_chars=MAX_ARTICLE_AUDIO_SOURCE_CHARS,
         )
-    except Exception as exc:
-        logger.warning("Article audio source extraction failed for item %s: %s", item.pk, exc)
+    except Exception:
+        logger.warning("Article audio source_extraction_failed for item %s", item.pk)
         return ""
     return source.extracted_text.strip()
 
 
 def _submit_synthesis_job(item: Item, text: str, timeout: int) -> ArticleAudioJobUpdate:
-    request_body = json.dumps(
-        {
-            "job_type": "synthesize",
-            "priority": "normal",
-            "lane": "batch",
-            "backend": "auto",
-            "model": settings.ARCHIVE_ARTICLE_AUDIO_MODEL,
-            "language": settings.ARCHIVE_ARTICLE_AUDIO_LANGUAGE,
-            "voice": settings.ARCHIVE_ARTICLE_AUDIO_VOICE,
-            "input": {
-                "kind": "text",
-                "text": text,
-            },
-            "output": {"formats": [DEFAULT_AUDIO_FORMAT]},
-            "context": {"producer": "archive", "item_id": item.pk},
-            "task_ref": _task_ref_for_script(item=item, text=text),
-        }
-    ).encode("utf-8")
+    payload = _synthesis_job_payload(item, text)
+    # Hash this exact request snapshot so every output-affecting field participates.
+    payload["task_ref"] = _synthesis_task_ref(item, payload)
+    request_body = json.dumps(payload).encode("utf-8")
     request = Request(
         _api_url("jobs"),
         data=request_body,
@@ -325,6 +332,10 @@ def _submit_synthesis_job(item: Item, text: str, timeout: int) -> ArticleAudioJo
 
 
 def _poll_synthesis_job(job_id: str, timeout: int) -> ArticleAudioJobUpdate:
+    try:
+        job_id = wire_id(job_id)
+    except ValueError:
+        raise ArticleAudioGenerationError("Invalid upstream job identifier") from None
     request = Request(
         _api_url(f"jobs/{job_id}"),
         headers={"Authorization": f"Bearer {settings.ARCHIVE_ARTICLE_AUDIO_API_KEY}"},
@@ -334,7 +345,10 @@ def _poll_synthesis_job(job_id: str, timeout: int) -> ArticleAudioJobUpdate:
         timeout=timeout,
         error_prefix="Article audio job status request failed",
     )
-    return _parse_job_update(payload)
+    update = _parse_job_update(payload)
+    if update.job_id != job_id:
+        raise ArticleAudioGenerationError("Upstream poll job identity mismatch")
+    return update
 
 
 def _request_json(request: Request, timeout: int, error_prefix: str) -> dict[str, object]:
@@ -356,10 +370,11 @@ def _request_json(request: Request, timeout: int, error_prefix: str) -> dict[str
 
 
 def _parse_job_update(payload: dict[str, object]) -> ArticleAudioJobUpdate:
-    job_id = str(payload.get("id", "")).strip()
-    state = str(payload.get("state", "")).strip().lower()
-    if not job_id or not state:
-        raise ArticleAudioGenerationError("Article audio job response was incomplete")
+    try:
+        job_id = wire_id(payload.get("id"))
+        state = wire_state(payload.get("state"))
+    except ValueError:
+        raise ArticleAudioGenerationError("Invalid upstream job envelope") from None
 
     if state == "succeeded":
         result = payload.get("result")
@@ -368,10 +383,13 @@ def _parse_job_update(payload: dict[str, object]) -> ArticleAudioJobUpdate:
         artifacts = result.get("artifacts")
         if not isinstance(artifacts, dict):
             raise ArticleAudioGenerationError("Article audio job artifacts were missing")
-        artifact_path = str(artifacts.get(DEFAULT_AUDIO_FORMAT, "")).strip()
-        if not artifact_path:
-            raise ArticleAudioGenerationError("Article audio job did not expose an MP3 artifact")
-        return ArticleAudioJobUpdate(job_id=job_id, state=state, artifact_path=artifact_path)
+        try:
+            path = artifact_path(artifacts.get(DEFAULT_AUDIO_FORMAT))
+        except ValueError:
+            raise ArticleAudioGenerationError(
+                "Article audio job did not expose an MP3 artifact"
+            ) from None
+        return ArticleAudioJobUpdate(job_id=job_id, state=state, artifact_path=path)
 
     if state == "failed":
         return ArticleAudioJobUpdate(

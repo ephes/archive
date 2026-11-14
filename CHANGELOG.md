@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Share one transcription deadline across media loading, upload staging, submission,
+  polling and coverage evidence; reject late results without starting subsequent
+  requests or retrying ambiguous submissions inside the attempt. Remote media
+  sources use the killable download process, so slow bodies cannot outlast it.
+- Include all synthesis payload settings in v3 task identity while continuing to
+  poll existing recorded jobs unchanged. Log article-source extraction failures
+  with only item ID and a fixed category, preserving stored-text fallback.
+
+- Validate transcription/synthesis job envelopes and upload IDs (at most 64
+  characters, the stored width); reject poll identity mismatches and malformed
+  artifact paths before publishing results. Explicit null artifacts still mean
+  "no segment evidence" for services used with coverage checking disabled.
+- Admit multipart filenames/MIME values before reading storage, sharing exact
+  framing with length calculation. Verify staged source length and archive byte
+  limits before starting authenticated upload I/O.
+
 - Recheck public article-audio visibility and artifact/copy identity after lazy
   preparation and storage open; close acquired handles on retired responses.
   Transient preparation failures log only the exception class, not its message.

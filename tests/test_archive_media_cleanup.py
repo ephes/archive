@@ -474,3 +474,96 @@ def test_kind_change_cleanup_failure_preserves_committed_outcome(monkeypatch, ca
     assert not storage.exists(video_path)
     assert storage.exists(audio_path)
     assert Item.objects.get(pk=keeper.pk).archived_audio_path == audio_path
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("backend", ["filesystem", "s3"])
+def test_orphan_sweep_storage_failure_continues_then_retry_converges(monkeypatch, backend):
+    from botocore.exceptions import ClientError
+    from django.core.management.base import CommandError
+
+    from archive.management.commands import cleanup_archive_media_orphans as command
+    from archive.models import PendingArchiveMediaUpload
+
+    storage = storages["archive_media"]
+    paths = ("a.mp3", "b.mp3", "c.mp3", "d-current.mp3", "reserved/e.mp3")
+    for path in paths:
+        _save_archive_media(path)
+    listing = command.iter_archive_media_object_names
+
+    def list_then_protect():
+        yield from listing()
+        # References/reservations appear after the initial reference snapshot.
+        Item.objects.create(
+            original_url="https://example.com/late-reference", archived_audio_path="d-current.mp3"
+        )
+        PendingArchiveMediaUpload.objects.create(prefix="reserved/")
+
+    monkeypatch.setattr(command, "iter_archive_media_object_names", list_then_protect)
+    original_delete = storage.delete
+    attempted = []
+
+    def failing_delete(path):
+        attempted.append(path)
+        if path == "b.mp3":
+            if backend == "s3":
+                raise ClientError(
+                    {"Error": {"Code": "ServiceUnavailable", "Message": "CANARY_STORAGE_SECRET"}},
+                    "DeleteObject",
+                )
+            raise OSError("CANARY_STORAGE_SECRET")
+        original_delete(path)
+
+    monkeypatch.setattr(storage, "delete", failing_delete)
+    out, err = StringIO(), StringIO()
+    with pytest.raises(CommandError, match="incomplete") as caught:
+        call_command(
+            "cleanup_archive_media_orphans",
+            "--delete",
+            "--min-age-seconds",
+            "0",
+            stdout=out,
+            stderr=err,
+        )
+    assert caught.value.returncode == 1
+    assert attempted == ["a.mp3", "b.mp3", "c.mp3"]
+    assert {path for path in paths if storage.exists(path)} == {
+        "b.mp3",
+        "d-current.mp3",
+        "reserved/e.mp3",
+    }
+    assert (
+        "Summary: referenced=0 objects=5 orphaned=5 deleted=2 mode=delete failed=1"
+        in out.getvalue()
+    )
+    assert "CANARY_STORAGE_SECRET" not in out.getvalue() + err.getvalue() + str(caught.value)
+    assert "Deleted 2 orphaned" not in out.getvalue()  # No misleading success banner.
+
+    monkeypatch.setattr(command, "iter_archive_media_object_names", listing)
+    monkeypatch.setattr(storage, "delete", original_delete)
+    retry = StringIO()
+    call_command(
+        "cleanup_archive_media_orphans", "--delete", "--min-age-seconds", "0", stdout=retry
+    )
+    assert not storage.exists("b.mp3")
+    assert storage.exists("d-current.mp3") and storage.exists("reserved/e.mp3")
+    assert "deleted=1 mode=delete failed=0" in retry.getvalue()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_orphan_sweep_does_not_swallow_database_failure(monkeypatch):
+    from django.db import DatabaseError
+
+    from archive.management.commands import cleanup_archive_media_orphans as command
+
+    _save_archive_media("orphan.mp3")
+
+    def fail_database(*args, **kwargs):
+        raise DatabaseError("synthetic database failure")
+
+    monkeypatch.setattr(command, "delete_unreferenced_archive_media_paths", fail_database)
+    with pytest.raises(DatabaseError):
+        call_command(
+            "cleanup_archive_media_orphans", "--delete", "--min-age-seconds", "0", stdout=StringIO()
+        )
+    assert storages["archive_media"].exists("orphan.mp3")

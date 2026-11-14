@@ -15,8 +15,8 @@ from django.core.exceptions import ValidationError
 from django.core.paginator import EmptyPage, Paginator
 from django.core.validators import URLValidator
 from django.db import connection, transaction
-from django.db.models import Q
-from django.db.models.functions import Trim, TruncWeek
+from django.db.models import Q, Value
+from django.db.models.functions import Coalesce, NullIf, Substr, Trim, TruncWeek
 from django.http import (
     Http404,
     HttpRequest,
@@ -60,7 +60,9 @@ logger = logging.getLogger(__name__)
 url_validator = URLValidator()
 FEED_PAGE_SIZE = 50
 WEEK_PAGE_SIZE = 50
+OVERVIEW_PAGE_SIZE = 50
 SEARCH_PAGE_SIZE = 20
+SEARCH_EXCERPT_CHARS = 240
 SEARCH_MAX_CHARS = 512
 SEARCH_MAX_TERMS = 32
 SEARCH_MAX_TERM_CHARS = 64
@@ -319,8 +321,19 @@ def overview(request: HttpRequest) -> HttpResponse:
             current_index = 0
         current_page = week_pages[current_index]
         starts_at, ends_at = week_bounds(current_page)
-        items = public_items.filter(shared_at__gte=starts_at, shared_at__lt=ends_at).only(
-            "id", "kind", "title", "original_url", "shared_at", "source", "short_summary", "notes"
+        items = (
+            public_items.filter(shared_at__gte=starts_at, shared_at__lt=ends_at)
+            .order_by("-shared_at", "-pk")
+            .only(
+                "id",
+                "kind",
+                "title",
+                "original_url",
+                "shared_at",
+                "source",
+                "short_summary",
+                "notes",
+            )
         )
         newer_page = week_pages[current_index - 1] if current_index > 0 else None
         older_page = week_pages[current_index + 1] if current_index + 1 < len(week_pages) else None
@@ -330,11 +343,13 @@ def overview(request: HttpRequest) -> HttpResponse:
         newer_page = None
         older_page = None
 
+    page_obj = Paginator(items, OVERVIEW_PAGE_SIZE).get_page(request.GET.get("page") or 1)
     return render(
         request,
         "archive/overview.html",
         {
-            "items": items,
+            "items": page_obj.object_list,
+            "page_obj": page_obj,
             "current_page": current_page,
             "newer_page": newer_page,
             "older_page": older_page,
@@ -351,7 +366,23 @@ def search(request: HttpRequest) -> HttpResponse:
     except ValidationError as exc:
         search_error = exc.messages[0]
         page_obj = Paginator([], SEARCH_PAGE_SIZE).get_page(1)
-    items_by_id = Item.objects.filter(is_public=True).in_bulk(page_obj.object_list)
+    items_by_id = (
+        Item.objects.filter(is_public=True)
+        .only("id", "kind", "title", "original_url", "shared_at", "source")
+        .annotate(
+            card_excerpt=Substr(
+                Coalesce(
+                    NullIf("short_summary", Value("")),
+                    NullIf("notes", Value("")),
+                    NullIf("long_summary", Value("")),
+                    "transcript",
+                ),
+                1,
+                SEARCH_EXCERPT_CHARS + 1,
+            )
+        )
+        .in_bulk(page_obj.object_list)
+    )
     results = [items_by_id[item_id] for item_id in page_obj.object_list if item_id in items_by_id]
 
     return render(
@@ -360,6 +391,7 @@ def search(request: HttpRequest) -> HttpResponse:
         {
             "search_query": raw_query[:SEARCH_MAX_CHARS].strip(),
             "search_error": search_error,
+            "excerpt_chars": SEARCH_EXCERPT_CHARS,
             "results": results,
             "page_obj": page_obj,
             "result_count": page_obj.paginator.count,
@@ -497,7 +529,11 @@ def item_archived_audio(request: HttpRequest, pk: int) -> HttpResponse:
     try:
         audio_file = open_archived_audio(item)
     except MediaArchivalError:
-        return HttpResponse("Archived audio is temporarily unavailable.", status=502)
+        return HttpResponse(
+            "Archived audio is temporarily unavailable.",
+            status=502,
+            headers={"Cache-Control": "no-store"},
+        )
 
     return ranged_file_response(
         request,
@@ -549,7 +585,11 @@ def item_article_audio(request: HttpRequest, pk: int) -> HttpResponse:
             item.pk,
             type(exc).__name__,
         )
-        response = HttpResponse("Article audio is temporarily unavailable.", status=503)
+        response = HttpResponse(
+            "Article audio is temporarily unavailable.",
+            status=503,
+            headers={"Cache-Control": "no-store"},
+        )
         response["Retry-After"] = "60"
         return response
 
@@ -607,6 +647,15 @@ def _api_request_is_authorized(request: HttpRequest) -> bool:
     )
 
 
+def _unique_json_object(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("Duplicate JSON member")
+        obj[key] = value
+    return obj
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 def api_create_item(request: HttpRequest) -> JsonResponse:
@@ -614,8 +663,8 @@ def api_create_item(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "Unauthorized"}, status=401)
 
     try:
-        payload = json.loads(request.body or b"{}")
-    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+        payload = json.loads(request.body or b"{}", object_pairs_hook=_unique_json_object)
+    except (ValueError, RecursionError):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     if not isinstance(payload, dict):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
@@ -714,8 +763,8 @@ def api_update_item(request: HttpRequest, pk: int) -> JsonResponse:
         return JsonResponse({"error": "Unauthorized"}, status=401)
 
     try:
-        payload = json.loads(request.body or b"{}")
-    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+        payload = json.loads(request.body or b"{}", object_pairs_hook=_unique_json_object)
+    except (ValueError, RecursionError):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     if not isinstance(payload, dict):
         return JsonResponse({"error": "Invalid JSON"}, status=400)

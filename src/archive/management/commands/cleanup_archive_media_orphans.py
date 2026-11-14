@@ -5,6 +5,7 @@ from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from botocore.exceptions import BotoCoreError, ClientError
 from django.core.files.storage import storages
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
@@ -39,7 +40,7 @@ class Command(BaseCommand):
             raise CommandError("--min-age-seconds must be non-negative (zero disables age grace)")
         delete_mode = options["delete"]
         mode_label = "delete" if delete_mode else "dry-run"
-        orphaned_count = deleted_count = 0
+        orphaned_count = deleted_count = failed_count = 0
 
         # Spool to disk before doing anything destructive. This gives sorted,
         # unique output with bounded memory and no deletions on incomplete listing.
@@ -72,18 +73,27 @@ class Command(BaseCommand):
                 self.stdout.write(f"ORPHAN {path}")
                 if delete_mode and self._is_old_enough(path, min_age):
                     # Recheck reservations and references in the final transaction.
-                    deleted_count += len(delete_unreferenced_archive_media_paths((path,)))
+                    try:
+                        deleted_count += len(delete_unreferenced_archive_media_paths((path,)))
+                    except (OSError, BotoCoreError, ClientError):
+                        # Supported filesystem/S3 storage failures are independent.
+                        # Database and programming errors must still abort the run.
+                        failed_count += 1
+                        self.stderr.write(
+                            f"Storage deletion failed for candidate {orphaned_count} "
+                            "(storage_delete_failed)."
+                        )
 
         if not orphaned_count:
             self.stdout.write("No orphaned archive media objects found.")
-        elif delete_mode:
+        elif delete_mode and not failed_count:
             deleted_label = "object" if deleted_count == 1 else "objects"
             self.stdout.write(
                 self.style.SUCCESS(
                     f"Deleted {deleted_count} orphaned archive media {deleted_label}."
                 )
             )
-        else:
+        elif not delete_mode:
             self.stdout.write("Re-run with --delete to remove the orphaned archive media objects.")
         self.stdout.write(
             "Summary: "
@@ -91,8 +101,14 @@ class Command(BaseCommand):
             f"objects={object_count} "
             f"orphaned={orphaned_count} "
             f"deleted={deleted_count} "
-            f"mode={mode_label}"
+            f"mode={mode_label} "
+            f"failed={failed_count}"
         )
+        if failed_count:
+            raise CommandError(
+                f"Archive media cleanup incomplete: {failed_count} storage deletions failed; "
+                "retry the sweep."
+            )
 
     def _is_old_enough(self, path: str, min_age_seconds: int) -> bool:
         if min_age_seconds <= 0:

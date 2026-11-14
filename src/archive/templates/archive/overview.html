@@ -35,6 +35,22 @@
     </section>
 {% endif %}
 
+{% if page_obj.paginator.num_pages > 1 %}
+    <nav class="nav-row" aria-label="Week page navigation">
+        <div>
+            {% if page_obj.has_previous %}
+                <a href="{% url 'archive:overview' %}?week={{ current_page.token }}&page={{ page_obj.previous_page_number }}">Previous page</a>
+            {% endif %}
+        </div>
+        <span>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+        <div>
+            {% if page_obj.has_next %}
+                <a href="{% url 'archive:overview' %}?week={{ current_page.token }}&page={{ page_obj.next_page_number }}">Next page</a>
+            {% endif %}
+        </div>
+    </nav>
+{% endif %}
+
 <nav class="nav-row" aria-label="Week navigation">
     <div>
         {% if newer_page %}

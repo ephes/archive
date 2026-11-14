@@ -127,7 +127,7 @@ def test_rendered_overview_projects_card_dependencies_with_constant_queries(
             )
         )
     # Anonymous first render has no session/content-type/site cache prerequisites.
-    with django_assert_num_queries(2) as queries:
+    with django_assert_num_queries(3) as queries:
         response = client.get("/")
     assert response.status_code == 200
     assert len(response.context["items"]) == size

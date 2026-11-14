@@ -396,7 +396,9 @@ def test_successful_response_transfers_file_until_response_close(db, monkeypatch
 
 @pytest.mark.parametrize("cache_control", ["private, no-store", "public, max-age=3600"])
 @pytest.mark.parametrize("outcome", [200, 206, 416, 502])
-def test_all_range_outcomes_keep_caller_cache_policy_and_close_once(db, cache_control, outcome):
+def test_range_outcomes_keep_cache_policy_except_transient_errors_and_close_once(
+    db, cache_control, outcome
+):
     from django.test import RequestFactory
 
     from archive.media_responses import ranged_file_response
@@ -422,7 +424,7 @@ def test_all_range_outcomes_keep_caller_cache_policy_and_close_once(db, cache_co
         cache_control=cache_control,
     )
     assert response.status_code == outcome
-    assert response["Cache-Control"] == cache_control
+    assert response["Cache-Control"] == ("no-store" if outcome == 502 else cache_control)
     if outcome in (200, 206):
         assert handle.closes == 0
         assert b"".join(response.streaming_content) == (PAYLOAD if outcome == 200 else b"3-a")
@@ -434,3 +436,84 @@ def test_all_range_outcomes_keep_caller_cache_policy_and_close_once(db, cache_co
     response.close()
     assert handle.closed
     assert handle.closes == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("route", ["item-archived-audio", "item-article-audio"])
+def test_transient_range_failure_is_not_cached_and_retry_recovers(client, monkeypatch, route):
+    class OwnedFile(TrackedFile):
+        closes = 0
+
+        def close(self):
+            self.closes += 1
+            super().close()
+
+    item = Item.objects.create(
+        original_url="https://example.com/synthetic-retry",
+        kind=ItemKind.ARTICLE,
+        archived_audio_path="items/retry/source.mp3",
+        archived_audio_size_bytes=len(PAYLOAD),
+        article_audio_artifact_path="/synthetic.mp3",
+        article_audio_file="article-audio/retry.mp3",
+        article_audio_size_bytes=len(PAYLOAD),
+    )
+    handles = []
+
+    def open_audio(*args, **kwargs):
+        handle = OwnedFile(PAYLOAD)
+        if not handles:
+            handle.seek_error = OSError("synthetic transient storage failure")
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr("archive.views.open_archived_audio", open_audio)
+    monkeypatch.setattr("archive.views.store_generated_article_audio", lambda **kw: None)
+    monkeypatch.setattr(storages["archive_media"], "open", open_audio)
+    url = reverse(f"archive:{route}", args=[item.pk])
+    failed = client.get(url, headers={"Range": "bytes=2-4"})
+    assert failed.status_code == 502
+    assert failed["Cache-Control"] == "no-store"
+    failed.close()
+    assert handles[0].closes == 1
+    recovered = client.get(url, headers={"Range": "bytes=2-4"})
+    assert recovered.status_code == 206
+    assert recovered["Cache-Control"] == "public, max-age=3600"
+    assert b"".join(recovered.streaming_content) == PAYLOAD[2:5]
+    recovered.close()
+    assert handles[1].closes == 1
+
+
+def test_range_seek_diagnostic_omits_backend_secrets(db, caplog):
+    from django.test import RequestFactory
+
+    from archive.media_responses import ranged_file_response
+
+    class OwnedFile(TrackedFile):
+        closes = 0
+
+        def close(self):
+            self.closes += 1
+            super().close()
+
+    handle = OwnedFile(PAYLOAD)
+    handle.seek_error = RuntimeError(
+        "https://signed.example.invalid/private?credential=CANARY_TOKEN backend=CANARY_CONNECTION"
+    )
+    response = ranged_file_response(
+        RequestFactory().get("/media", headers={"Range": "bytes=2-4"}),
+        file_handle=handle,
+        size=len(PAYLOAD),
+        content_type="audio/mpeg",
+        cache_control="public, max-age=3600",
+    )
+    assert response.status_code == 502
+    response.close()
+    assert handle.closed and handle.closes == 1
+    records = [record for record in caplog.records if record.name == "archive.media_responses"]
+    assert len(records) == 1
+    assert "stored_media_range_seek_failed" in records[0].getMessage()
+    assert records[0].exc_info is None
+    assert records[0].stack_info is None
+    for canary in ("CANARY_TOKEN", "CANARY_CONNECTION", "signed.example.invalid"):
+        assert canary not in caplog.text
+        assert canary.encode() not in response.content

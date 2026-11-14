@@ -436,7 +436,7 @@ Important values:
 - `ARCHIVE_ARTICLE_AUDIO_POLL_SECONDS` defaults to `30`
 - `ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS` defaults to `5000` (matching the currently observed Voxhelm `synthesize` input limit)
 - `ARCHIVE_ARTICLE_AUDIO_MAX_BYTES` defaults to `52428800` (50 MiB)
-- `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` defaults to `262144000` (250 MiB)
+- `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` defaults to `262144000` (250 MiB); also bounds extracted MP3 output
 - `ARCHIVE_FETCH_PRIVATE_HOSTS` is an optional comma-separated list of hostnames that page,
   summary-source, and media fetches may reach on private or loopback addresses; empty by default
 - `ARCHIVE_MEDIA_EXTRACTION_FFMPEG_BIN` defaults to `ffmpeg`
@@ -544,7 +544,8 @@ budget by resetting socket timeouts. Failed or timed-out downloads remove their
 temporary files before any storage upload. Only HTTP/HTTPS sources and redirects
 are accepted; the configured byte limit still applies. Video extraction has its
 own timeout; the download budget does not include extraction or storage writes.
-The existing yt-dlp socket timeout behavior is unchanged.
+YouTube page downloads have a separate disposable process whose elapsed budget
+also covers retries and postprocessing, in addition to the existing socket timeout.
 
 Metadata extraction reads at most 1 MiB of a page and needs the closing `</head>` within that
 window; the rest of the page is not read. Everything read within the window is parsed before
@@ -624,9 +625,10 @@ Operator note:
   to use the staged batch upload path
 - `yt-dlp` changes frequently to keep up with YouTube; if page downloads start failing after a period of
   stability, refresh the app dependency set with a newer `yt-dlp` release and redeploy
-- the worker's `--media-archive-timeout` still guards network stalls and other blocking work, but it is
-  not a strict wall-clock cap on a steady `yt-dlp` download; `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` remains the
-  hard size limit for accepted source media
+- the worker's `--media-archive-timeout` gives each YouTube download one elapsed budget,
+  including extraction, retries and FFmpeg postprocessing. Archive terminates and reaps
+  the disposable downloader on expiry and refuses late success; partial files are never uploaded.
+  `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` also limits the accepted audio output
 - if healthy batch transcription or archival runs legitimately exceed the worker's stale-processing window,
   raise `--stale-processing-after` so runtime recovery does not reclaim them prematurely
 - `just manage rebuild_search_index` rebuilds the SQLite FTS table from `archive_item` if search drift needs
@@ -928,6 +930,24 @@ fake upstream uses only temporary storage; no network or archive data is used.
 
 ## Media publication and orphan recovery
 
+Video-to-MP3 extraction passes the archive byte ceiling to FFmpeg (`-fs`) and
+checks the output during execution and before upload. Output at or above the
+ceiling is refused, since FFmpeg can report success when the size option stops
+encoding early (and can overshoot by an encoded packet). Each stdout/stderr
+stream has a separate 1 MiB total diagnostic budget; neither stream's raw text
+is retained. Exceeding either budget stops extraction with a fixed private-safe
+error. Failed extraction uploads neither source video nor audio, removes its
+owned temporary files, and preserves existing archived media for retry.
+
+FFmpeg and yt-dlp run in owned POSIX sessions. Every return path, including a
+successful wrapper exit, retires the process group with TERM followed after at
+most 0.2 seconds by KILL, and reaps the direct child before temporary-directory
+cleanup. Wrappers and their children must remain in that session; deliberately
+detached processes are not supported. Cleanup escalation can add up to 0.2 seconds
+to the execution deadline. Both commands discard diagnostic text under the same
+stream budgets. YouTube download failures remain retryable under the existing
+media retry policy and do not replace previously archived media.
+
 Invariant: an archive media object is deleted only after it has been verified,
 in its own durable database transaction, that no committed item references it.
 All deletions (replacement, item deletion, stale-media clearing, failed-upload
@@ -1011,6 +1031,14 @@ serialization. Valid Unicode and escaped entities retain their text; stored item
 content is unchanged in both general and podcast feeds.
 
 ## Upstream API response limits
+
+Upstream JSON ambiguity fails through the normal invalid-JSON stage error before
+job identity, state or result admission; stored job IDs and previous artifacts
+remain intact. The rule also covers summary envelopes/generated summary JSON,
+sync transcripts, upload responses and segment evidence. JSON-LD uses the same
+recursive duplicate-member refusal per script blob: all evidence from an
+ambiguous blob is ignored, while independent valid JSON-LD and HTML metadata
+remain available. Existing JSON-LD depth/node limits still apply.
 
 Job and upload IDs must be nonnegative integers or 1–64 ASCII letters, digits,
 underscores or hyphens (the stored job-ID width). Only `queued`, `running`, `succeeded` and `failed` job
@@ -1143,7 +1171,8 @@ only to new submissions; previously recorded jobs remain usable.
 ### Upstream failure diagnostics
 
 Summary, transcription and article-audio JSON responses decode UTF-8 strictly.
-Malformed encoding, JSON recursion and integer-decoding limits become fixed stage
+Duplicate object members at any nesting level (including escaped key aliases),
+malformed encoding, JSON recursion and integer-decoding limits become fixed stage
 errors. Responses close before worker failure/retry bookkeeping; invalid output
 publishes no generated fields or audio artifacts.
 

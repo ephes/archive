@@ -40,10 +40,10 @@ def test_jsonld_huge_integer_does_not_hide_independent_metadata():
 def test_jsonld_decoder_resource_errors_are_local_to_blob(monkeypatch, error):
     loads = json.loads
 
-    def decode(blob):
+    def decode(blob, **kwargs):
         if blob == "refuse":
             raise error("synthetic decoder refusal")
-        return loads(blob)
+        return loads(blob, **kwargs)
 
     monkeypatch.setattr(module.json, "loads", decode)
     assert extract("refuse", '{"headline":"Valid"}').title == "Valid"
@@ -100,3 +100,24 @@ def test_ard_audio_json_strings_are_decoded_once(encoded, expected):
     assert [candidate.url for candidate in result.media_candidates] == (
         [expected] if expected else []
     )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("member", ["@type", "url", "author", "nested", "escaped"])
+def test_jsonld_duplicate_members_refuse_only_ambiguous_blob(member, reverse):
+    first, second = (
+        ('"VideoObject"', '"AudioObject"')
+        if member == "@type"
+        else ('"https://example.test/one"', '"https://example.test/two"')
+    )
+    if reverse:
+        first, second = second, first
+    key = "url" if member in {"nested", "escaped"} else member
+    second_key = r"\u0075rl" if member == "escaped" else key
+    duplicate = f'"{key}":{first},"{second_key}":{second}'
+    if member == "nested":
+        duplicate = '"unknown":[{' + duplicate + "}]"
+    result = extract('{"headline":"Refused",' + duplicate + "}", '{"headline":"Valid"}')
+    assert result.title == "Valid"
+    assert result.author == "Independent author"
+    assert result.kind_hint == result.media_url == result.audio_url == ""

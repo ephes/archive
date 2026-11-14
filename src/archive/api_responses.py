@@ -4,6 +4,7 @@ import json
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 
+from archive.json_objects import unique_json_object
 from archive.safe_fetch import BlockedFetchError
 
 
@@ -31,7 +32,7 @@ class InvalidAPIJSON(ValueError):
 def decode_api_json(payload: bytes | str):
     try:
         text = payload.decode("utf-8") if isinstance(payload, bytes) else payload
-        return json.loads(text)
+        return json.loads(text, object_pairs_hook=unique_json_object)
     except (ValueError, RecursionError):
         raise InvalidAPIJSON("Invalid upstream JSON") from None
 

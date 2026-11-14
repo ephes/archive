@@ -307,3 +307,76 @@ def test_staging_diagnostic_never_echoes_source_url():
             item=Item(), source=tr.TranscriptionSource("archived_audio", private, "", 3), timeout=5
         )
     assert str(caught.value) == "Unsupported archived audio type for transcription"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("kind", ["audio", "transcript"])
+@pytest.mark.parametrize("member", ["id", "state", "result", "artifacts", "path", "ignored"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_ambiguous_poll_json_preserves_item(kind, member, reverse, monkeypatch, settings):
+    settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = settings.ARCHIVE_TRANSCRIPTION_API_KEY = "synthetic"
+    item = Item.objects.create(
+        original_url="https://example.test/article",
+        kind=ItemKind.ARTICLE,
+        transcript="Previous transcript",
+        article_audio_job_id="job-a",
+        article_audio_artifact_path="/v1/previous.mp3",
+    )
+    module = audio if kind == "audio" else tr
+    path_key = "mp3" if kind == "audio" else "json"
+    artifacts = {path_key: "/v1/new-file"}
+    result = {"text": "Untrusted new transcript", "artifacts": artifacts}
+
+    def duplicate(key, first, second):
+        values = [first, second]
+        if reverse:
+            values.reverse()
+        return ",".join(json.dumps(key) + ":" + json.dumps(value) for value in values)
+
+    parts = {
+        "id": '"id":"job-a"',
+        "state": '"state":"succeeded"',
+        "result": '"result":' + json.dumps(result),
+    }
+    if member == "id":
+        parts["id"] = duplicate("id", "job-a", "job-b")
+    elif member == "state":
+        parts["state"] = duplicate("state", "queued", "succeeded")
+    elif member == "result":
+        parts["result"] = duplicate("result", result, {**result, "text": "Other text"})
+    elif member == "artifacts":
+        parts["result"] = (
+            '"result":{"text":"New text",'
+            + duplicate("artifacts", artifacts, {path_key: "/v1/other-file"})
+            + "}"
+        )
+    elif member == "path":
+        parts["result"] = (
+            '"result":{"text":"New text","artifacts":{'
+            + duplicate(path_key, "/v1/new-file", "/v1/other-file")
+            + "}}"
+        )
+    else:
+        parts["ignored"] = '"ignored":[{' + duplicate("identity", "a", "b") + "}]"
+    payload = ("{" + ",".join(parts.values()) + "}").encode()
+    response = Response({})
+    response.seek(0)
+    response.truncate()
+    response.write(payload)
+    response.seek(0)
+    monkeypatch.setattr(module, "urlopen", lambda *a, **kw: response)
+    poll, error = (
+        (audio.generate_item_article_audio, audio.ArticleAudioGenerationError)
+        if kind == "audio"
+        else (
+            lambda item: tr._poll_batch_transcription_job("job-a", 1),
+            tr.TranscriptionGenerationError,
+        )
+    )
+    with pytest.raises(error, match="invalid JSON"):
+        poll(item)
+    assert response.closed
+    item.refresh_from_db()
+    assert item.transcript == "Previous transcript"
+    assert item.article_audio_job_id == "job-a"
+    assert item.article_audio_artifact_path == "/v1/previous.mp3"

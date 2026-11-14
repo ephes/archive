@@ -27,6 +27,7 @@ from archive.models import EnrichmentStatus, Item, ItemKind
 from archive.summaries import MAX_ARTICLE_AUDIO_SOURCE_CHARS, extract_summary_source_from_url
 from archive.upstream_http import api_url
 from archive.upstream_http import open_authenticated_url as urlopen
+from archive.upstream_jobs import artifact_path, wire_id, wire_state
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +326,10 @@ def _submit_synthesis_job(item: Item, text: str, timeout: int) -> ArticleAudioJo
 
 
 def _poll_synthesis_job(job_id: str, timeout: int) -> ArticleAudioJobUpdate:
+    try:
+        job_id = wire_id(job_id)
+    except ValueError:
+        raise ArticleAudioGenerationError("Invalid upstream job identifier") from None
     request = Request(
         _api_url(f"jobs/{job_id}"),
         headers={"Authorization": f"Bearer {settings.ARCHIVE_ARTICLE_AUDIO_API_KEY}"},
@@ -334,7 +339,10 @@ def _poll_synthesis_job(job_id: str, timeout: int) -> ArticleAudioJobUpdate:
         timeout=timeout,
         error_prefix="Article audio job status request failed",
     )
-    return _parse_job_update(payload)
+    update = _parse_job_update(payload)
+    if update.job_id != job_id:
+        raise ArticleAudioGenerationError("Upstream poll job identity mismatch")
+    return update
 
 
 def _request_json(request: Request, timeout: int, error_prefix: str) -> dict[str, object]:
@@ -356,10 +364,11 @@ def _request_json(request: Request, timeout: int, error_prefix: str) -> dict[str
 
 
 def _parse_job_update(payload: dict[str, object]) -> ArticleAudioJobUpdate:
-    job_id = str(payload.get("id", "")).strip()
-    state = str(payload.get("state", "")).strip().lower()
-    if not job_id or not state:
-        raise ArticleAudioGenerationError("Article audio job response was incomplete")
+    try:
+        job_id = wire_id(payload.get("id"))
+        state = wire_state(payload.get("state"))
+    except ValueError:
+        raise ArticleAudioGenerationError("Invalid upstream job envelope") from None
 
     if state == "succeeded":
         result = payload.get("result")
@@ -368,10 +377,13 @@ def _parse_job_update(payload: dict[str, object]) -> ArticleAudioJobUpdate:
         artifacts = result.get("artifacts")
         if not isinstance(artifacts, dict):
             raise ArticleAudioGenerationError("Article audio job artifacts were missing")
-        artifact_path = str(artifacts.get(DEFAULT_AUDIO_FORMAT, "")).strip()
-        if not artifact_path:
-            raise ArticleAudioGenerationError("Article audio job did not expose an MP3 artifact")
-        return ArticleAudioJobUpdate(job_id=job_id, state=state, artifact_path=artifact_path)
+        try:
+            path = artifact_path(artifacts.get(DEFAULT_AUDIO_FORMAT))
+        except ValueError:
+            raise ArticleAudioGenerationError(
+                "Article audio job did not expose an MP3 artifact"
+            ) from None
+        return ArticleAudioJobUpdate(job_id=job_id, state=state, artifact_path=path)
 
     if state == "failed":
         return ArticleAudioJobUpdate(

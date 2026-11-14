@@ -253,7 +253,7 @@ def test_generate_item_transcript_stages_oversized_archived_audio_for_batch_job(
     _delete_archived_object(item.archived_audio_path)
     storages["archive_media"].save(
         item.archived_audio_path,
-        ContentFile(b"oversized-archived-audio"),
+        ContentFile(b"oversized-archived-audio".ljust(MAX_TRANSCRIPTION_BYTES + 1, b"x")),
     )
     monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
 
@@ -311,7 +311,7 @@ def _oversized_archived_audio_item() -> Item:
     _delete_archived_object(item.archived_audio_path)
     storages["archive_media"].save(
         item.archived_audio_path,
-        ContentFile(b"oversized-archived-audio"),
+        ContentFile(b"oversized-archived-audio".ljust(MAX_TRANSCRIPTION_BYTES + 1, b"x")),
     )
     return item
 
@@ -322,6 +322,7 @@ def _batch_job_urlopen(*, segments: list[dict[str, object]], requested: list[str
     def fake_urlopen(request, timeout):
         requested.append(request.full_url)
         if request.full_url == "https://voxhelm.example.test/v1/uploads":
+            b"".join(request.data)
             payload: dict[str, object] = {"id": "upload-123"}
         elif request.full_url == "https://voxhelm.example.test/v1/jobs":
             payload = {"id": "job-123", "state": "queued"}
@@ -462,7 +463,7 @@ def test_generate_item_transcript_reports_failed_batch_job_for_oversized_archive
     _delete_archived_object(item.archived_audio_path)
     storages["archive_media"].save(
         item.archived_audio_path,
-        ContentFile(b"oversized-archived-audio"),
+        ContentFile(b"oversized-archived-audio".ljust(MAX_TRANSCRIPTION_BYTES + 1, b"x")),
     )
     monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
 
@@ -640,6 +641,16 @@ def test_enabled_coverage_requires_json_artifact(monkeypatch, settings, artifact
     )
 
     settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = 600
+    if isinstance(artifact, dict) and "json" in artifact:
+        with pytest.raises(TranscriptionGenerationError, match="segment artifact"):
+            _parse_batch_transcription_job_update(
+                {
+                    "id": "job-synthetic",
+                    "state": "succeeded",
+                    "result": {"text": "Valid transcript", "artifacts": artifact},
+                }
+            )
+        return
     update = _parse_batch_transcription_job_update(
         {
             "id": "job-synthetic",

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Validate transcription/synthesis job envelopes and upload IDs; reject poll
+  identity mismatches and malformed artifact paths before publishing results.
+- Admit multipart filenames/MIME values before reading storage, sharing exact
+  framing with length calculation. Verify staged source length and archive byte
+  limits before starting authenticated upload I/O.
+
 - Recheck public article-audio visibility and artifact/copy identity after lazy
   preparation and storage open; close acquired handles on retired responses.
   Transient preparation failures log only the exception class, not its message.

@@ -988,6 +988,24 @@ content is unchanged in both general and podcast feeds.
 
 ## Upstream API response limits
 
+Job and upload IDs must be nonnegative integers or 1–200 ASCII letters, digits,
+underscores or hyphens. Only `queued`, `running`, `succeeded` and `failed` job
+states are accepted. Every poll response must identify the requested job. Artifact
+paths must be nonblank strings of at most 2048 characters without controls;
+existing same-origin checks still apply when fetching them. Invalid envelopes
+fail the attempt before publishing generated content.
+
+Staged transcription uploads require positive saved source size no larger than
+`ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` (default 250 MiB). The owned temporary request
+body is fully written and its actual source length checked before authenticated
+network I/O starts. A short, replaced or growing source fails without submitting
+an upload/job; reads stop after at most one excess source byte. Read errors close
+the source and discard the partial staging file. Multipart filenames allow UTF-8
+up to 255 characters, excluding quotes, backslashes and controls. MIME values
+must be bare `type/subtype` tokens; header parameters are refused. Both length
+calculation and streaming use the same validated UTF-8 prefix.
+
+
 Summary, transcription (including plain-text transcripts), and article-audio JSON
 API responses are capped at 8 MiB. Larger responses fail with the stage's existing
 error and retry behavior. HTTP error diagnostics read at most 64 KiB. Binary

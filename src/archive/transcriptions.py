@@ -28,6 +28,7 @@ from archive.models import Item
 from archive.safe_fetch import open_public_url
 from archive.upstream_http import api_url
 from archive.upstream_http import open_authenticated_url as urlopen
+from archive.upstream_jobs import artifact_path, wire_id, wire_state
 
 MAX_TRANSCRIPTION_BYTES = 25 * 1024 * 1024
 SUPPORTED_SUFFIXES = {
@@ -388,6 +389,8 @@ def _stage_archived_audio_upload(
             f"{source.content_type or source.location or 'unknown'}"
         )
 
+    if not 0 < source.size_bytes <= settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES:
+        raise TranscriptionGenerationError("Archived audio staging length exceeds archive limit")
     filename = _transcription_source_filename(source=source, default_suffix=suffix)
     content_type = source.content_type.lower() or SUPPORTED_SUFFIXES[suffix]
     boundary = f"archive-{uuid.uuid4().hex}"
@@ -399,6 +402,7 @@ def _stage_archived_audio_upload(
             filename=filename,
             content_type=content_type,
             file_opener=lambda: open_archived_audio(item),
+            expected_size=source.size_bytes,
         ),
         headers={
             "Authorization": f"Bearer {settings.ARCHIVE_TRANSCRIPTION_API_KEY}",
@@ -418,10 +422,10 @@ def _stage_archived_audio_upload(
         timeout=timeout,
         error_prefix="Archived audio staging failed",
     )
-    upload_id = str(payload.get("id", "")).strip()
-    if not upload_id:
-        raise TranscriptionGenerationError("Archived audio staging response was incomplete")
-    return upload_id
+    try:
+        return wire_id(payload.get("id"))
+    except ValueError:
+        raise TranscriptionGenerationError("Invalid upstream upload identifier") from None
 
 
 def _submit_batch_transcription_job(
@@ -493,6 +497,10 @@ def _wait_for_batch_transcription_job(
 
 
 def _poll_batch_transcription_job(job_id: str, timeout: float) -> BatchTranscriptionJobUpdate:
+    try:
+        job_id = wire_id(job_id)
+    except ValueError:
+        raise TranscriptionGenerationError("Invalid upstream job identifier") from None
     request = Request(
         _api_url(f"jobs/{job_id}"),
         headers={"Authorization": f"Bearer {settings.ARCHIVE_TRANSCRIPTION_API_KEY}"},
@@ -502,16 +510,20 @@ def _poll_batch_transcription_job(job_id: str, timeout: float) -> BatchTranscrip
         timeout=timeout,
         error_prefix="Batch transcription job status request failed",
     )
-    return _parse_batch_transcription_job_update(payload)
+    update = _parse_batch_transcription_job_update(payload)
+    if update.job_id != job_id:
+        raise TranscriptionGenerationError("Upstream poll job identity mismatch")
+    return update
 
 
 def _parse_batch_transcription_job_update(
     payload: dict[str, object],
 ) -> BatchTranscriptionJobUpdate:
-    job_id = str(payload.get("id", "")).strip()
-    state = str(payload.get("state", "")).strip().lower()
-    if not job_id or not state:
-        raise TranscriptionGenerationError("Batch transcription job response was incomplete")
+    try:
+        job_id = wire_id(payload.get("id"))
+        state = wire_state(payload.get("state"))
+    except ValueError:
+        raise TranscriptionGenerationError("Invalid upstream job envelope") from None
 
     if state == "succeeded":
         result = payload.get("result")
@@ -525,9 +537,13 @@ def _parse_batch_transcription_job_update(
         artifacts = result.get("artifacts")
         json_artifact_path = ""
         if isinstance(artifacts, dict):
-            artifact = artifacts.get("json")
-            if isinstance(artifact, str):
-                json_artifact_path = artifact.strip()
+            if "json" in artifacts:
+                try:
+                    json_artifact_path = artifact_path(artifacts["json"])
+                except ValueError:
+                    raise TranscriptionGenerationError(
+                        "Invalid JSON segment artifact path"
+                    ) from None
         return BatchTranscriptionJobUpdate(
             job_id=job_id,
             state=state,
@@ -545,6 +561,24 @@ def _parse_batch_transcription_job_update(
     return BatchTranscriptionJobUpdate(job_id=job_id, state=state)
 
 
+def _multipart_prefix(*, boundary: str, field_name: str, filename: str, content_type: str) -> bytes:
+    # Unicode filenames are UTF-8, as for the existing browser-style multipart wire.
+    if (
+        not filename
+        or len(filename) > 255
+        or any(ord(char) < 32 or ord(char) == 127 or char in '"\\' for char in filename)
+        or not re.fullmatch(r"[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+", content_type)
+        or field_name != "file"
+        or not re.fullmatch(r"[A-Za-z0-9-]{1,80}", boundary)
+    ):
+        raise TranscriptionGenerationError("Invalid multipart filename or content type")
+    return (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode()
+
+
 def _iter_file_multipart_formdata(
     *,
     boundary: str,
@@ -552,23 +586,31 @@ def _iter_file_multipart_formdata(
     filename: str,
     content_type: str,
     file_opener,
+    expected_size: int | None = None,
 ):
-    prefix = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
-        f"Content-Type: {content_type}\r\n\r\n"
-    ).encode()
+    prefix = _multipart_prefix(
+        boundary=boundary, field_name=field_name, filename=filename, content_type=content_type
+    )
     suffix = f"\r\n--{boundary}--\r\n".encode()
 
     def body():
         yield prefix
+        total = 0
         try:
             with closing(file_opener()) as file_handle:
                 while True:
-                    chunk = file_handle.read(1024 * 1024)
+                    # Read at most one extra byte to detect a replaced/growing object.
+                    limit = settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES
+                    budget = min(expected_size, limit) if expected_size is not None else limit
+                    chunk = file_handle.read(min(1024 * 1024, budget - total + 1))
                     if not chunk:
                         break
+                    total += len(chunk)
+                    if total > budget:
+                        raise TranscriptionGenerationError("Archived audio staging length mismatch")
                     yield chunk
+                if expected_size is not None and total != expected_size:
+                    raise TranscriptionGenerationError("Archived audio staging length mismatch")
         except MediaArchivalError as exc:
             raise TranscriptionGenerationError(str(exc)) from exc
         except OSError as exc:
@@ -590,11 +632,9 @@ def _multipart_content_length_header(
 ) -> dict[str, str]:
     if payload_size <= 0:
         return {}
-    prefix = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
-        f"Content-Type: {content_type}\r\n\r\n"
-    ).encode()
+    prefix = _multipart_prefix(
+        boundary=boundary, field_name=field_name, filename=filename, content_type=content_type
+    )
     suffix = f"\r\n--{boundary}--\r\n".encode()
     return {"Content-Length": str(len(prefix) + payload_size + len(suffix))}
 
@@ -719,14 +759,14 @@ def _encode_multipart_formdata(fields: dict[str, str], media: DownloadedMedia) -
                 b"\r\n",
             ]
         )
-
     body.extend(
         [
-            f"--{boundary}\r\n".encode(),
-            (
-                f'Content-Disposition: form-data; name="file"; filename="{media.filename}"\r\n'
-            ).encode(),
-            f"Content-Type: {media.content_type}\r\n\r\n".encode(),
+            _multipart_prefix(
+                boundary=boundary,
+                field_name="file",
+                filename=media.filename,
+                content_type=media.content_type,
+            ),
             media.payload,
             b"\r\n",
             f"--{boundary}--\r\n".encode(),

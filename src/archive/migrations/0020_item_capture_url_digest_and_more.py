@@ -68,7 +68,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='item',
             name='capture_url_digest',
-            field=models.CharField(default='', editable=False, max_length=64),
+            field=models.CharField(db_default='', default='', editable=False, max_length=64),
         ),
         migrations.RunSQL(sql=RESTORE_FTS_TRIGGERS, reverse_sql=migrations.RunSQL.noop),
         migrations.RunPython(backfill_capture_identity, migrations.RunPython.noop),

@@ -7,6 +7,8 @@
 - Backfill all existing URL identities in bounded migration batches; keep digests
   synchronized on model, literal queryset and bulk URL writes. Apply migration 0020
   before starting updated app/workers; populated rollback/upgrade and FTS are covered.
+  The digest column has a database default, so writers still on pre-0020 code keep
+  inserting during a migrate-then-restart window (their rows are not deduplicated).
 
 - Validate capture dedupe windows as integers from zero (disabled) to 365 days at
   startup and before capture transactions, with fixed configuration diagnostics.

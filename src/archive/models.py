@@ -120,7 +120,7 @@ class Item(models.Model):
     )
     is_public = models.BooleanField(default=True)
     original_url = models.URLField()
-    capture_url_digest = models.CharField(max_length=64, default="", editable=False)
+    capture_url_digest = models.CharField(max_length=64, default="", db_default="", editable=False)
     title = models.CharField(max_length=500, blank=True)
     shared_at = models.DateTimeField(default=timezone.now, db_index=True)
     published_at = models.DateTimeField(blank=True, null=True)

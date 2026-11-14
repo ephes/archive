@@ -257,6 +257,10 @@ app/workers. Stop writers for the migration rehearsal/rollout; the atomic SQLite
 migration backfills **all** existing URLs in batches of 500 using frozen normalization
 rules, then creates the index. Allow disk space for the added 64-character digest
 and index, and take the usual database backup first. No network/enrichment runs.
+The column has a database default of `''`, so a writer still running pre-0020 code
+can insert after the migration; such rows carry an empty digest and are not found by
+capture deduplication until the URL is saved again by current code (no 500s during
+a migrate-then-restart window).
 Rollback removes the digest/index and preserves items and search data; use the older
 application with the older schema. A populated file-backed upgrade/rollback/upgrade
 rehearsal (including FTS and a second database) runs in

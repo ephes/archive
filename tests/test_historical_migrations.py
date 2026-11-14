@@ -214,3 +214,27 @@ row, created = capture_item(CurrentItem(original_url=existing.original_url))
 assert not created and row.pk == existing.pk
 connections.close_all()
 ''')
+
+
+def test_capture_digest_migration_accepts_pre_0020_writers(tmp_path):
+    run_journey(tmp_path, r'''
+import django
+from django.db import connection, connections
+from django.db.migrations.executor import MigrationExecutor
+
+django.setup()
+from archive.capture import capture_item
+from archive.models import Item as CurrentItem
+executor = MigrationExecutor(connection)
+latest = executor.loader.graph.leaf_nodes("archive")
+executor.migrate(latest)
+pre = [("archive", "0019_fts_content_update_guard")]
+Legacy = executor.loader.project_state(pre).apps.get_model("archive", "Item")
+# An old writer still running during a migrate-then-restart deploy omits the column.
+row = Legacy.objects.create(original_url="https://example.com/legacy-writer", title="Legacy")
+assert CurrentItem.objects.get(pk=row.pk).capture_url_digest == ""
+# The empty placeholder never matches a real digest: a new capture is not merged.
+fresh, created = capture_item(CurrentItem(original_url="https://example.com/legacy-writer"))
+assert created and fresh.pk != row.pk
+connections.close_all()
+''')

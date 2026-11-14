@@ -88,7 +88,7 @@ def ranged_file_response(
     """
 
     def finalize(response: HttpResponse) -> HttpResponse:
-        response["Cache-Control"] = cache_control
+        response["Cache-Control"] = "no-store" if response.status_code >= 500 else cache_control
         return response
 
     transferred = file_closed = False
@@ -117,7 +117,8 @@ def ranged_file_response(
             except Exception:
                 # Storage backends raise their own error types; any failure before
                 # the headers are sent is reported instead of a broken stream.
-                logger.warning("Seeking stored media for a range request failed", exc_info=True)
+                # Messages/tracebacks can contain signed URLs or backend credentials.
+                logger.warning("stored_media_range_seek_failed")
                 return finalize(HttpResponse("Audio is temporarily unavailable.", status=502))
             length = end - start + 1
             response = FileResponse(

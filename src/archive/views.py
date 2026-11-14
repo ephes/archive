@@ -529,7 +529,11 @@ def item_archived_audio(request: HttpRequest, pk: int) -> HttpResponse:
     try:
         audio_file = open_archived_audio(item)
     except MediaArchivalError:
-        return HttpResponse("Archived audio is temporarily unavailable.", status=502)
+        return HttpResponse(
+            "Archived audio is temporarily unavailable.",
+            status=502,
+            headers={"Cache-Control": "no-store"},
+        )
 
     return ranged_file_response(
         request,
@@ -581,7 +585,11 @@ def item_article_audio(request: HttpRequest, pk: int) -> HttpResponse:
             item.pk,
             type(exc).__name__,
         )
-        response = HttpResponse("Article audio is temporarily unavailable.", status=503)
+        response = HttpResponse(
+            "Article audio is temporarily unavailable.",
+            status=503,
+            headers={"Cache-Control": "no-store"},
+        )
         response["Retry-After"] = "60"
         return response
 

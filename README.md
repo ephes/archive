@@ -28,13 +28,14 @@ Public endpoints:
   supports the same ranges. Both endpoints accept `HEAD` with whole-file GET headers and no body;
   Range is ignored on HEAD. The response owns an opened file only after construction
   and header setup succeed; setup failures close it while preserving the primary error.
-  Successful streaming keeps the file open until the response closes. Cache policy
-  applies to full/ranged responses, unsatisfiable ranges and pre-stream seek failures;
-  the response helper preserves the caller's public or private policy on every outcome.
-  This includes transient seek-error 502s: the public routes' one-hour policy can
-  cache those errors for an hour too. Callers needing immediate error retries must
-  supply a no-store policy. Storage-open/backfill failures before this helper retain
-  their separate existing behavior.
+  Successful streaming keeps the file open until the response closes. The caller's
+  cache policy applies to full/ranged responses and stable unsatisfiable ranges.
+  Transient pre-stream 5xx errors always use `Cache-Control: no-store`, including
+  seek failures, storage-open and article-audio preparation failures, so a recovered
+  backend can be retried immediately. This is at least as restrictive as private
+  caller policies. Successful public delivery retains its one-hour cache lifetime.
+  Seek failures log one fixed `stored_media_range_seek_failed` event without backend
+  exception text, traceback, object key or signed URL; acquired handles close once.
 - `/feeds/podcast.xml` podcast-style feed for items with stable local audio enclosures
 - `/feeds/podcast/page/<n>.xml` older podcast feed pages when more than 50 eligible items exist
 - `/api/health/` unauthenticated JSON processing health for monitoring (step counts and timestamps
@@ -63,8 +64,9 @@ partially filled; this cannot revoke content already fetched.
 
 The overview discovers occupied ISO weeks with a timezone-aware database grouping in
 one query, returning one result per occupied week in newest-first order. Gaps and local
-DST/year boundaries are preserved. A count and a bounded page query select only card fields (including
-title/URL and summary/notes fallbacks), leaving transcripts and processing payloads deferred.
+DST/year boundaries are preserved. A count query supplies pagination totals; a bounded
+page query selects only card fields (including title/URL and summary/notes fallbacks),
+leaving transcripts and processing payloads deferred.
 `/?week=<YYYY-Wnn>&page=<n>` serves at most 50 cards, newest `shared_at` then highest
 id first. Page links retain the selected week; week links start at its first page.
 Missing/invalid page text selects page 1; nonpositive/out-of-range numbers select
@@ -270,7 +272,8 @@ and the current Django timezone so detail pages can render them.
 Malformed dates and conversions outside that range return `400` with
 `{"error":"Invalid original_published_at"}`.
 Both POST and PATCH authenticate before parsing JSON. Malformed JSON, invalid JSON byte
-encodings, duplicate object members (including nested unknown fields), and non-object bodies return `400` with `{"error":"Invalid JSON"}`;
+encodings, duplicate object members (including nested unknown fields), and non-object
+bodies return `400` with `{"error":"Invalid JSON"}`;
 valid UTF-8, UTF-16, and UTF-32 JSON retain support.
 
 Repeated shares through the API or authenticated web form resolve to the newest existing
@@ -964,7 +967,16 @@ and zero explicitly disables age grace while retaining reservations and referenc
 checks. With grace enabled, unknown or unusable modification times (including naive
 timestamps) retain the object and the sweep continues. Objects exactly at the age
 cutoff are eligible. Dry-run lists snapshot candidates without deleting anything; delete mode
-may skip candidates that are reserved or have become referenced. Cleanup can run
+may skip candidates that are reserved or have become referenced. Expected filesystem
+(`OSError`) and S3 SDK deletion failures retain the failed candidate and continue with
+independent candidates. The final summary includes `failed=<count>`; any such failure
+suppresses the success banner and raises a command error (CLI exit status 1), even if
+other objects were deleted. Diagnostics identify the candidate's ordinal in the sorted
+report with `storage_delete_failed`, without backend exception details. Retry the same
+command after the backend recovers: final reservation/reference checks run again and
+already removed objects are absent from the new inventory. Inventory, database and
+unexpected programming failures still abort; an incomplete listing never authorizes
+deletion. Cleanup can run
 while workers are archiving. Apply database migrations before running updated
 workers or cleanup.
 

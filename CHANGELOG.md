@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Continue orphan cleanup after independent filesystem/S3 deletion failures, report
+  bounded failure counts and exit nonzero for incomplete sweeps. Preserve final
+  reference/reservation checks and allow retries to reclaim retained candidates.
+
+- Log stored-media range seek failures as a fixed operation category without
+  backend exception text or traceback, retaining exactly-once handle cleanup.
+
+- Serve transient pre-stream media errors with no-store, preserving caller cache
+  policy for successful and stable range outcomes and allowing immediate retries.
+
 - Fetch only search card columns and a database-bounded excerpt from the first
   nonempty summary/notes/transcript fallback; display at most 240 characters while
   retaining full-content ranking and detail pages.
@@ -97,9 +107,8 @@
 
 - Deduplicate discovered URLs and media-candidate identities with ordered set
   membership while preserving first-seen output and distinct type/source provenance.
-- Preserve caller cache policy on unsatisfiable ranges and stored-media seek errors,
-  retaining range headers and file ownership. Public freshness also applies to
-  transient seek-error 502s; callers requiring immediate retries must use no-store.
+- Preserve caller cache policy on unsatisfiable ranges, retaining range headers
+  and file ownership; transient seek-error 502s now use no-store as described above.
 
 - Ignore malformed or over-budget JSON-LD blobs without losing independent metadata;
   bound iterative traversal to depth 32 and 10,000 values per blob.

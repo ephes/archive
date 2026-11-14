@@ -262,9 +262,10 @@ can insert after the migration instead of failing with a 500; such rows carry an
 digest and are not found by capture deduplication until current code saves them with a
 full `save()` or with `original_url` in `update_fields` (worker/enrichment saves of other
 fields keep the empty digest). The writer stop above avoids such rows; if one was skipped,
-repair them in `just manage shell` with
-`for item in Item.objects.filter(capture_url_digest=""): item.save(update_fields=["original_url"])`,
-which writes only the URL and the fields `Item.save` derives from it (digest, publication/processing timestamps), so concurrent worker updates to other fields survive.
+stop the app and workers again and repair them in `just manage shell` with
+`for item in Item.objects.filter(capture_url_digest=""): item.save(update_fields=["original_url"])`.
+This writes the URL, its digest and the timestamps `Item.save` recomputes from the loaded
+row's visibility/status, so it must not race running writers.
 Rollback removes the digest/index and preserves items and search data; use the older
 application with the older schema. A populated file-backed upgrade/rollback/upgrade
 rehearsal (including FTS and a second database) runs in

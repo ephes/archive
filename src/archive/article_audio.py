@@ -270,9 +270,29 @@ def _truncate_script(value: str, *, max_chars: int) -> str:
     return truncated
 
 
+def _synthesis_job_payload(item: Item, text: str) -> dict[str, object]:
+    return {
+        "job_type": "synthesize",
+        "priority": "normal",
+        "lane": "batch",
+        "backend": "auto",
+        "model": settings.ARCHIVE_ARTICLE_AUDIO_MODEL,
+        "language": settings.ARCHIVE_ARTICLE_AUDIO_LANGUAGE,
+        "voice": settings.ARCHIVE_ARTICLE_AUDIO_VOICE,
+        "input": {"kind": "text", "text": text},
+        "output": {"formats": [DEFAULT_AUDIO_FORMAT]},
+        "context": {"producer": "archive", "item_id": item.pk},
+    }
+
+
 def _task_ref_for_script(item: Item, text: str) -> str:
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-    return f"archive-item-{item.pk}-article-audio-v2-{digest}"
+    return _synthesis_task_ref(item, _synthesis_job_payload(item, text))
+
+
+def _synthesis_task_ref(item: Item, payload: dict[str, object]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return f"archive-item-{item.pk}-article-audio-v3-{digest}"
 
 
 def _best_effort_article_audio_source_text(item: Item, timeout: int) -> str:
@@ -282,31 +302,17 @@ def _best_effort_article_audio_source_text(item: Item, timeout: int) -> str:
             timeout=timeout,
             max_chars=MAX_ARTICLE_AUDIO_SOURCE_CHARS,
         )
-    except Exception as exc:
-        logger.warning("Article audio source extraction failed for item %s: %s", item.pk, exc)
+    except Exception:
+        logger.warning("Article audio source_extraction_failed for item %s", item.pk)
         return ""
     return source.extracted_text.strip()
 
 
 def _submit_synthesis_job(item: Item, text: str, timeout: int) -> ArticleAudioJobUpdate:
-    request_body = json.dumps(
-        {
-            "job_type": "synthesize",
-            "priority": "normal",
-            "lane": "batch",
-            "backend": "auto",
-            "model": settings.ARCHIVE_ARTICLE_AUDIO_MODEL,
-            "language": settings.ARCHIVE_ARTICLE_AUDIO_LANGUAGE,
-            "voice": settings.ARCHIVE_ARTICLE_AUDIO_VOICE,
-            "input": {
-                "kind": "text",
-                "text": text,
-            },
-            "output": {"formats": [DEFAULT_AUDIO_FORMAT]},
-            "context": {"producer": "archive", "item_id": item.pk},
-            "task_ref": _task_ref_for_script(item=item, text=text),
-        }
-    ).encode("utf-8")
+    payload = _synthesis_job_payload(item, text)
+    # Hash this exact request snapshot so every output-affecting field participates.
+    payload["task_ref"] = _synthesis_task_ref(item, payload)
+    request_body = json.dumps(payload).encode("utf-8")
     request = Request(
         _api_url("jobs"),
         data=request_body,

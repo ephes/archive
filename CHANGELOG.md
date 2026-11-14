@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Share one transcription deadline across media loading, upload staging, submission,
+  polling and coverage evidence; reject late results without starting subsequent
+  requests or retrying ambiguous submissions inside the attempt.
+- Include all synthesis payload settings in v3 task identity while continuing to
+  poll existing recorded jobs unchanged. Log article-source extraction failures
+  with only item ID and a fixed category, preserving stored-text fallback.
+
 - Validate transcription/synthesis job envelopes and upload IDs; reject poll
   identity mismatches and malformed artifact paths before publishing results.
 - Admit multipart filenames/MIME values before reading storage, sharing exact

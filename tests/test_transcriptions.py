@@ -641,7 +641,7 @@ def test_enabled_coverage_requires_json_artifact(monkeypatch, settings, artifact
     )
 
     settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = 600
-    if isinstance(artifact, dict) and "json" in artifact:
+    if artifact is None or isinstance(artifact, dict) and "json" in artifact:
         with pytest.raises(TranscriptionGenerationError, match="segment artifact"):
             _parse_batch_transcription_job_update(
                 {

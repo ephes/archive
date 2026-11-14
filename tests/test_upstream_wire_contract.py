@@ -253,3 +253,24 @@ def test_staging_failure_closes_source_without_network(mode, monkeypatch, settin
         )
     assert source.closed or mode == "over-limit"
     assert source.calls <= 2
+
+
+@pytest.mark.parametrize("container", [None, [], "", 7, True])
+def test_transcription_artifacts_container_must_be_an_object(container):
+    with pytest.raises(tr.TranscriptionGenerationError, match="artifact"):
+        tr._parse_batch_transcription_job_update(
+            {
+                "id": "job-a",
+                "state": "succeeded",
+                "result": {"text": "words", "artifacts": container},
+            }
+        )
+
+
+def test_staging_diagnostic_never_echoes_source_url():
+    private = "https://user:password@example.test/private.bin?signature=secret"
+    with pytest.raises(tr.TranscriptionGenerationError) as caught:
+        tr._stage_archived_audio_upload(
+            item=Item(), source=tr.TranscriptionSource("archived_audio", private, "", 3), timeout=5
+        )
+    assert str(caught.value) == "Unsupported archived audio type for transcription"

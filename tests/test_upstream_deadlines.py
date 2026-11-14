@@ -87,7 +87,7 @@ def test_poll_does_not_accept_or_request_after_deadline(monkeypatch, settings, l
     monkeypatch.setattr(transcriptions, "monotonic", lambda: clock[0])
     monkeypatch.setattr(transcriptions, "sleep", lambda seconds: clock.__setitem__(0, seconds))
 
-    def poll(job_id, timeout):
+    def poll(job_id, timeout, **kwargs):
         calls.append(timeout)
         clock[0] = 10
         return transcriptions.BatchTranscriptionJobUpdate(job_id, "succeeded", "words")

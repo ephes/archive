@@ -1013,9 +1013,15 @@ article-audio downloads retain their separate configured media limit. Authentica
 exchanges run in a disposable transport process with one elapsed timeout covering
 DNS, connect, same-origin redirects, response reads (including errors), and
 transport teardown. Timeout kills and reaps that process; no timed-out request
-thread remains. Transcription polling passes only its remaining elapsed budget
-and rejects responses arriving at or after its deadline. The separate worker
-stale-processing recovery window is unchanged.
+thread remains. Each transcription attempt has one monotonic elapsed budget
+(`timeout`, normally 300 seconds) shared across source loading, staging, job
+submission, polling sleeps/requests, segment coverage evidence and final result
+admission. Every network step receives only the remaining time; expired attempts
+start no further request and reject late success. Local storage reads check the
+same deadline before and after each read; a blocking storage call itself remains
+subject to the storage backend's own timeout. The separate worker stale-processing
+recovery window is unchanged. A timed-out upstream job may still run remotely;
+Archive does not retry ambiguous submissions within an attempt.
 
 ## Login protection
 
@@ -1097,6 +1103,16 @@ server for both source and generated article audio routes:
 lengths for full, bounded, suffix, open-ended, malformed and unsatisfiable requests,
 HEAD without body reads, and storage-reader cleanup after a client disconnects.
 
+### Synthesis task identity
+
+Article-audio `task_ref` v3 hashes the canonical submitted job payload, including
+text, model, voice, language, output format and backend settings. Identical requests
+retain stable identity; changing synthesis configuration intentionally creates a
+different job when regenerating. Pending jobs continue polling their recorded job
+ID under configuration changes. To regenerate completed output, first clear the
+stored copy and artifact/job state as described above. The v3 identity applies
+only to new submissions; previously recorded jobs remain usable.
+
 ### Upstream failure diagnostics
 
 Summary, transcription and article-audio JSON responses decode UTF-8 strictly.
@@ -1110,6 +1126,9 @@ exceptions and their exception chains, which can echo private prompts or URLs.
 Fetch-policy refusals keep their fixed text as `blocked destination: ...`; other
 transport and local read failures name only the exception class, for example
 `transport error (FileNotFoundError)`.
+Best-effort article-source extraction logs only the item ID and fixed
+`source_extraction_failed` category, omitting raw exceptions and tracebacks;
+stored text remains the fallback for synthesis.
 No upstream request identifiers are currently retained in these diagnostics.
 Operators should use the stage, item ID, status and category to investigate in the
 upstream service through their existing authorized access. Existing historical

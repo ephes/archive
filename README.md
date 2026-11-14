@@ -264,7 +264,7 @@ full `save()` or with `original_url` in `update_fields` (worker/enrichment saves
 fields keep the empty digest). The writer stop above avoids such rows; if one was skipped,
 repair them in `just manage shell` with
 `for item in Item.objects.filter(capture_url_digest=""): item.save(update_fields=["original_url"])`,
-which writes only the URL and its derived digest, so concurrent worker updates survive.
+which writes only the URL and the fields `Item.save` derives from it (digest, publication/processing timestamps), so concurrent worker updates to other fields survive.
 Rollback removes the digest/index and preserves items and search data; use the older
 application with the older schema. A populated file-backed upgrade/rollback/upgrade
 rehearsal (including FTS and a second database) runs in

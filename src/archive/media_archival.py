@@ -24,17 +24,13 @@ from django.core.files.storage import storages
 from django.db import transaction
 
 from archive.classification import resolve_media_sources_for_item
+from archive.media_process import MediaProcessError, run_media_command
 from archive.media_storage import (
     ARCHIVE_MEDIA_STORAGE_ALIAS,
     delete_unreferenced_archive_media_paths,
 )
 from archive.metadata import REQUEST_HEADERS
 from archive.models import Item, PendingArchiveMediaUpload
-
-try:
-    import yt_dlp
-except ImportError:  # pragma: no cover - exercised via runtime error handling.
-    yt_dlp = None
 
 logger = logging.getLogger(__name__)
 
@@ -270,6 +266,9 @@ def _archive_video_audio(item: Item, source_url: str, timeout: int) -> ArchivedA
             if audio_size_bytes <= 0:
                 raise MediaArchivalError("Audio extraction produced an empty output file")
 
+            if audio_size_bytes >= settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES:
+                raise MediaArchivalError("Audio extraction exceeded the configured output limit")
+
             source_object_name = f"items/{item.pk}/video/source{source_path.suffix}"
             audio_object_name = f"items/{item.pk}/audio/extracted{DEFAULT_EXTRACTED_AUDIO_SUFFIX}"
             saved_source_name = ""
@@ -393,11 +392,6 @@ def _download_supported_video_page_audio_source(
     temp_dir: Path,
     timeout: int,
 ) -> tuple[Path, str, int]:
-    if yt_dlp is None:
-        raise MediaArchivalError(
-            "Video page download requires yt-dlp; run uv sync or deploy the updated app"
-        )
-
     output_template = str(temp_dir / "source.%(ext)s")
     options = {
         "ffmpeg_location": _youtube_dl_ffmpeg_location(
@@ -416,6 +410,12 @@ def _download_supported_video_page_audio_source(
                 "preferredquality": "2",
             }
         ],
+        "postprocessor_args": {
+            "extractaudio+ffmpeg_o": ["-fs", str(settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES)]
+        },
+        # The child's stdout counts toward the diagnostic budget; as a library,
+        # quiet alone still prints the progress bar, so turn it off explicitly.
+        "noprogress": True,
         "quiet": True,
         "restrictfilenames": True,
         "socket_timeout": timeout,
@@ -424,11 +424,13 @@ def _download_supported_video_page_audio_source(
     if js_runtimes:
         options["js_runtimes"] = js_runtimes
     try:
-        with yt_dlp.YoutubeDL(options) as downloader:
-            downloader.extract_info(source_url, download=True)
-    except Exception as exc:
-        detail = str(exc).strip() or exc.__class__.__name__
-        raise MediaArchivalError(f"Video page download failed: {detail}") from exc
+        run_media_command(
+            _video_page_download_command(),
+            timeout=timeout,
+            input_data=json.dumps({"url": source_url, "options": options}).encode("utf-8"),
+        )
+    except MediaProcessError as exc:
+        raise MediaArchivalError(f"Video page download {exc}") from None
 
     source_path = _find_downloaded_audio_path(temp_dir)
     if source_path is None:
@@ -437,7 +439,7 @@ def _download_supported_video_page_audio_source(
     size_bytes = source_path.stat().st_size
     if size_bytes <= 0:
         raise MediaArchivalError("Video page download produced an empty audio file")
-    if size_bytes > settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES:
+    if size_bytes >= settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES:
         raise MediaArchivalError(
             "Video source exceeded the configured "
             f"{settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES}-byte archive limit"
@@ -447,6 +449,10 @@ def _download_supported_video_page_audio_source(
     if not suffix:
         raise MediaArchivalError("Video page download produced an unsupported audio file")
     return source_path, _content_type_for_audio_suffix(suffix), size_bytes
+
+
+def _video_page_download_command() -> list[str]:
+    return [sys.executable, "-I", str(Path(__file__).with_name("video_page_download.py"))]
 
 
 def _youtube_dl_js_runtimes_option(runtimes: list[str]) -> dict[str, dict[str, object]]:
@@ -483,27 +489,28 @@ def _extract_audio_with_ffmpeg(*, source_path: Path, output_path: Path, timeout:
         "libmp3lame",
         "-q:a",
         "2",
+        "-fs",
+        str(settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES),
         str(output_path),
     ]
     try:
-        subprocess.run(
+        run_media_command(
             command,
-            check=True,
-            capture_output=True,
-            text=True,
             timeout=timeout,
+            output_path=output_path,
+            max_output_bytes=settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES,
         )
-    except FileNotFoundError as exc:
+    except FileNotFoundError:
         raise MediaArchivalError(
             "Video audio extraction requires ffmpeg; configure "
             "ARCHIVE_MEDIA_EXTRACTION_FFMPEG_BIN or install ffmpeg"
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise MediaArchivalError("Video audio extraction timed out") from exc
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()
-        detail = stderr.splitlines()[-1] if stderr else str(exc)
-        raise MediaArchivalError(f"Video audio extraction failed: {detail}") from exc
+        ) from None
+    except MediaProcessError as exc:
+        if str(exc) == "output limit":
+            raise MediaArchivalError(
+                "Audio extraction exceeded the configured output limit"
+            ) from None
+        raise MediaArchivalError(f"Video audio extraction {exc}") from None
 
 
 def _save_storage_path(*, target_name: str, file_path: Path, using: str) -> str:

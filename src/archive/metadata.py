@@ -23,6 +23,8 @@ from urllib.request import Request
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 
+from archive.json_objects import unique_json_object
+
 AUDIO_SUFFIXES = (".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav")
 VIDEO_SUFFIXES = (".mp4", ".m4v", ".mov", ".webm", ".m3u8")
 MAX_METADATA_BYTES = 1024 * 1024
@@ -474,7 +476,7 @@ def _extract_jsonld_metadata(blobs: list[str], base_url: str) -> ExtractedMetada
 
 def _iter_jsonld_records(blob: str) -> list[dict]:
     try:
-        data = json.loads(blob)
+        data = json.loads(blob, object_pairs_hook=unique_json_object)
     except (ValueError, RecursionError, OverflowError):
         return []
 

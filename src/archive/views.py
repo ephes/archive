@@ -41,6 +41,7 @@ from archive.classification import (
     podcast_feed_decision_for_item,
 )
 from archive.forms import ArchiveAuthenticationForm, ItemForm
+from archive.json_objects import unique_json_object as _unique_json_object
 from archive.media_archival import MediaArchivalError, open_archived_audio
 from archive.media_responses import ranged_file_response
 from archive.models import Item, ItemKind, PodcastFeedPolicy
@@ -645,15 +646,6 @@ def _api_request_is_authorized(request: HttpRequest) -> bool:
         # Compare bytes: compare_digest raises TypeError on non-ASCII str.
         and hmac.compare_digest(auth_header.encode("utf-8"), expected_header.encode("utf-8"))
     )
-
-
-def _unique_json_object(pairs):
-    obj = {}
-    for key, value in pairs:
-        if key in obj:
-            raise ValueError("Duplicate JSON member")
-        obj[key] = value
-    return obj
 
 
 @csrf_exempt

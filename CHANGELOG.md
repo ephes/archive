@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Reject recursively duplicated members in upstream API JSON with controlled
+  invalid-JSON failures, preserving job identity and previously stored results.
+  Ignore ambiguous JSON-LD script blobs independently, retaining valid metadata
+  from other scripts and HTML tags. Reuse capture's object-member admission.
+
+- Retire FFmpeg/yt-dlp process groups on success and failure, with bounded TERM/KILL
+  escalation before temporary-file cleanup. Run supported video-page downloads
+  behind one elapsed deadline, including retries and postprocessing; discard
+  partial results and private diagnostics while retaining normal retries.
+
+- Bound extracted MP3 output with FFmpeg's size option and parent-side checks;
+  refuse truncated/oversized output before uploading video or audio. Drain both
+  diagnostic streams with separate 1 MiB budgets and fixed private-safe failures,
+  preserving the previous archived generation on extraction failure. Video-page
+  downloads turn off yt-dlp's progress bar, so long downloads do not use up the
+  diagnostic budget.
+
 - Continue orphan cleanup after independent filesystem/S3 deletion failures, report
   bounded failure counts and exit nonzero for incomplete sweeps. Preserve final
   reference/reservation checks and allow retries to reclaim retained candidates.

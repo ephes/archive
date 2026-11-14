@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -107,14 +106,16 @@ class _FakeYoutubeDL:
         return {"webpage_url": source_url}
 
 
-def _fake_ffmpeg_run(command, check, capture_output, text, timeout) -> None:
+def _fake_ffmpeg_run(command, **kwargs) -> None:
     output_path = command[-1]
     with open(output_path, "wb") as output_file:
         output_file.write(b"ID3-derived-audio")
 
 
-def _failing_ffmpeg_run(command, check, capture_output, text, timeout) -> None:
-    raise subprocess.CalledProcessError(1, command, stderr="ffmpeg exploded")
+def _failing_ffmpeg_run(command, **kwargs) -> None:
+    from archive.media_process import MediaProcessError
+
+    raise MediaProcessError("failed")
 
 
 def _delete_storage_objects(*paths: str) -> None:
@@ -271,7 +272,7 @@ def test_archive_item_audio_extracts_audio_from_direct_video_and_tracks_source(
             final_url="https://cdn.example.com/video.mp4",
         ),
     )
-    monkeypatch.setattr("archive.media_archival.subprocess.run", _fake_ffmpeg_run)
+    monkeypatch.setattr("archive.media_archival.run_media_command", _fake_ffmpeg_run)
 
     archived_audio = archive_item_audio(item=item)
 
@@ -306,7 +307,7 @@ def test_archive_item_audio_prefers_video_path_for_webm_video_urls(monkeypatch) 
             final_url="https://cdn.example.com/video.webm",
         ),
     )
-    monkeypatch.setattr("archive.media_archival.subprocess.run", _fake_ffmpeg_run)
+    monkeypatch.setattr("archive.media_archival.run_media_command", _fake_ffmpeg_run)
 
     archived_audio = archive_item_audio(item=item)
 
@@ -316,8 +317,27 @@ def test_archive_item_audio_prefers_video_path_for_webm_video_urls(monkeypatch) 
     assert archived_audio.source_object_name.endswith("/source.webm")
 
 
+@pytest.fixture
+def fake_ytdlp(monkeypatch):
+    import json
+
+    from archive import video_page_download
+    from archive.media_process import MediaProcessError
+
+    monkeypatch.setattr(video_page_download, "yt_dlp", SimpleNamespace(YoutubeDL=_FakeYoutubeDL))
+
+    def run(command, *, input_data, timeout):
+        try:
+            video_page_download.download(json.loads(input_data))
+        except Exception:
+            raise MediaProcessError("failed") from None
+
+    monkeypatch.setattr("archive.media_archival.run_media_command", run)
+
+
 @pytest.mark.django_db
 def test_archive_item_audio_downloads_supported_youtube_page_audio_directly(
+    fake_ytdlp,
     monkeypatch,
     settings,
 ) -> None:
@@ -333,10 +353,6 @@ def test_archive_item_audio_downloads_supported_youtube_page_audio_directly(
     _FakeYoutubeDL.payload = b"youtube-page-audio"
     _FakeYoutubeDL.suffix = ".mp3"
     _FakeYoutubeDL.error = None
-    monkeypatch.setattr(
-        "archive.media_archival.yt_dlp",
-        SimpleNamespace(YoutubeDL=_FakeYoutubeDL),
-    )
     monkeypatch.setattr("archive.media_archival.shutil.which", lambda name: f"/usr/bin/{name}")
     settings.ARCHIVE_MEDIA_YTDLP_JS_RUNTIMES = ["node", "deno"]
 
@@ -361,6 +377,11 @@ def test_archive_item_audio_downloads_supported_youtube_page_audio_directly(
             "preferredquality": "2",
         }
     ]
+    assert _FakeYoutubeDL.instances[0].options["postprocessor_args"] == {
+        "extractaudio+ffmpeg_o": ["-fs", str(settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES)]
+    }
+    assert _FakeYoutubeDL.instances[0].options["noprogress"] is True
+    assert _FakeYoutubeDL.instances[0].options["quiet"] is True
     assert _FakeYoutubeDL.instances[0].options["js_runtimes"] == {
         "node": {},
         "deno": {},
@@ -370,19 +391,15 @@ def test_archive_item_audio_downloads_supported_youtube_page_audio_directly(
 
 
 @pytest.mark.django_db
-def test_archive_item_audio_reports_supported_youtube_page_download_failures(monkeypatch) -> None:
+def test_archive_item_audio_reports_supported_youtube_page_download_failures(fake_ytdlp) -> None:
     item = Item.objects.create(
         original_url="https://youtu.be/demo123",
         kind=ItemKind.VIDEO,
     )
     _FakeYoutubeDL.instances.clear()
     _FakeYoutubeDL.error = RuntimeError("resolver exploded")
-    monkeypatch.setattr(
-        "archive.media_archival.yt_dlp",
-        SimpleNamespace(YoutubeDL=_FakeYoutubeDL),
-    )
 
-    with pytest.raises(MediaArchivalError, match="Video page download failed: resolver exploded"):
+    with pytest.raises(MediaArchivalError, match="Video page download failed"):
         archive_item_audio(item=item)
 
 
@@ -434,10 +451,161 @@ def test_archive_item_audio_cleans_up_failed_video_archival_before_persisting_ob
             final_url="https://cdn.example.com/video.mp4",
         ),
     )
-    monkeypatch.setattr("archive.media_archival.subprocess.run", _failing_ffmpeg_run)
+    monkeypatch.setattr("archive.media_archival.run_media_command", _failing_ffmpeg_run)
 
     with pytest.raises(MediaArchivalError, match="Video audio extraction failed"):
         archive_item_audio(item=item)
 
     assert not list(iter_archive_media_object_names())
     assert not PendingArchiveMediaUpload.objects.exists()
+
+
+@pytest.fixture
+def ffmpeg_script(settings, tmp_path):
+    import sys
+
+    def install(body):
+        script = tmp_path / "synthetic-ffmpeg"
+        script.write_text(f"#!{sys.executable}\n" + body)
+        script.chmod(0o700)
+        settings.ARCHIVE_MEDIA_EXTRACTION_FFMPEG_BIN = str(script)
+        return script
+
+    return install
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mode", ["oversize", "boundary", "stdout", "stderr", "failure"])
+def test_extraction_limits_preserve_previous_media(
+    mode, monkeypatch, settings, ffmpeg_script, tmp_path
+):
+    settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES = 1024
+    item = Item.objects.create(
+        original_url="https://example.com/video.mp4",
+        kind=ItemKind.VIDEO,
+        archived_audio_path="old/audio.mp3",
+        archived_video_path="old/video.mp4",
+    )
+    storage = storages["archive_media"]
+    for path in (item.archived_audio_path, item.archived_video_path):
+        storage.save(path, ContentFile(b"previous"))
+    output_record = tmp_path / "output-path"
+    body = (
+        "import sys\nfrom pathlib import Path\n"
+        f"Path({str(output_record)!r}).write_text(sys.argv[-1])\n"
+        "Path(sys.argv[-1]).write_bytes(b'x' * "
+        + ("2048" if mode == "oversize" else "1024" if mode == "boundary" else "16")
+        + ")\n"
+    )
+    if mode in {"stdout", "stderr"}:
+        body += f"sys.{mode}.write('https://private.invalid/secret\\n' * 100000)\n"
+    if mode == "failure":
+        body += "sys.stderr.write('https://private.invalid/secret')\nsys.exit(1)\n"
+    ffmpeg_script(body)
+    monkeypatch.setattr(
+        "archive.media_archival._open_direct_media",
+        lambda request, timeout: _FakeResponse(
+            [b"video"], content_type="video/mp4", final_url=item.original_url
+        ),
+    )
+    expected = {
+        "oversize": "Audio extraction exceeded the configured output limit",
+        "boundary": "Audio extraction exceeded the configured output limit",
+        "stdout": "Video audio extraction exceeded the diagnostic limit",
+        "stderr": "Video audio extraction exceeded the diagnostic limit",
+        "failure": "Video audio extraction failed",
+    }[mode]
+    with pytest.raises(MediaArchivalError) as caught:
+        archive_item_audio(item=item)
+    assert str(caught.value) == expected
+    assert caught.value.__cause__ is None
+    item.refresh_from_db()
+    assert item.archived_audio_path == "old/audio.mp3"
+    assert item.archived_video_path == "old/video.mp4"
+    assert sorted(iter_archive_media_object_names()) == ["old/audio.mp3", "old/video.mp4"]
+    with storage.open("old/audio.mp3") as previous:
+        assert previous.read() == b"previous"
+    assert not PendingArchiveMediaUpload.objects.exists()
+    assert not Path(output_record.read_text()).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("phase", ["download", "postprocess"])
+def test_video_page_download_enforces_elapsed_deadline(phase, monkeypatch, tmp_path):
+    import sys
+    from time import monotonic
+
+    from archive.services import enrich_item_media_archive
+
+    script = tmp_path / "slow-downloader.py"
+    script.write_text(
+        "import json,sys,time\nfrom pathlib import Path\n"
+        "request=json.load(sys.stdin)\n"
+        "path=Path(request['options']['outtmpl'].replace('%(ext)s', 'mp3'))\n"
+        + ("path.write_bytes(b'ID3')\n" if phase == "postprocess" else "")
+        + "while True:\n time.sleep(.01)\n sys.stdout.write('progress\\n')\n sys.stdout.flush()\n"
+    )
+    monkeypatch.setattr(
+        "archive.media_archival._video_page_download_command",
+        lambda: [sys.executable, "-I", str(script)],
+    )
+    item = Item.objects.create(original_url="https://youtu.be/demo123", kind=ItemKind.VIDEO)
+    started = monotonic()
+    assert not enrich_item_media_archive(item=item, timeout=0.2)
+    assert monotonic() - started < 1
+    assert not list(iter_archive_media_object_names())
+    assert not PendingArchiveMediaUpload.objects.exists()
+    item.refresh_from_db()
+    assert not item.archived_audio_path
+    assert item.media_archive_error == "Video page download timed out"
+    assert item.media_archive_retry_count == 1 and item.media_archive_retry_at is not None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_noisy_ffmpeg_persists_only_fixed_failure(stream, monkeypatch, ffmpeg_script, caplog):
+    from archive.services import enrich_item_media_archive
+
+    ffmpeg_script(f"import sys\nsys.{stream}.write('https://private.invalid/secret\\n' * 100000)\n")
+    item = Item.objects.create(original_url="https://example.test/a.mp4", kind=ItemKind.VIDEO)
+    monkeypatch.setattr(
+        "archive.media_archival._open_direct_media",
+        lambda request, timeout: _FakeResponse(
+            [b"video"], content_type="video/mp4", final_url=item.original_url
+        ),
+    )
+    assert not enrich_item_media_archive(item)
+    item.refresh_from_db()
+    assert item.media_archive_error == "Video audio extraction exceeded the diagnostic limit"
+    assert "private.invalid" not in caplog.text
+    assert not list(iter_archive_media_object_names())
+    assert not item.archived_audio_path and not item.archived_video_path
+    assert item.media_archive_retry_count == 1 and item.media_archive_retry_at is not None
+
+
+@pytest.mark.parametrize("limited", [False, True])
+def test_real_ffmpeg_synthetic_audio_respects_output_ceiling(limited, settings, tmp_path):
+    import shutil
+    import wave
+
+    from archive.media_archival import _extract_audio_with_ffmpeg
+
+    binary = shutil.which("ffmpeg")
+    if binary is None:
+        pytest.skip("ffmpeg is required for the real local encoding oracle")
+    settings.ARCHIVE_MEDIA_EXTRACTION_FFMPEG_BIN = binary
+    settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES = 4096 if limited else 1024 * 1024
+    source = tmp_path / "synthetic.wav"
+    with wave.open(str(source), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"\0\0" * (16000 * 30))
+    output = tmp_path / "out.mp3"
+    if limited:
+        with pytest.raises(MediaArchivalError, match="configured output limit"):
+            _extract_audio_with_ffmpeg(source_path=source, output_path=output, timeout=5)
+        assert 0 < output.stat().st_size < 64 * 1024
+    else:
+        _extract_audio_with_ffmpeg(source_path=source, output_path=output, timeout=5)
+        assert 0 < output.stat().st_size < settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES

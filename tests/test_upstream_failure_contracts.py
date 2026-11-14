@@ -71,18 +71,12 @@ def run_worker(stage):
 
 
 def hostile_json(kind):
+    if kind == "duplicate":
+        return ('{"' + SECRET + '":[{"id":1,"id":2}]}').encode()
     if kind == "utf8":
         return b'{"' + SECRET.encode() + b'":"\xff"}'
     if kind == "deep":
-        return (
-            '{"'
-            + SECRET
-            + '":'
-            + "[" * 100_000
-            + "0"
-            + "]" * 100_000
-            + "}"
-        ).encode()
+        return ('{"' + SECRET + '":' + "[" * 100_000 + "0" + "]" * 100_000 + "}").encode()
     # Make this independent of ambient interpreter integer-limit settings.
     sys.set_int_max_str_digits(4300)
     return ('{"' + SECRET + '":' + "9" * 5000 + "}").encode()
@@ -93,7 +87,7 @@ def hostile_json(kind):
     "stage,module",
     [("summary", summaries), ("transcript", transcriptions), ("article_audio", article_audio)],
 )
-@pytest.mark.parametrize("kind", ["utf8", "deep", "integer"])
+@pytest.mark.parametrize("kind", ["utf8", "deep", "integer", "duplicate"])
 def test_invalid_json_resource_failures_are_controlled(
     stage, module, kind, monkeypatch, worker_setup, caplog
 ):
@@ -116,7 +110,7 @@ def test_invalid_json_resource_failures_are_controlled(
         (article_audio, article_audio.ArticleAudioGenerationError),
     ],
 )
-@pytest.mark.parametrize("kind", ["utf8", "deep", "integer"])
+@pytest.mark.parametrize("kind", ["utf8", "deep", "integer", "duplicate"])
 def test_job_json_helpers_normalize_resource_failures(module, error, kind, monkeypatch):
     previous = sys.get_int_max_str_digits()
     try:
@@ -174,6 +168,4 @@ def test_failed_job_messages_are_private(module, parse):
 
 def test_nested_generated_summary_decoder_is_controlled():
     with pytest.raises(summaries.SummaryGenerationError, match="JSON"):
-        summaries._parse_generated_summary(
-            "[" * 100_000 + "0" + "]" * 100_000
-        )
+        summaries._parse_generated_summary("[" * 100_000 + "0" + "]" * 100_000)

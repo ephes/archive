@@ -35,7 +35,7 @@ def fake_video_download(monkeypatch, item):
             [b"video"], content_type="video/mp4", final_url=item.media_url
         ),
     )
-    monkeypatch.setattr("archive.media_archival.subprocess.run", _fake_ffmpeg_run)
+    monkeypatch.setattr("archive.media_archival.run_media_command", _fake_ffmpeg_run)
 
 
 def assert_committed_references_exist(item):

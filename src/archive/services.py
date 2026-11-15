@@ -1012,6 +1012,14 @@ def _mark_metadata_failure(item: Item, error_message: str, *, expected: dict) ->
     using = item._state.db or router.db_for_write(Item, instance=item)
     with transaction.atomic(using=using):
         if not _refresh_current_failure(item, "enrichment", expected):
+            # Changed inputs retire this failure; requeue the unchanged attempt
+            # like the success path so the stage is not left in PROCESSING.
+            if (
+                item.enrichment_status == expected["enrichment_status"]
+                and item.processing_started_at == expected["processing_started_at"]
+            ):
+                item.enrichment_status = EnrichmentStatus.PENDING
+                item.save(using=using, update_fields=["enrichment_status"])
             return True
         item.enrichment_error = error_message
         if item.has_required_feed_metadata:

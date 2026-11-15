@@ -59,7 +59,7 @@ def test_old_generated_result_cannot_publish_into_changed_generation(monkeypatch
 
 
 @pytest.mark.parametrize("failure", [False, True])
-@pytest.mark.parametrize("change", ["source", "attempt", "success", "unchanged"])
+@pytest.mark.parametrize("change", ["source", "title", "attempt", "success", "unchanged"])
 def test_metadata_settles_only_its_url_and_attempt(monkeypatch, failure, change):
     from archive.metadata import ExtractedMetadata
 
@@ -67,6 +67,8 @@ def test_metadata_settles_only_its_url_and_attempt(monkeypatch, failure, change)
     updates = {}
     if change == "source":
         updates = {"original_url": "https://example.test/new"}
+    elif change == "title":
+        updates = {"title": "Manual edit"}
     elif change == "attempt":
         updates = {"processing_started_at": timezone.now() + timedelta(seconds=1)}
     elif change == "success":
@@ -93,6 +95,11 @@ def test_metadata_settles_only_its_url_and_attempt(monkeypatch, failure, change)
         assert ProcessingEvent.objects.filter(item_id=item.pk, succeeded=not failure).count() == 1
         assert item.title == ("" if failure else "Old title")
         assert item.enrichment_error == ("synthetic current failure" if failure else "")
+    elif change == "title" and not failure:
+        # The success path fences on URL/status/attempt and keeps the manual title.
+        assert result
+        assert item.title == "Manual edit"
+        assert item.enrichment_status == Status.COMPLETE
     else:
         assert result
         assert item.title == updates.get("title", "")
@@ -100,7 +107,7 @@ def test_metadata_settles_only_its_url_and_attempt(monkeypatch, failure, change)
         assert item.enrichment_error == updates.get("enrichment_error", "")
         assert item.enrichment_status == (
             Status.PENDING
-            if change == "source" and not failure
+            if change in {"source", "title"}
             else updates.get("enrichment_status", Status.PROCESSING)
         )
         assert not ProcessingEvent.objects.filter(item_id=item.pk).exists()

@@ -539,71 +539,6 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
 
 
 def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
-    if item.has_generated_article_audio:
-        if (
-            item.article_audio_status != EnrichmentStatus.COMPLETE
-            or item.article_audio_error
-            or item.article_audio_poll_at is not None
-            or not item.article_audio_generated
-        ):
-            item.article_audio_generated = True
-            item.article_audio_status = EnrichmentStatus.COMPLETE
-            item.article_audio_error = ""
-            item.article_audio_poll_at = None
-            item.save(
-                update_fields=[
-                    "article_audio_status",
-                    "article_audio_error",
-                    "article_audio_poll_at",
-                    "article_audio_generated",
-                ]
-            )
-        try:
-            store_generated_article_audio(item=item, timeout=timeout)
-        except Exception:
-            logger.exception(
-                "Article audio copy failed for item %s; lazy backfill will retry", item.pk
-            )
-        return True
-
-    if not _supports_article_audio(item):
-        if (
-            item.article_audio_status != EnrichmentStatus.COMPLETE
-            or item.article_audio_error
-            or item.article_audio_poll_at is not None
-        ):
-            item.article_audio_status = EnrichmentStatus.COMPLETE
-            item.article_audio_error = ""
-            item.article_audio_poll_at = None
-            item.save(
-                update_fields=[
-                    "article_audio_status",
-                    "article_audio_error",
-                    "article_audio_poll_at",
-                ]
-            )
-        return True
-
-    if not _article_audio_source_ready(item):
-        # Only write when something changes: an unchanged save from this (possibly stale)
-        # instance would undo a concurrent `reprocess_items --hold-article-audio`.
-        if (
-            item.article_audio_status != EnrichmentStatus.PENDING
-            or item.article_audio_error
-            or item.article_audio_poll_at is not None
-        ):
-            item.article_audio_status = EnrichmentStatus.PENDING
-            item.article_audio_error = ""
-            item.article_audio_poll_at = None
-            item.save(
-                update_fields=[
-                    "article_audio_status",
-                    "article_audio_error",
-                    "article_audio_poll_at",
-                ]
-            )
-        return True
-
     captured = _item_state(
         item,
         (
@@ -616,11 +551,51 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
             "article_audio_job_id",
             "article_audio_artifact_path",
             "article_audio_status",
+            "article_audio_error",
             "article_audio_generated",
             "article_audio_poll_at",
             "processing_started_at",
         ),
     )
+    # Local fast paths carry the same generation fence as upstream results.
+    # Refresh under the write lock before either normalization or copy admission.
+    if (
+        item.has_generated_article_audio
+        or not _supports_article_audio(item)
+        or not _article_audio_source_ready(item)
+    ):
+        using = item._state.db or "default"
+        with transaction.atomic(using=using):
+            item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
+            if _item_state(item, captured) != captured:
+                return True
+            generated = item.has_generated_article_audio
+            target_status = (
+                EnrichmentStatus.COMPLETE
+                if generated or not _supports_article_audio(item)
+                else EnrichmentStatus.PENDING
+            )
+            values: dict[str, object] = {
+                "article_audio_status": target_status,
+                "article_audio_error": "",
+                "article_audio_poll_at": None,
+            }
+            if generated:
+                values["article_audio_generated"] = True
+            changed = [field for field, value in values.items() if getattr(item, field) != value]
+            if changed:
+                for field in changed:
+                    setattr(item, field, values[field])
+                item.save(update_fields=changed)
+        if generated:
+            try:
+                store_generated_article_audio(item=item, timeout=timeout)
+            except Exception:
+                logger.exception(
+                    "Article audio copy failed for item %s; lazy backfill will retry", item.pk
+                )
+        return True
+
     try:
         update = generate_item_article_audio(item=item, timeout=timeout)
     except Exception as exc:

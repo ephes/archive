@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Fence all article-audio fast-path writes and copy publication against current
+  source/text, hold, classification, job and processing-attempt state. Superseded
+  work leaves newer authority intact without publishing obsolete completion/copies.
+- Bound complete summary model requests to 64 KiB of serialized UTF-8 JSON,
+  sharing remaining space across optional metadata and excerpts with explicit
+  prefix truncation. Refuse required-context/envelope overflow before model I/O.
+
 - Reject recursively duplicated members in upstream API JSON with controlled
   invalid-JSON failures, preserving job identity and previously stored results.
   Ignore ambiguous JSON-LD script blobs independently, retaining valid metadata

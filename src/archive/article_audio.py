@@ -123,6 +123,25 @@ def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
     through the normal media deletion guard. No storage object is written until
     the download is complete.
     """
+    expected = {
+        field: getattr(item, field)
+        for field in (
+            "original_url",
+            "kind",
+            "title",
+            "short_summary",
+            "long_summary",
+            "notes",
+            "summary_status",
+            "article_audio_job_id",
+            "article_audio_artifact_path",
+            "article_audio_status",
+            "article_audio_error",
+            "article_audio_generated",
+            "article_audio_poll_at",
+            "processing_started_at",
+        )
+    }
     if item.pk:
         item.refresh_from_db(
             fields=[
@@ -194,7 +213,7 @@ def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
                     Item.objects.using(using)
                     .filter(
                         pk=item.pk,
-                        article_audio_artifact_path=item.article_audio_artifact_path,
+                        **expected,
                     )
                     .filter(
                         models.Q(article_audio_file="") | models.Q(article_audio_file__isnull=True)

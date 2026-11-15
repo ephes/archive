@@ -8,7 +8,7 @@ from datetime import date, datetime, time, timedelta
 from functools import partial
 
 from django.conf import settings
-from django.db import transaction
+from django.db import router, transaction
 from django.db.models import Case, F, Q, Value, When
 from django.utils import timezone
 
@@ -59,6 +59,37 @@ SOURCE_VERSION_FIELDS = (
 
 def _item_state(item: Item, fields) -> dict:
     return {field: deepcopy(getattr(item, field)) for field in fields}
+
+
+SUMMARY_INPUT_FIELDS = (*SOURCE_VERSION_FIELDS, "title", "notes", "source", "author", "transcript")
+TRANSCRIPT_SOURCE_FIELDS = (
+    *SOURCE_VERSION_FIELDS,
+    "archived_audio_path",
+    "archived_video_path",
+    "archived_audio_content_type",
+    "archived_audio_size_bytes",
+    "archived_video_content_type",
+    "archived_video_size_bytes",
+)
+
+
+def _result_state(item: Item, stage: str, fields) -> dict:
+    return _item_state(item, (*fields, f"{stage}_status", "processing_started_at"))
+
+
+def _current_result(item: Item, stage: str, expected: dict) -> bool:
+    """Under the row lock, retire old input without settling a newer attempt."""
+    using = item._state.db or router.db_for_write(Item, instance=item)
+    if _item_state(item, expected) == expected:
+        return True
+    status = f"{stage}_status"
+    if (
+        getattr(item, status) == expected[status]
+        and item.processing_started_at == expected["processing_started_at"]
+    ):
+        setattr(item, status, EnrichmentStatus.PENDING)
+        item.save(using=using, update_fields=[status])
+    return False
 
 
 WEEK_TOKEN_RE = re.compile(r"^(\d{4})-W(\d{2})$")
@@ -232,6 +263,7 @@ def enrich_item_metadata(
     transcription_timeout: int = 300,
     article_audio_timeout: int = 30,
 ) -> bool:
+    using = item._state.db or router.db_for_write(Item, instance=item)
     # Only resume stages acquired by this pass. Pending stages that become
     # eligible later must be acquired atomically before any external work.
     owned = {
@@ -254,47 +286,63 @@ def enrich_item_metadata(
         ("summary", enrich_item_summaries, summary_timeout),
         ("article_audio", enrich_item_article_audio, article_audio_timeout),
     )
-    for stage, enrich, budget in stages:
-        field = f"{stage}_status"
-        with transaction.atomic():
-            item.refresh_from_db(from_queryset=Item.objects.select_for_update())
-            current = getattr(item, field)
-            if current == EnrichmentStatus.PROCESSING:
-                if field not in owned or item.processing_started_at != started_at:
+    try:
+        for stage, enrich, budget in stages:
+            field = f"{stage}_status"
+            with transaction.atomic(using=using):
+                item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
+                current = getattr(item, field)
+                if current == EnrichmentStatus.PROCESSING:
+                    if field not in owned or item.processing_started_at != started_at:
+                        continue
+                elif current == EnrichmentStatus.PENDING:
+                    if item._has_processing_status() and (
+                        not owned or item.processing_started_at != started_at
+                    ):
+                        continue
+                    setattr(item, field, EnrichmentStatus.PROCESSING)
+                    item.processing_started_at = started_at
+                    item.save(using=using, update_fields=[field, "processing_started_at"])
+                    owned.add(field)
+                    started_at = item.processing_started_at
+                else:
                     continue
-            elif current == EnrichmentStatus.PENDING:
-                if item._has_processing_status() and (
-                    not owned or item.processing_started_at != started_at
-                ):
-                    continue
-                setattr(item, field, EnrichmentStatus.PROCESSING)
-                item.processing_started_at = started_at
-                item.save(update_fields=[field, "processing_started_at"])
-                owned.add(field)
-                started_at = item.processing_started_at
-            else:
-                continue
-        succeeded = enrich(item=item, timeout=budget) and succeeded
+            succeeded = enrich(item=item, timeout=budget) and succeeded
+    except Item.DoesNotExist:
+        # Only the claimed row's deletion retires the pass. Other lookup bugs and
+        # database failures still propagate to the caller.
+        if Item.objects.using(using).filter(pk=item.pk).exists():
+            raise
+        return True
+
     return succeeded
 
 
 def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
+    using = item._state.db or router.db_for_write(Item, instance=item)
     if not _summary_generation_needed(item):
-        if item.summary_status != EnrichmentStatus.COMPLETE or item.summary_error:
-            item.summary_status = EnrichmentStatus.COMPLETE
-            item.summary_error = ""
-            item.summary_retry_count = 0
-            item.summary_retry_at = None
-            item.save(
-                update_fields=[
-                    "summary_status",
-                    "summary_error",
-                    "summary_retry_count",
-                    "summary_retry_at",
-                ]
-            )
+        captured_skip = _failure_state(item, "summary")
+        with transaction.atomic(using=using):
+            item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
+            if _item_state(item, captured_skip) != captured_skip:
+                return True
+            if not _summary_generation_needed(item):
+                item.summary_status = EnrichmentStatus.COMPLETE
+                item.summary_error = ""
+                item.summary_retry_count = 0
+                item.summary_retry_at = None
+                item.save(
+                    using=using,
+                    update_fields=[
+                        "summary_status",
+                        "summary_error",
+                        "summary_retry_count",
+                        "summary_retry_at",
+                    ],
+                )
         return True
 
+    result_state = _result_state(item, "summary", SUMMARY_INPUT_FIELDS)
     failure_state = _failure_state(item, "summary")
     captured = {
         field: (getattr(item, field), getattr(item, f"{field}_generated"))
@@ -306,8 +354,10 @@ def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
         logger.exception("Summary generation failed for item %s", item.pk)
         return _mark_summary_failure(item, str(exc), expected=failure_state)
 
-    with transaction.atomic():
-        item.refresh_from_db()
+    with transaction.atomic(using=using):
+        item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
+        if not _current_result(item, "summary", result_state):
+            return True
         update_fields: list[str] = []
         if (
             (item.short_summary, item.short_summary_generated) == captured["short_summary"]
@@ -346,26 +396,26 @@ def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
         update_fields.extend(
             ["summary_status", "summary_error", "summary_retry_count", "summary_retry_at"]
         )
-        item.save(update_fields=sorted(set(update_fields)))
-        record_step_outcome(ProcessingStep.SUMMARY, succeeded=True, item_id=item.pk)
+        item.save(using=using, update_fields=sorted(set(update_fields)))
+        record_step_outcome(ProcessingStep.SUMMARY, succeeded=True, item_id=item.pk, using=using)
         return True
 
 
 def enrich_item_transcript(item: Item, timeout: int = 300) -> bool:
-    if item.has_transcript:
-        if item.transcript_status != EnrichmentStatus.COMPLETE or item.transcript_error:
-            item.transcript_status = EnrichmentStatus.COMPLETE
-            item.transcript_error = ""
-            item.save(update_fields=["transcript_status", "transcript_error"])
+    using = item._state.db or router.db_for_write(Item, instance=item)
+    if item.has_transcript or not can_transcribe_item(item):
+        captured_skip = _failure_state(item, "transcript")
+        with transaction.atomic(using=using):
+            item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
+            if _item_state(item, captured_skip) != captured_skip:
+                return True
+            if item.has_transcript or not can_transcribe_item(item):
+                item.transcript_status = EnrichmentStatus.COMPLETE
+                item.transcript_error = ""
+                item.save(using=using, update_fields=["transcript_status", "transcript_error"])
         return True
 
-    if not can_transcribe_item(item):
-        if item.transcript_status != EnrichmentStatus.COMPLETE or item.transcript_error:
-            item.transcript_status = EnrichmentStatus.COMPLETE
-            item.transcript_error = ""
-            item.save(update_fields=["transcript_status", "transcript_error"])
-        return True
-
+    result_state = _result_state(item, "transcript", TRANSCRIPT_SOURCE_FIELDS)
     failure_state = _failure_state(item, "transcript")
     captured = (item.transcript, item.transcript_generated)
     try:
@@ -374,8 +424,10 @@ def enrich_item_transcript(item: Item, timeout: int = 300) -> bool:
         logger.exception("Transcript generation failed for item %s", item.pk)
         return _mark_transcript_failure(item, str(exc), expected=failure_state)
 
-    with transaction.atomic():
-        item.refresh_from_db()
+    with transaction.atomic(using=using):
+        item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
+        if not _current_result(item, "transcript", result_state):
+            return True
         if (item.transcript, item.transcript_generated) == captured:
             item.transcript = transcript
             item.transcript_generated = True
@@ -402,12 +454,13 @@ def enrich_item_transcript(item: Item, timeout: int = 300) -> bool:
                 ]
             )
 
-        item.save(update_fields=sorted(set(update_fields)))
-        record_step_outcome(ProcessingStep.TRANSCRIPT, succeeded=True, item_id=item.pk)
+        item.save(using=using, update_fields=sorted(set(update_fields)))
+        record_step_outcome(ProcessingStep.TRANSCRIPT, succeeded=True, item_id=item.pk, using=using)
         return True
 
 
 def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
+    using = item._state.db or router.db_for_write(Item, instance=item)
     if item.has_archived_audio:
         if (
             item.media_archive_status != EnrichmentStatus.COMPLETE
@@ -420,12 +473,13 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
             item.media_archive_retry_count = 0
             item.media_archive_retry_at = None
             item.save(
+                using=using,
                 update_fields=[
                     "media_archive_status",
                     "media_archive_error",
                     "media_archive_retry_count",
                     "media_archive_retry_at",
-                ]
+                ],
             )
         return True
 
@@ -441,12 +495,13 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
             item.media_archive_retry_count = 0
             item.media_archive_retry_at = None
             item.save(
+                using=using,
                 update_fields=[
                     "media_archive_status",
                     "media_archive_error",
                     "media_archive_retry_count",
                     "media_archive_retry_at",
-                ]
+                ],
             )
         return True
 
@@ -486,7 +541,7 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
     old_values = {field: getattr(item, field) for field in published_fields}
     old_paths = item_archive_media_paths(item)
     new_paths = (archived_audio.object_name, archived_audio.source_object_name)
-    using = item._state.db or "default"
+    using = item._state.db or router.db_for_write(Item, instance=item)
     try:
         # A durable boundary prevents a caller from rolling back after publication.
         with transaction.atomic(using=using, durable=True):
@@ -503,7 +558,7 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
                 item.media_archive_error = ""
                 item.media_archive_retry_count = 0
                 item.media_archive_retry_at = None
-                item.save(update_fields=published_fields)
+                item.save(using=using, update_fields=published_fields)
                 # The reservations end in the transaction that commits the references,
                 # so the new objects are never both unreserved and unreferenced.
                 release_pending_archive_media_paths(new_paths, using=using)
@@ -534,11 +589,12 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
         except Exception:
             logger.exception("Failed to discard superseded media for item %s", item.pk)
         return True
-    record_step_outcome(health_step, succeeded=True, item_id=item.pk)
+    record_step_outcome(health_step, succeeded=True, item_id=item.pk, using=using)
     return True
 
 
 def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
+    using = item._state.db or router.db_for_write(Item, instance=item)
     captured = _item_state(
         item,
         (
@@ -564,7 +620,7 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
         or not _supports_article_audio(item)
         or not _article_audio_source_ready(item)
     ):
-        using = item._state.db or "default"
+        using = item._state.db or router.db_for_write(Item, instance=item)
         with transaction.atomic(using=using):
             item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
             if _item_state(item, captured) != captured:
@@ -586,7 +642,7 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
             if changed:
                 for field in changed:
                     setattr(item, field, values[field])
-                item.save(update_fields=changed)
+                item.save(using=using, update_fields=changed)
         if generated:
             try:
                 store_generated_article_audio(item=item, timeout=timeout)
@@ -602,8 +658,8 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
         logger.exception("Article audio generation failed for item %s", item.pk)
         return _mark_article_audio_failure(item, str(exc), expected=captured)
 
-    with transaction.atomic():
-        item.refresh_from_db(from_queryset=Item.objects.select_for_update())
+    with transaction.atomic(using=using):
+        item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
         if _item_state(item, captured) != captured:
             return True
         item.article_audio_error = ""
@@ -614,6 +670,7 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
             item.article_audio_status = EnrichmentStatus.COMPLETE
             item.article_audio_poll_at = None
             item.save(
+                using=using,
                 update_fields=[
                     "article_audio_job_id",
                     "article_audio_artifact_path",
@@ -621,25 +678,26 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
                     "article_audio_status",
                     "article_audio_error",
                     "article_audio_poll_at",
-                ]
+                ],
             )
         elif update.is_pending:
             item.article_audio_job_id = update.job_id
             item.article_audio_status = EnrichmentStatus.PENDING
             item.article_audio_poll_at = _next_article_audio_poll_at()
             item.save(
+                using=using,
                 update_fields=[
                     "article_audio_job_id",
                     "article_audio_status",
                     "article_audio_error",
                     "article_audio_poll_at",
-                ]
+                ],
             )
             return True
         else:
             return _mark_article_audio_failure(item, update.error_message, expected=captured)
 
-    record_step_outcome(ProcessingStep.ARTICLE_AUDIO, succeeded=True, item_id=item.pk)
+    record_step_outcome(ProcessingStep.ARTICLE_AUDIO, succeeded=True, item_id=item.pk, using=using)
     try:
         store_generated_article_audio(item=item, timeout=timeout)
     except Exception:
@@ -664,9 +722,11 @@ STALE_RECOVERY_BATCH_SIZE = 100
 
 def recover_stale_processing_items(*, stale_before: datetime) -> int:
     """Recover one oldest-first batch; later worker passes drain the backlog."""
-    with transaction.atomic():
+    using = router.db_for_write(Item)
+    with transaction.atomic(using=using):
         attempts = list(
-            Item.objects.select_for_update()
+            Item.objects.using(using)
+            .select_for_update()
             .filter(_processing_item_query(), processing_started_at__lte=stale_before)
             .order_by("processing_started_at", "pk")
             .values_list("pk", "processing_started_at")[:STALE_RECOVERY_BATCH_SIZE]
@@ -692,63 +752,70 @@ def _processing_item_query() -> Q:
 
 
 def _recover_processing_items(query: Q) -> int:
-    return Item.objects.filter(query).update(
-        enrichment_status=Case(
-            When(
-                enrichment_status=EnrichmentStatus.PROCESSING,
-                then=Value(EnrichmentStatus.PENDING),
+    using = router.db_for_write(Item)
+    return (
+        Item.objects.using(using)
+        .filter(query)
+        .update(
+            enrichment_status=Case(
+                When(
+                    enrichment_status=EnrichmentStatus.PROCESSING,
+                    then=Value(EnrichmentStatus.PENDING),
+                ),
+                default=F("enrichment_status"),
             ),
-            default=F("enrichment_status"),
-        ),
-        summary_status=Case(
-            When(
-                summary_status=EnrichmentStatus.PROCESSING,
-                then=Value(EnrichmentStatus.PENDING),
+            summary_status=Case(
+                When(
+                    summary_status=EnrichmentStatus.PROCESSING,
+                    then=Value(EnrichmentStatus.PENDING),
+                ),
+                default=F("summary_status"),
             ),
-            default=F("summary_status"),
-        ),
-        transcript_status=Case(
-            When(
-                transcript_status=EnrichmentStatus.PROCESSING,
-                then=Value(EnrichmentStatus.PENDING),
+            transcript_status=Case(
+                When(
+                    transcript_status=EnrichmentStatus.PROCESSING,
+                    then=Value(EnrichmentStatus.PENDING),
+                ),
+                default=F("transcript_status"),
             ),
-            default=F("transcript_status"),
-        ),
-        media_archive_status=Case(
-            When(
-                media_archive_status=EnrichmentStatus.PROCESSING,
-                then=Value(EnrichmentStatus.PENDING),
+            media_archive_status=Case(
+                When(
+                    media_archive_status=EnrichmentStatus.PROCESSING,
+                    then=Value(EnrichmentStatus.PENDING),
+                ),
+                default=F("media_archive_status"),
             ),
-            default=F("media_archive_status"),
-        ),
-        article_audio_status=Case(
-            When(
-                article_audio_status=EnrichmentStatus.PROCESSING,
-                then=Value(EnrichmentStatus.PENDING),
+            article_audio_status=Case(
+                When(
+                    article_audio_status=EnrichmentStatus.PROCESSING,
+                    then=Value(EnrichmentStatus.PENDING),
+                ),
+                default=F("article_audio_status"),
             ),
-            default=F("article_audio_status"),
-        ),
-        summary_retry_at=Case(
-            When(summary_status=EnrichmentStatus.PROCESSING, then=Value(None)),
-            default=F("summary_retry_at"),
-        ),
-        media_archive_retry_at=Case(
-            When(media_archive_status=EnrichmentStatus.PROCESSING, then=Value(None)),
-            default=F("media_archive_retry_at"),
-        ),
-        article_audio_poll_at=Case(
-            When(article_audio_status=EnrichmentStatus.PROCESSING, then=Value(None)),
-            default=F("article_audio_poll_at"),
-        ),
-        processing_started_at=Value(None),
+            summary_retry_at=Case(
+                When(summary_status=EnrichmentStatus.PROCESSING, then=Value(None)),
+                default=F("summary_retry_at"),
+            ),
+            media_archive_retry_at=Case(
+                When(media_archive_status=EnrichmentStatus.PROCESSING, then=Value(None)),
+                default=F("media_archive_retry_at"),
+            ),
+            article_audio_poll_at=Case(
+                When(article_audio_status=EnrichmentStatus.PROCESSING, then=Value(None)),
+                default=F("article_audio_poll_at"),
+            ),
+            processing_started_at=Value(None),
+        )
     )
 
 
 def claim_pending_item(*, exclude_ids: set[int] | None = None) -> Item | None:
+    using = router.db_for_write(Item)
     now = timezone.now()
-    with transaction.atomic():
+    with transaction.atomic(using=using):
         queryset = (
-            Item.objects.select_for_update()
+            Item.objects.using(using)
+            .select_for_update()
             .exclude(_processing_item_query())
             .filter(
                 Q(enrichment_status=EnrichmentStatus.PENDING)
@@ -799,13 +866,13 @@ def claim_pending_item(*, exclude_ids: set[int] | None = None) -> Item | None:
                 ("transcript", _claimable_transcript_query()),
                 ("article_audio", _claimable_article_audio_query(now)),
             ):
-                if Item.objects.filter(pk=item.pk).filter(query).exists():
+                if Item.objects.using(using).filter(pk=item.pk).filter(query).exists():
                     setattr(item, f"{stage}_status", EnrichmentStatus.PROCESSING)
                     setattr(item, f"{stage}_error", "")
                     update_fields.extend([f"{stage}_status", f"{stage}_error"])
                     break
         if update_fields:
-            item.save(update_fields=sorted(set(update_fields)))
+            item.save(using=using, update_fields=sorted(set(update_fields)))
     return item
 
 
@@ -866,15 +933,19 @@ def _summary_generation_needed(item: Item) -> bool:
 
 
 def _enrich_item_metadata_fields(item: Item, timeout: int = 15) -> bool:
+    using = item._state.db or router.db_for_write(Item, instance=item)
+    captured = _failure_state(item, "enrichment")
     try:
         metadata = extract_metadata_from_url(item.original_url, timeout=timeout)
     except Exception as exc:
         logger.error("Metadata extraction failed for item %s (%s)", item.pk, type(exc).__name__)
-        record_step_outcome(ProcessingStep.METADATA, succeeded=False, item_id=item.pk)
-        return _mark_metadata_failure(item, str(exc))
+        return _mark_metadata_failure(item, str(exc), expected=captured)
 
-    with transaction.atomic():
-        item.refresh_from_db()
+    with transaction.atomic(using=using):
+        item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
+        identity = ("original_url", "enrichment_status", "processing_started_at")
+        if not _current_result(item, "enrichment", {key: captured[key] for key in identity}):
+            return True
         update_fields: list[str] = []
         if not item.title and metadata.title:
             item.title = metadata.title
@@ -932,22 +1003,36 @@ def _enrich_item_metadata_fields(item: Item, timeout: int = 15) -> bool:
         _refresh_media_archive_state(item, update_fields)
         _refresh_article_audio_state(item, update_fields)
         update_fields.extend(["enrichment_status", "enrichment_error"])
-        item.save(update_fields=sorted(set(update_fields)))
-        record_step_outcome(ProcessingStep.METADATA, succeeded=True, item_id=item.pk)
+        item.save(using=using, update_fields=sorted(set(update_fields)))
+        record_step_outcome(ProcessingStep.METADATA, succeeded=True, item_id=item.pk, using=using)
         return True
 
 
-def _mark_metadata_failure(item: Item, error_message: str) -> bool:
-    item.enrichment_error = error_message
-    if item.has_required_feed_metadata:
-        item.enrichment_status = EnrichmentStatus.COMPLETE
-    else:
-        item.enrichment_status = EnrichmentStatus.FAILED
-    item.save(update_fields=["enrichment_status", "enrichment_error"])
-    return False
+def _mark_metadata_failure(item: Item, error_message: str, *, expected: dict) -> bool:
+    using = item._state.db or router.db_for_write(Item, instance=item)
+    with transaction.atomic(using=using):
+        if not _refresh_current_failure(item, "enrichment", expected):
+            # Changed inputs retire this failure; requeue the unchanged attempt
+            # like the success path so the stage is not left in PROCESSING.
+            if (
+                item.enrichment_status == expected["enrichment_status"]
+                and item.processing_started_at == expected["processing_started_at"]
+            ):
+                item.enrichment_status = EnrichmentStatus.PENDING
+                item.save(using=using, update_fields=["enrichment_status"])
+            return True
+        item.enrichment_error = error_message
+        if item.has_required_feed_metadata:
+            item.enrichment_status = EnrichmentStatus.COMPLETE
+        else:
+            item.enrichment_status = EnrichmentStatus.FAILED
+        item.save(using=using, update_fields=["enrichment_status", "enrichment_error"])
+        record_step_outcome(ProcessingStep.METADATA, succeeded=False, item_id=item.pk, using=using)
+        return False
 
 
 _FAILURE_FIELDS = {
+    "enrichment": ("title", "source", "author", "original_published_at"),
     "summary": (
         "title",
         "notes",
@@ -1008,10 +1093,11 @@ def _failure_state(item: Item, stage: str) -> dict:
 
 def _refresh_current_failure(item: Item, stage: str, expected: dict) -> bool:
     """Called inside the failure transaction; preserve newer work and edits."""
+    using = item._state.db or router.db_for_write(Item, instance=item)
     fields = (*SOURCE_VERSION_FIELDS, *_FAILURE_FIELDS[stage])
     expected_status = expected[f"{stage}_status"]
     expected_started_at = expected["processing_started_at"]
-    item.refresh_from_db(from_queryset=Item.objects.select_for_update())
+    item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
     current_status = getattr(item, f"{stage}_status")
     if _item_state(item, fields) != {field: expected[field] for field in fields}:
         return False
@@ -1022,86 +1108,99 @@ def _refresh_current_failure(item: Item, stage: str, expected: dict) -> bool:
     return True
 
 
-@transaction.atomic
 def _mark_summary_failure(item: Item, error_message: str, *, expected: dict) -> bool:
-    if not _refresh_current_failure(item, "summary", expected):
-        return True
-    record_step_outcome(ProcessingStep.SUMMARY, succeeded=False, item_id=item.pk)
-    item.summary_error = error_message
-    item.summary_retry_count += 1
-    if _has_generated_summaries(item):
-        item.summary_status = EnrichmentStatus.COMPLETE
-        item.summary_retry_count = 0
-        item.summary_retry_at = None
-    else:
-        item.summary_status = EnrichmentStatus.FAILED
-        item.summary_retry_at = _next_summary_retry_at(item.summary_retry_count)
-    item.save(
-        update_fields=[
-            "summary_status",
-            "summary_error",
-            "summary_retry_count",
-            "summary_retry_at",
-        ]
-    )
-    return False
+    using = item._state.db or router.db_for_write(Item, instance=item)
+    with transaction.atomic(using=using):
+        if not _refresh_current_failure(item, "summary", expected):
+            return True
+        record_step_outcome(ProcessingStep.SUMMARY, succeeded=False, item_id=item.pk, using=using)
+        item.summary_error = error_message
+        item.summary_retry_count += 1
+        if _has_generated_summaries(item):
+            item.summary_status = EnrichmentStatus.COMPLETE
+            item.summary_retry_count = 0
+            item.summary_retry_at = None
+        else:
+            item.summary_status = EnrichmentStatus.FAILED
+            item.summary_retry_at = _next_summary_retry_at(item.summary_retry_count)
+        item.save(
+            using=using,
+            update_fields=[
+                "summary_status",
+                "summary_error",
+                "summary_retry_count",
+                "summary_retry_at",
+            ],
+        )
+        return False
 
 
-@transaction.atomic
 def _mark_transcript_failure(item: Item, error_message: str, *, expected: dict) -> bool:
-    if not _refresh_current_failure(item, "transcript", expected):
-        return True
-    record_step_outcome(ProcessingStep.TRANSCRIPT, succeeded=False, item_id=item.pk)
-    item.transcript_error = error_message
-    if item.has_transcript:
-        item.transcript_status = EnrichmentStatus.COMPLETE
-    else:
-        item.transcript_status = EnrichmentStatus.FAILED
-    item.save(update_fields=["transcript_status", "transcript_error"])
-    return False
+    using = item._state.db or router.db_for_write(Item, instance=item)
+    with transaction.atomic(using=using):
+        if not _refresh_current_failure(item, "transcript", expected):
+            return True
+        record_step_outcome(
+            ProcessingStep.TRANSCRIPT, succeeded=False, item_id=item.pk, using=using
+        )
+        item.transcript_error = error_message
+        if item.has_transcript:
+            item.transcript_status = EnrichmentStatus.COMPLETE
+        else:
+            item.transcript_status = EnrichmentStatus.FAILED
+        item.save(using=using, update_fields=["transcript_status", "transcript_error"])
+        return False
 
 
-@transaction.atomic
 def _mark_media_archive_failure(item: Item, error_message: str, *, expected: dict) -> bool:
-    if not _refresh_current_failure(item, "media_archive", expected):
-        return True
-    record_step_outcome(media_archive_step(item), succeeded=False, item_id=item.pk)
-    item.media_archive_error = error_message
-    item.media_archive_retry_count += 1
-    if item.has_archived_audio:
-        item.media_archive_status = EnrichmentStatus.COMPLETE
-        item.media_archive_retry_count = 0
-        item.media_archive_retry_at = None
-    else:
-        item.media_archive_status = EnrichmentStatus.FAILED
-        item.media_archive_retry_at = _next_media_archive_retry_at(item.media_archive_retry_count)
-    item.save(
-        update_fields=[
-            "media_archive_status",
-            "media_archive_error",
-            "media_archive_retry_count",
-            "media_archive_retry_at",
-        ]
-    )
-    return False
+    using = item._state.db or router.db_for_write(Item, instance=item)
+    with transaction.atomic(using=using):
+        if not _refresh_current_failure(item, "media_archive", expected):
+            return True
+        record_step_outcome(media_archive_step(item), succeeded=False, item_id=item.pk, using=using)
+        item.media_archive_error = error_message
+        item.media_archive_retry_count += 1
+        if item.has_archived_audio:
+            item.media_archive_status = EnrichmentStatus.COMPLETE
+            item.media_archive_retry_count = 0
+            item.media_archive_retry_at = None
+        else:
+            item.media_archive_status = EnrichmentStatus.FAILED
+            item.media_archive_retry_at = _next_media_archive_retry_at(
+                item.media_archive_retry_count
+            )
+        item.save(
+            using=using,
+            update_fields=[
+                "media_archive_status",
+                "media_archive_error",
+                "media_archive_retry_count",
+                "media_archive_retry_at",
+            ],
+        )
+        return False
 
 
-@transaction.atomic
 def _mark_article_audio_failure(item: Item, error_message: str, *, expected: dict) -> bool:
-    if not _refresh_current_failure(item, "article_audio", expected):
-        return True
-    record_step_outcome(ProcessingStep.ARTICLE_AUDIO, succeeded=False, item_id=item.pk)
-    item.article_audio_error = error_message
-    item.article_audio_status = EnrichmentStatus.FAILED
-    item.article_audio_poll_at = None
-    item.save(
-        update_fields=[
-            "article_audio_status",
-            "article_audio_error",
-            "article_audio_poll_at",
-        ]
-    )
-    return False
+    using = item._state.db or router.db_for_write(Item, instance=item)
+    with transaction.atomic(using=using):
+        if not _refresh_current_failure(item, "article_audio", expected):
+            return True
+        record_step_outcome(
+            ProcessingStep.ARTICLE_AUDIO, succeeded=False, item_id=item.pk, using=using
+        )
+        item.article_audio_error = error_message
+        item.article_audio_status = EnrichmentStatus.FAILED
+        item.article_audio_poll_at = None
+        item.save(
+            using=using,
+            update_fields=[
+                "article_audio_status",
+                "article_audio_error",
+                "article_audio_poll_at",
+            ],
+        )
+        return False
 
 
 def _next_summary_retry_at(retry_count: int) -> datetime | None:

@@ -8,6 +8,7 @@ from threading import Event
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
+from archive.models import Item
 from archive.services import (
     claim_pending_item,
     enrich_item_metadata,
@@ -27,6 +28,7 @@ class Command(BaseCommand):
     )
 
     DEFAULT_ARTICLE_AUDIO_TIMEOUT = 30
+    MAX_NUMERIC_OPTION = 2**31 - 1
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -90,10 +92,10 @@ class Command(BaseCommand):
         self._shutdown_requested.set()
 
     def handle(self, *args, **options) -> None:
+        stale_processing_after = self._validate_options(options)
         signal.signal(signal.SIGTERM, self._request_shutdown)
         signal.signal(signal.SIGINT, self._request_shutdown)
 
-        stale_processing_after = self._stale_processing_after_seconds(options)
         while not self._shutdown_requested.is_set():
             recovered = recover_stale_processing_items(
                 stale_before=timezone.now() - timedelta(seconds=stale_processing_after)
@@ -126,6 +128,11 @@ class Command(BaseCommand):
                             media_archive_timeout=options["media_archive_timeout"],
                             transcription_timeout=options["transcription_timeout"],
                         )
+                except Item.DoesNotExist:
+                    if Item.objects.using(item._state.db).filter(pk=item.pk).exists():
+                        raise
+                    self.stdout.write(f"Retired deleted item {item.pk}: enrichment pass.")
+                    continue
                 except ItemProcessingStalled:
                     unsuccessful += 1
                     timed_out_in_pass = True
@@ -147,15 +154,19 @@ class Command(BaseCommand):
                             "remained to recover."
                         )
                     continue
-                item.refresh_from_db(
-                    fields=[
-                        "enrichment_status",
-                        "transcript_status",
-                        "media_archive_status",
-                        "summary_status",
-                        "article_audio_status",
-                    ]
-                )
+                try:
+                    item.refresh_from_db(
+                        fields=[
+                            "enrichment_status",
+                            "transcript_status",
+                            "media_archive_status",
+                            "summary_status",
+                            "article_audio_status",
+                        ]
+                    )
+                except Item.DoesNotExist:
+                    self.stdout.write(f"Retired deleted item {item.pk}: enrichment pass.")
+                    continue
                 if success:
                     self.stdout.write(f"Completed item {item.pk}: enrichment pass.")
                 else:
@@ -177,6 +188,33 @@ class Command(BaseCommand):
                 self._shutdown_requested.wait(options["interval"])
 
         self.stdout.write("Archive enrichment worker exiting cleanly.")
+
+    def _validate_options(self, options) -> int:
+        fields = [
+            "limit",
+            "timeout",
+            "summary_timeout",
+            "transcription_timeout",
+            "media_archive_timeout",
+        ]
+        if not options["once"]:
+            fields.append("interval")
+        if options["stale_processing_after"] is not None:
+            fields.append("stale_processing_after")
+        for field in fields:
+            self._validate_positive_option(field, options[field])
+        seconds = self._stale_processing_after_seconds(options)
+        self._validate_positive_option("stale_processing_after", seconds)
+        return seconds
+
+    def _validate_positive_option(self, field: str, value: int) -> None:
+        # A portable signed-32-bit seconds envelope fits setitimer, timedelta
+        # and Event.wait without platform overflow. Check before claiming work.
+        if type(value) is not int or not 1 <= value <= self.MAX_NUMERIC_OPTION:
+            raise CommandError(
+                f"--{field.replace('_', '-')} must be an integer "
+                f"from 1 to {self.MAX_NUMERIC_OPTION}."
+            )
 
     def _stale_processing_after_seconds(self, options) -> int:
         explicit = options["stale_processing_after"]

@@ -24,6 +24,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 
 from archive.json_objects import unique_json_object
+from archive.models import Item
 
 AUDIO_SUFFIXES = (".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav")
 VIDEO_SUFFIXES = (".mp4", ".m4v", ".mov", ".webm", ".m3u8")
@@ -82,6 +83,12 @@ class ExtractedMetadata:
     audio_url: str = ""
     kind_hint: str = ""
     media_candidates: tuple[ExtractedMediaCandidate, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Display metadata is a Unicode prefix, never a truncated media identity.
+        for field in ("title", "source", "author"):
+            limit = Item._meta.get_field(field).max_length
+            object.__setattr__(self, field, getattr(self, field)[:limit])
 
 
 @dataclass(frozen=True)

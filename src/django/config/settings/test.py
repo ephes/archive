@@ -1,4 +1,5 @@
 import tempfile
+from copy import deepcopy
 from pathlib import Path
 
 from config.settings.base import *  # noqa: F403
@@ -27,3 +28,7 @@ STORAGES = {
         "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
     },
 }
+
+# Independent alias for runtime routing/transaction regression tests.
+DATABASES["secondary"] = deepcopy(DATABASES["default"])  # noqa: F405
+DATABASES["secondary"]["NAME"] = ":memory:"  # noqa: F405

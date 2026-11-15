@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Fence summary/transcript success against source inputs and processing attempts;
+  requeue changed inputs without settling newer work, preserving manual edits.
+- Bind metadata success and failure to the fetched URL/current attempt, preserving
+  newer results and suppressing obsolete processing-health events.
+- Use the owning/write database for runtime capture, worker stage transactions,
+  claims, recovery and outcome writes; guard summary/transcript no-work completion
+  against current source, output ownership and attempt state.
+- Retire concurrently deleted worker claims, discard owned unpublished media and
+  continue processing siblings without masking unrelated database failures.
+  Limit extracted display metadata to model character widths, retaining manual values.
+- Validate worker batch/timer/poll options before handlers, recovery or claims;
+  cover real graceful SIGTERM, committed output and restart with synthetic SQLite.
+
 - Fence all article-audio fast-path writes and copy publication against current
   source/text, hold, classification, job and processing-attempt state. Superseded
   work leaves newer authority intact without publishing obsolete completion/copies.

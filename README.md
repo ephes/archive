@@ -530,6 +530,44 @@ It prints the processed count, then exits nonzero if any attempted item failed o
 An empty pass or a pass whose attempts all succeed exits zero. Continuous mode keeps polling
 and retains its existing retry behavior.
 
+Worker numeric options (`--limit`, stage timeouts and `--stale-processing-after`)
+accept integers from 1 through 2,147,483,647. Continuous mode requires `--interval`
+in the same range; `--once` ignores the idle interval, including zero. The derived
+stale-processing budget must also fit this portable timer range. Invalid options
+raise a command error before signal handlers, recovery or claims change state.
+SIGTERM/SIGINT finish the current item and exit without another claim. The real
+signal/subprocess regression uses synthetic file-backed SQLite and a controlled
+summary barrier: `uv run pytest tests/test_worker_graceful_stop.py`.
+
+A concurrently deleted claimed item is retired without an obsolete completion or
+failure event. The worker continues with independent items; unpublished reserved
+media are discarded through the existing reference guards. Retirement catches only
+missing-item errors after verifying that the claimed row is gone; unrelated
+orchestration/database errors retain their normal error handling.
+
+Capture resolves the write database through the Item instance/router before
+opening its transaction; deduplication and insertion use that same alias. Worker
+stage locks, reads, saves and outcome events use the claimed Item's owning alias.
+Claim and recovery queries use the Item write router. Runtime routing regressions
+use an independent SQLite alias with default-database sentinel rows:
+`uv run pytest tests/test_runtime_databases.py`.
+
+Summary publication checks the original URL, kind/classification, source media,
+title, source, author, notes, transcript and processing attempt under the row lock.
+Transcription publication checks the source media (including archived object identity)
+and attempt. Metadata publication checks the fetched URL and attempt. Changed inputs
+retire the old result and requeue only the unchanged attempt; a newer claim or settled
+stage is left intact. Superseded results emit no health success. Summary fields keep
+their individual manual-edit protections. Summary/transcript no-work completion also
+reloads and validates current source, output ownership and attempt before settling.
+Metadata failures use current-row source/attempt checks and emit a failure event only
+when accepted; a late old failure cannot downgrade newer work.
+
+Extracted display metadata is truncated to a Unicode prefix using the Item model
+limits: title 500 characters, source and author 255 each. This policy applies to
+HTML and structured/provider metadata before publication. Existing nonempty manual
+values remain unchanged. Media URLs/identities are never truncated by this policy.
+
 Quote classification is intentionally external to Archive. Archive owns storage
 and exposes the authenticated item PATCH API; Daybook/macOS runners decide when
 to mark an item as `kind=quote`.

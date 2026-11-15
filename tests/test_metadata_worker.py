@@ -98,7 +98,7 @@ def test_continuous_worker_keeps_running_after_failure(monkeypatch):
 
     monkeypatch.setattr(worker, "claim_pending_item", claim)
     monkeypatch.setattr(worker, "enrich_item_metadata", lambda **kwargs: False)
-    call_command(command, limit=1, interval=0)
+    call_command(command, limit=1, interval=1)
     assert len(claims) == 2
 
 

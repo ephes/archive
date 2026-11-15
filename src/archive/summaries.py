@@ -29,6 +29,8 @@ MAX_LONG_SUMMARY_CHARS = 8_000
 MAX_SUMMARY_TAGS = 8
 MAX_SUMMARY_TAG_CHARS = 64
 
+MAX_SUMMARY_REQUEST_BYTES = 64 * 1024
+
 MAX_SUMMARY_SOURCE_BYTES = 1024 * 1024
 MAX_SUMMARY_INPUT_CHARS = 12_000
 MAX_ARTICLE_AUDIO_SOURCE_CHARS = 100_000
@@ -294,24 +296,53 @@ def _build_summary_prompt(item: Item, source: SummarySource) -> str:
         "",
         f"Original URL: {item.original_url}",
         f"Kind: {item.kind}",
-        f"Current title: {item.title or '(missing)'}",
-        f"Source: {item.source or '(missing)'}",
-        f"Author: {item.author or '(missing)'}",
-        f"Shared notes: {item.notes or '(missing)'}",
-        f"Page description: {source.meta_description or '(missing)'}",
-        "",
-        "Transcript:",
-        transcript_excerpt or "(missing)",
-        "",
-        "Extracted source text:",
-        source_excerpt or "(missing)",
     ]
+    optional_fields = [
+        ("Current title: ", item.title),
+        ("Source: ", item.source),
+        ("Author: ", item.author),
+        ("Shared notes: ", item.notes),
+        ("Page description: ", source.meta_description),
+        ("\nTranscript:\n", transcript_excerpt),
+        ("\nExtracted source text:\n", source_excerpt),
+    ]
+    # Reserve instructions, URL, kind, labels, model and the entire wire envelope.
+    # Share remaining serialized bytes across optional fields, carrying unused
+    # space forward so large metadata cannot consume the transcript/source share.
+    sections.extend(label for label, _ in optional_fields)
+    remaining = MAX_SUMMARY_REQUEST_BYTES - len(_summary_request_body("\n".join(sections)))
+    if remaining < 0:
+        raise SummaryGenerationError("Summary request exceeded 64 KiB limit")
+    first_optional = len(sections) - len(optional_fields)
+    for index, (_, value) in enumerate(optional_fields):
+        allowance = remaining // (len(optional_fields) - index)
+        text = _truncate_prompt_value(value or "(missing)", max_bytes=allowance)
+        sections[first_optional + index] += text
+        remaining -= len(json.dumps(text, ensure_ascii=False).encode("utf-8")) - 2
     return "\n".join(sections)
 
 
-def _request_summary(prompt: str, timeout: int) -> str:
-    base_url = settings.ARCHIVE_SUMMARY_API_BASE.rstrip("/")
-    request_body = json.dumps(
+def _truncate_prompt_value(value: str, *, max_bytes: int) -> str:
+    # JSON escaping counts too; prefixes end only at Unicode character boundaries.
+    bounded = value[:max_bytes]
+    if (
+        len(value) <= max_bytes
+        and len(json.dumps(bounded, ensure_ascii=False).encode()) - 2 <= max_bytes
+    ):
+        return value
+    low, high = 0, len(bounded)
+    while low < high:
+        middle = (low + high + 1) // 2
+        size = len(json.dumps(bounded[:middle] + "…", ensure_ascii=False).encode()) - 2
+        if size <= max_bytes:
+            low = middle
+        else:
+            high = middle - 1
+    return bounded[:low] + "…" if max_bytes >= 3 else ""
+
+
+def _summary_request_body(prompt: str) -> bytes:
+    return json.dumps(
         {
             "model": settings.ARCHIVE_SUMMARY_MODEL,
             "messages": [
@@ -326,8 +357,16 @@ def _request_summary(prompt: str, timeout: int) -> str:
             ],
             "response_format": {"type": "json_object"},
             "temperature": 0.2,
-        }
+        },
+        ensure_ascii=False,
     ).encode("utf-8")
+
+
+def _request_summary(prompt: str, timeout: int) -> str:
+    base_url = settings.ARCHIVE_SUMMARY_API_BASE.rstrip("/")
+    request_body = _summary_request_body(prompt)
+    if len(request_body) > MAX_SUMMARY_REQUEST_BYTES:
+        raise SummaryGenerationError("Summary request exceeded 64 KiB limit")
     request = Request(
         f"{base_url}/chat/completions",
         data=request_body,

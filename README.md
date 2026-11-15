@@ -483,6 +483,16 @@ re-reads the current item in a short SQLite IMMEDIATE transaction and keeps fiel
 whose value or generated ownership flag changed during generation. Completion and
 summary refresh decisions use the retained current values, preserving manual edits.
 
+Article-audio local fast paths (existing artifact, unsupported kind, or source not
+ready) use the same current-state fence as synthesis results. Before normalizing
+status or admitting a stored copy, they lock and refresh the row and compare its
+source, text, summary state, job/artifact, audio state/error/poll time and processing
+attempt with the observed generation. A superseded call refreshes its instance and
+returns without writes, a copy, synthesis or a health success event. This preserves
+newer holds, reclassification and replacement jobs. Copy publication also checks
+that authority after downloading; a superseded upload is discarded through the
+reservation/reference guards. Network and storage work remain outside this lock.
+
 All app settings (local, production, and test) inherit SQLite `transaction_mode: "IMMEDIATE"`
 and a five-second busy timeout from the base settings. Each outer `transaction.atomic()`
 starts with `BEGIN IMMEDIATE`: writers queue for the lock before reading instead of failing
@@ -1189,6 +1199,25 @@ No upstream request identifiers are currently retained in these diagnostics.
 Operators should use the stage, item ID, status and category to investigate in the
 upstream service through their existing authorized access. Existing historical
 error records are not rewritten by this change.
+
+### Summary request limits
+
+Each summary model request has a fixed 64 KiB (65,536-byte) UTF-8 JSON body limit.
+It includes the model identifier, system message, instructions, all field labels,
+JSON escaping and the complete user prompt. Instructions, original URL and kind
+are required and never truncated. If these plus the request envelope cannot fit,
+generation fails before any model call, retaining existing results and using the
+normal summary retry policy. The final serialized body is checked again before
+network I/O; there is no extra model call to shorten input.
+
+Remaining bytes are shared across title, source, author, notes, page description,
+transcript and extracted source, in that order. Each field receives an equal share
+of the remaining budget; unused bytes carry forward to later fields. Oversized
+fields retain a Unicode-character-aligned prefix plus `…` (or empty text if even
+the marker cannot fit). Ordinary content within its share is unchanged. Existing
+transcript/source excerpt character caps still apply before this byte budget.
+Stored operator text is unchanged; metadata cannot consume the later transcript
+and source shares. This limits request bytes rather than model tokens or price.
 
 ### Generated summary text
 

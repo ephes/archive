@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any
 
-from django.db import connection, transaction
+from django.db import connection, router, transaction
 from django.db.models import Count
 from django.utils import timezone
 
@@ -50,11 +50,18 @@ def record_step_outcome(
     succeeded: bool,
     item_id: int | None,
     now: datetime | None = None,
+    using: str | None = None,
 ) -> None:
     """Record one attempted step run; never raises into the processing path."""
 
     try:
-        _record_step_outcome(step, succeeded=succeeded, item_id=item_id, now=now)
+        _record_step_outcome(
+            step,
+            succeeded=succeeded,
+            item_id=item_id,
+            now=now,
+            using=using or router.db_for_write(ProcessingStepState),
+        )
     except Exception:
         logger.exception("Could not record processing health for step %s", step)
 
@@ -65,9 +72,12 @@ def _record_step_outcome(
     succeeded: bool,
     item_id: int | None,
     now: datetime | None,
+    using: str,
 ) -> None:
-    with transaction.atomic():
-        state, _ = ProcessingStepState.objects.select_for_update().get_or_create(step=step)
+    with transaction.atomic(using=using):
+        state, _ = (
+            ProcessingStepState.objects.using(using).select_for_update().get_or_create(step=step)
+        )
         # Stamp only after acquiring the write lock, so ordinary observations cannot reorder.
         occurred_at = now or timezone.now()
         watermark = max(
@@ -80,7 +90,7 @@ def _record_step_outcome(
         if accepted and succeeded:
             state.last_success_at = occurred_at
             state.failing_since = None
-            ProcessingFailureItem.objects.filter(step=step).delete()
+            ProcessingFailureItem.objects.using(using).filter(step=step).delete()
         elif accepted:
             state.last_failure_at = occurred_at
             if occurred_at == state.last_success_at:
@@ -89,22 +99,23 @@ def _record_step_outcome(
             elif state.failing_since is None:
                 state.failing_since = occurred_at
             if item_id is not None and occurred_at != state.last_success_at:
-                ProcessingFailureItem.objects.get_or_create(step=step, item_id=item_id)
-        state.save()
-        ProcessingEvent.objects.create(
+                ProcessingFailureItem.objects.using(using).get_or_create(step=step, item_id=item_id)
+        state.save(using=using)
+        ProcessingEvent.objects.using(using).create(
             step=step, succeeded=succeeded, item_id=item_id, occurred_at=occurred_at
         )
-        _prune_events(cutoff=occurred_at - EVENT_RETENTION)
+        _prune_events(cutoff=occurred_at - EVENT_RETENTION, using=using)
 
 
-def _prune_events(*, cutoff: datetime) -> None:
+def _prune_events(*, cutoff: datetime, using: str = "default") -> None:
     """Prune old attempts; exact streak membership lives independently of retries."""
     expired = (
-        ProcessingEvent.objects.filter(occurred_at__lt=cutoff)
+        ProcessingEvent.objects.using(using)
+        .filter(occurred_at__lt=cutoff)
         .order_by("occurred_at", "pk")
         .values("pk")[:EVENT_PRUNE_BATCH_SIZE]
     )
-    ProcessingEvent.objects.filter(pk__in=expired).delete()
+    ProcessingEvent.objects.using(using).filter(pk__in=expired).delete()
 
 
 def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:

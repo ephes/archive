@@ -3,7 +3,7 @@
 from datetime import timedelta
 
 from django.conf import settings
-from django.db import transaction
+from django.db import router, transaction
 from django.utils import timezone
 
 from archive.capture_config import capture_dedupe_seconds
@@ -22,12 +22,14 @@ def capture_item(item: Item) -> tuple[Item, bool]:
     if item.pk is not None:
         raise ValueError("capture_item requires an unsaved item")
     seconds = capture_dedupe_seconds(settings.ARCHIVE_CAPTURE_DEDUPE_SECONDS)
-    with transaction.atomic():
+    using = item._state.db or router.db_for_write(Item, instance=item)
+    with transaction.atomic(using=using):
         if seconds > 0:
             cutoff = timezone.now() - timedelta(seconds=seconds)
             key = normalize_capture_url(item.original_url)
             candidates = (
-                Item.objects.filter(
+                Item.objects.using(using)
+                .filter(
                     capture_url_digest=capture_url_digest(item.original_url), shared_at__gte=cutoff
                 )
                 .order_by("-shared_at", "-pk")
@@ -35,7 +37,7 @@ def capture_item(item: Item) -> tuple[Item, bool]:
             )
             for pk, url in candidates.iterator():
                 if normalize_capture_url(url) == key:
-                    return Item.objects.get(pk=pk), False
+                    return Item.objects.using(using).get(pk=pk), False
         prepare_item_for_enrichment(item)
-        item.save()
+        item.save(using=using)
         return item, True

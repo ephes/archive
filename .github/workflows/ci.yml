@@ -6,8 +6,6 @@ name: CI
 # Python 3.12 matches the version the archive_deploy role installs in production.
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
 
 permissions:

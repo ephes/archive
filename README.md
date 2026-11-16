@@ -568,6 +568,14 @@ limits: title 500 characters, source and author 255 each. This policy applies to
 HTML and structured/provider metadata before publication. Existing nonempty manual
 values remain unchanged. Media URLs/identities are never truncated by this policy.
 
+Publication dates are optional hints. Candidates are tried in order: HTML
+`article:published_time`, `og:published_time`, `date`, `pubdate`, then the first
+JSON-LD `datePublished`/`dateCreated`/`uploadDate`. Each value is read as ISO
+datetime, ISO date (default-timezone midnight), then RFC 2822. Impossible values
+(`2026-02-31`, hour 25, an offset outside the UTC range) only disqualify that
+candidate. If no candidate is valid, no date is recorded; title, media and other
+metadata are still extracted.
+
 Quote classification is intentionally external to Archive. Archive owns storage
 and exposes the authenticated item PATCH API; Daybook/macOS runners decide when
 to mark an item as `kind=quote`.

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep owned media-command leaders unreaped until the final process-group signal,
+  preventing PID/group reuse during retirement; bound every final reap wait.
+
 - Batch migration `0018` rollback membership lookups and missing representative
   event inserts, preserving active distinct failure counts, existing events and
   `failing_since` on the selected database without per-item database queries.

@@ -1088,11 +1088,15 @@ owned temporary files, and preserves existing archived media for retry.
 
 FFmpeg and yt-dlp run in owned POSIX sessions. Every return path, including a
 successful wrapper exit, retires the process group with TERM followed after at
-most 0.2 seconds by KILL, and reaps the direct child before temporary-directory
-cleanup. Wrappers and their children must remain in that session; deliberately
+most 0.2 seconds by KILL, and reaps the direct child with a bounded one-second
+wait before temporary-directory cleanup. Exit observation does not reap the
+leader: its PID reserves the process-group identity through the final signal,
+preventing signals from reaching a recycled group. This uses POSIX `waitid` with
+`WNOWAIT`, or process `kqueue` events on macOS Python versions without `waitid`.
+Wrappers and their children must remain in that session; deliberately
 detached processes are not supported. Cleanup escalation can add up to 0.2 seconds
-to the execution deadline. Both commands discard diagnostic text under the same
-stream budgets. YouTube download failures remain retryable under the existing
+plus up to one second for reaping to the execution deadline. Both commands discard
+diagnostic text under the same stream budgets. YouTube download failures remain retryable under the existing
 media retry policy and do not replace previously archived media.
 
 Invariant: an archive media object is deleted only after it has been verified,

@@ -2,9 +2,11 @@
 
 import os
 import signal
+import subprocess
 import sys
 from pathlib import Path
 from time import monotonic, sleep
+from types import SimpleNamespace
 
 import pytest
 
@@ -109,3 +111,86 @@ def test_cleanup_failure_keeps_primary_extraction_error(monkeypatch):
         media_process.run_media_command([sys.executable, "-I", "-c", "exit(1)"], timeout=2)
     assert str(caught.value) == "failed"
     assert caught.value.__notes__ == ["Media process cleanup failed"]
+
+
+@pytest.mark.parametrize("ending", ["success", "failure", "timeout"])
+def test_group_identity_stays_reserved_until_last_signal(ending, monkeypatch):
+    from archive import media_process
+
+    events = []
+    clock = 0.0
+
+    def now():
+        nonlocal clock
+        clock += 0.05
+        return clock
+
+    class Process:
+        pid = 12345
+        returncode = None
+
+        def __init__(self, *args, **kwargs):
+            streams = []
+            for _ in range(2):
+                reader, writer = os.pipe()
+                os.close(writer)
+                streams.append(os.fdopen(reader, "rb"))
+            self.stdout, self.stderr = streams
+
+        def poll(self):
+            if ending != "timeout" or signal.SIGTERM in events:
+                self.wait()
+            return self.returncode
+
+        def wait(self, timeout=None):
+            # Reaping makes the numeric PID/PGID available to another owner.
+            events.append("reap")
+            self.returncode = 1 if ending == "failure" else 0
+            return self.returncode
+
+    def observe(idtype, pid, options):
+        assert (idtype, pid) == (os.P_PID, Process.pid)
+        assert options == os.WEXITED | os.WNOHANG | os.WNOWAIT
+        events.append("observe")
+        if ending == "timeout":
+            return None
+        return SimpleNamespace(si_status=1 if ending == "failure" else 0, si_code=os.CLD_EXITED)
+
+    def signal_group(pid, sig):
+        assert pid == Process.pid
+        assert "reap" not in events, "signal reached a recycled process group"
+        events.append(sig)
+
+    monkeypatch.setattr(media_process.subprocess, "Popen", Process)
+    monkeypatch.setattr(media_process.os, "waitid", observe, raising=False)
+    monkeypatch.setattr(media_process.os, "killpg", signal_group)
+    monkeypatch.setattr(media_process, "monotonic", now)
+    monkeypatch.setattr(media_process, "sleep", lambda _: None)
+    if ending == "success":
+        media_process.run_media_command(["synthetic"], timeout=2)
+    else:
+        with pytest.raises(
+            media_process.MediaProcessError,
+            match=("failed" if ending == "failure" else "timed out"),
+        ):
+            media_process.run_media_command(["synthetic"], timeout=2)
+    assert events.count("reap") == 1
+    assert signal.SIGTERM in events and signal.SIGKILL in events
+
+
+@pytest.mark.parametrize("status", [0, 7])
+def test_exit_observation_does_not_reap_child(status):
+    from archive import media_process
+
+    process = subprocess.Popen([sys.executable, "-I", "-c", f"exit({status})"])
+    try:
+        deadline = monotonic() + 2
+        while not media_process._leader_has_exited(process.pid):
+            assert monotonic() < deadline
+            sleep(0.01)
+        assert process.returncode is None
+        assert process.wait(timeout=1) == status
+    finally:
+        if process.returncode is None:
+            process.kill()
+            process.wait(timeout=1)

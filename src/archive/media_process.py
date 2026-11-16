@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import os
+import select
 import selectors
 import signal
 import subprocess
@@ -67,13 +69,21 @@ def _run_media_command(
             for stream in (process.stdout, process.stderr):
                 os.set_blocking(stream.fileno(), False)
                 selector.register(stream, selectors.EVENT_READ, 0)
-            while selector.get_map() or process.poll() is None:
+            while selector.get_map() or not retired:
                 # A successful wrapper can leave a child holding these pipes.
-                if process.poll() is not None and not retired:
+                if not retired and _leader_has_exited(process.pid):
+                    # Retirement owns all remaining signals and the final reap.
+                    retired = True
+                    try:
+                        _retire_process_group(process)
+                    except (OSError, subprocess.TimeoutExpired):
+                        if process.returncode:
+                            error = MediaProcessError("failed")
+                            error.add_note("Media process cleanup failed")
+                            raise error from None
+                        raise
                     if process.returncode:
                         raise MediaProcessError("failed")
-                    _retire_process_group(process)
-                    retired = True
                 remaining = deadline - monotonic()
                 if remaining <= 0:
                     raise MediaProcessError("timed out")
@@ -108,22 +118,47 @@ def _run_media_command(
                 process.stderr.close()
 
 
+def _leader_has_exited(pid: int) -> bool:
+    # poll()/waitpid() release the PID reservation. Observe without reaping so
+    # the final group signal cannot target a recycled numeric process group.
+    if hasattr(os, "waitid"):
+        return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    # Python 3.12 on macOS does not expose waitid. A process kqueue also observes
+    # without reaping; registering an already-exited child can return ESRCH.
+    queue = select.kqueue()
+    try:
+        event = select.kevent(
+            pid,
+            filter=select.KQ_FILTER_PROC,
+            flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+            fflags=select.KQ_NOTE_EXIT,
+        )
+        try:
+            events = queue.control([event], 1, 0)
+        except ProcessLookupError:
+            return True
+        for result in events:
+            if result.flags & select.KQ_EV_ERROR:
+                if result.data == errno.ESRCH:
+                    return True
+                raise OSError(result.data, "process observation failed")
+        return bool(events)
+    finally:
+        queue.close()
+
+
 def _retire_process_group(process: subprocess.Popen[bytes]) -> None:
     # The session is ours even after its leader exits. Always retire descendants,
     # including children with redirected streams, before releasing temporary files.
+    if process.returncode is not None:
+        return  # No signal is safe after the leader has been reaped.
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
-        process.wait()
+        process.wait(timeout=1)
         return
     deadline = monotonic() + 0.2
     while monotonic() < deadline:
-        process.poll()  # reap the leader while descendants settle
-        try:
-            os.killpg(process.pid, 0)
-        except ProcessLookupError:
-            process.wait()
-            return
         sleep(0.01)
     try:
         os.killpg(process.pid, signal.SIGKILL)

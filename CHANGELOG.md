@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Select usable video evidence beyond weak earlier discoveries, accept explicit
+  HTTP(S) audio endpoints without file suffixes, and bind cached classification
+  candidates/signals to all current source URLs. Legacy unbound discoveries are
+  discarded until metadata enrichment records their source identity.
+
 - Drop extracted media references whose HTTP(S) authority is unusable (empty host,
   invalid/zero/out-of-range port, malformed bracketed host or IPv6 zone, host
   delimiters/whitespace, URL controls), keeping other metadata and valid relative,

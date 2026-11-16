@@ -123,9 +123,7 @@ def test_extract_metadata_from_html_detects_audio_source_elements() -> None:
     )
 
     assert metadata.audio_url == "https://example.com/media/audio.mp3"
-    assert metadata.media_candidates == (
-        metadata.media_candidates[0],
-    )
+    assert metadata.media_candidates == (metadata.media_candidates[0],)
     assert metadata.media_candidates[0].url == "https://example.com/media/audio.mp3"
     assert metadata.media_candidates[0].candidate_type == "audio"
     assert metadata.media_candidates[0].detection_source == "html_audio"
@@ -194,8 +192,9 @@ def test_extract_metadata_from_html_detects_video_source_elements() -> None:
 
 
 @pytest.mark.django_db
-def test_extract_metadata_from_html_uses_article_tag_as_kind_hint_even_with_embedded_video(
-) -> None:
+def test_extract_metadata_from_html_uses_article_tag_as_kind_hint_even_with_embedded_video() -> (
+    None
+):
     metadata = extract_metadata_from_html(
         html="""
         <html>
@@ -244,10 +243,10 @@ class _FakeHTTPResponse:
 
     def read(self, n: int = -1) -> bytes:
         if n == -1:
-            chunk = self._body[self._pos:]
+            chunk = self._body[self._pos :]
             self._pos = len(self._body)
         else:
-            chunk = self._body[self._pos: self._pos + n]
+            chunk = self._body[self._pos : self._pos + n]
             self._pos += len(chunk)
         return chunk
 
@@ -807,6 +806,9 @@ def test_request_item_reprocess_clears_stale_archived_media_for_weak_html_video_
         classification_rule="media_candidate_video",
         classification_engine_version=CURRENT_CLASSIFICATION_ENGINE_VERSION,
         classification_evidence={
+            "original_url": "https://example.com/story",
+            "audio_url": "",
+            "media_url": "https://cdn.example.com/story.mp4",
             "media_candidates": [
                 {
                     "url": "https://cdn.example.com/story.mp4",
@@ -844,13 +846,16 @@ def test_build_media_candidates_preserves_html_video_provenance_over_media_url_d
         original_url="https://example.com/story",
         media_url="https://cdn.example.com/story.mp4",
         existing_evidence={
+            "original_url": "https://example.com/story",
+            "audio_url": "",
+            "media_url": "https://cdn.example.com/story.mp4",
             "media_candidates": [
                 {
                     "url": "https://cdn.example.com/story.mp4",
                     "candidate_type": "video",
                     "detection_source": "html_video",
                 }
-            ]
+            ],
         },
     )
 
@@ -866,13 +871,16 @@ def test_resolve_media_sources_keeps_html_video_for_explicit_video_items() -> No
         original_url="https://example.com/story",
         kind=ItemKind.VIDEO,
         classification_evidence={
+            "original_url": "https://example.com/story",
+            "audio_url": "",
+            "media_url": "",
             "media_candidates": [
                 {
                     "url": "https://cdn.example.com/story.mp4",
                     "candidate_type": "video",
                     "detection_source": "html_video",
                 }
-            ]
+            ],
         },
     )
 

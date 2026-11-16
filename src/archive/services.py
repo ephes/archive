@@ -981,19 +981,17 @@ def _enrich_item_metadata_fields(item: Item, timeout: int = 15) -> bool:
                 for candidate in metadata.media_candidates
             ),
             existing_rule=item.classification_rule,
-            existing_evidence={
-                **item.classification_evidence,
-                "metadata_signals": {
-                    "html_media_candidates": [
-                        {
-                            "url": candidate.url,
-                            "candidate_type": candidate.candidate_type,
-                            "detection_source": candidate.detection_source,
-                        }
-                        for candidate in metadata.media_candidates
-                    ],
-                    "kind_hint": metadata.kind_hint,
-                },
+            existing_evidence=item.classification_evidence,
+            metadata_signals={
+                "html_media_candidates": [
+                    {
+                        "url": candidate.url,
+                        "candidate_type": candidate.candidate_type,
+                        "detection_source": candidate.detection_source,
+                    }
+                    for candidate in metadata.media_candidates
+                ],
+                "kind_hint": metadata.kind_hint,
             },
         )
         set_item_classification(item=item, decision=decision, update_fields=update_fields)

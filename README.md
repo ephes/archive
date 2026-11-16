@@ -884,7 +884,15 @@ Current first-slice behavior:
 
 Media-resolution policy in this slice:
 
-- direct audio candidates are preferred for archival when available
+- direct audio candidates are preferred for archival when available; an explicit HTTP(S) `audio_url`
+  is authoritative even without a file suffix (for example `/download?id=123`)
+- select the first semantically usable video candidate, skipping weak discoveries that would hide a
+  later supported page or direct source; weak HTML video remains usable for an already-video item
+  only when no stronger video source exists
+- cached candidates and metadata signals are reused only when their recorded `original_url`,
+  `audio_url`, and `media_url` all match the current inputs (after trimming). Source edits discard
+  old discoveries; current explicit sources and fresh metadata remain available. Legacy evidence
+  without a complete source identity must be rediscovered by metadata enrichment
 - supported page-video / direct-video candidates are only treated as semantic `video` signals when the URL
   itself is video-shaped (`media_url`, `original_url`, YouTube page adapter, etc.); an incidental embedded
   HTML `<video>` on an article page is not enough on its own

@@ -49,6 +49,12 @@ def _page(reference: str) -> str:
         "http://cdn.example.com/epi\x00sode.mp3",
         "http://cdn<example>.com/episode.mp3",
         "http://cdn.example.com\\evil/episode.mp3",
+        "http://cdn.exa\tmple.com/episode.mp3",
+        "http://cdn.example.com/epi\nsode.mp3",
+        "http://cdn.example.com/epi\rsode.mp3",
+        "https://[v1.foobar]/episode.mp3",
+        "https://[127.0.0.1]/episode.mp3",
+        "https://cdn]example.com/episode.mp3",
     ],
 )
 def test_invalid_http_authorities_are_dropped_keeping_other_metadata(reference) -> None:

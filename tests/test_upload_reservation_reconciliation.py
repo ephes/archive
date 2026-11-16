@@ -195,3 +195,36 @@ def test_oversized_prefix_is_left_for_manual_recovery(monkeypatch):
     assert "oversized=1" in output and "released=0" in output
     assert PendingArchiveMediaUpload.objects.count() == 1
     assert storage.exists(stored)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("padding", [" ", "\t", "\n"])
+def test_whitespace_padded_reference_still_protects_the_object(padding):
+    from archive.media_storage import delete_unreferenced_archive_media_paths
+
+    item = _processing_item()
+    storage = storages["archive_media"]
+    stored = _upload(item)
+    Item.objects.create(
+        original_url="https://example.com/other",
+        archived_audio_path=f"{padding}{stored}{padding}",
+    )
+    Item.objects.filter(pk=item.pk).update(processing_started_at=None)
+
+    output = _reconcile("--apply")
+    assert f"KEEP-REFERENCED {stored}" in output
+    assert storage.exists(stored)
+    assert delete_unreferenced_archive_media_paths((stored,)) == []
+    assert storage.exists(stored)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_reference_containing_the_path_as_substring_does_not_protect_it():
+    item = _processing_item()
+    storage = storages["archive_media"]
+    stored = _upload(item)
+    Item.objects.create(original_url="https://example.com/other", archived_audio_path=stored + "x")
+    Item.objects.filter(pk=item.pk).update(processing_started_at=None)
+
+    assert "released=1 deleted=1" in _reconcile("--apply")
+    assert not storage.exists(stored)

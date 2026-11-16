@@ -36,7 +36,7 @@ def delete_unreferenced_archive_media_paths(
     reference visible to the second check. Callers that created the reservation
     pass ``owns_reservation`` to discard their own unpublished upload.
     """
-    from archive.models import Item, PendingArchiveMediaUpload
+    from archive.models import PendingArchiveMediaUpload
 
     storage = storages[ARCHIVE_MEDIA_STORAGE_ALIAS]
     deleted_paths: list[str] = []
@@ -49,16 +49,7 @@ def delete_unreferenced_archive_media_paths(
             )
             if not owns_reservation and reservations.exists():
                 continue
-            if (
-                Item.objects.using(using)
-                .select_for_update()
-                .filter(
-                    Q(archived_audio_path=path)
-                    | Q(archived_video_path=path)
-                    | Q(article_audio_file=path)
-                )
-                .exists()
-            ):
+            if _is_referenced_archive_media_path(path, using=using):
                 continue
             storage.delete(path)
             if owns_reservation:
@@ -236,13 +227,24 @@ def reconcile_upload_reservation(
 
 
 def _is_referenced_archive_media_path(path: str, *, using: str) -> bool:
+    """Whether any committed item references ``path`` after whitespace trimming.
+
+    Reads and the orphan inventory strip stored references, so a reference with
+    surrounding whitespace still protects its object. Containment narrows the rows
+    in the database; exact stripped equality is decided here.
+    """
     from archive.models import Item
 
-    return (
+    candidates = (
         Item.objects.using(using)
         .select_for_update()
         .filter(
-            Q(archived_audio_path=path) | Q(archived_video_path=path) | Q(article_audio_file=path)
+            Q(archived_audio_path__contains=path)
+            | Q(archived_video_path__contains=path)
+            | Q(article_audio_file__contains=path)
         )
-        .exists()
+        .values_list(*ARCHIVE_MEDIA_PATH_FIELDS)
+    )
+    return any(
+        str(value or "").strip() == path for row in candidates.iterator() for value in row
     )

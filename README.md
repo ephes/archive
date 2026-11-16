@@ -488,9 +488,10 @@ URL/candidate deduplication uses sets while preserving first-seen order. The sam
 URL may retain distinct candidate types or detection sources.
 Normalized media references also need a usable HTTP(S) authority, checked through
 urllib's parsed `hostname`/`port`: an empty host (`http://:80/a`), a non-numeric,
-zero or out-of-range port, malformed or non-IPv6 bracketed hosts, IPv6 zone IDs,
-whitespace or URL-delimiter characters in the host, and any C0 control or DEL in the
-URL drop only that reference. Relative and protocol-relative references, explicit
+zero or out-of-range port, malformed or non-IPv6 bracketed hosts (including IPvFuture), IPv6 zone IDs,
+whitespace or URL-delimiter characters in the host, and any C0 control or DEL inside
+the reference (checked before urllib would silently drop tabs/newlines) drop only
+that reference. Relative and protocol-relative references, explicit
 valid ports, bracketed IPv6 literals and internationalized hostnames are kept, and
 the remaining metadata (title, dates, other candidates) is unaffected.
 
@@ -1110,7 +1111,8 @@ just manage reconcile_archive_media_reservations --apply  # release retired ones
 Dry-run lists retired prefixes with their owner item and the objects that would be
 deleted. Apply rechecks the owner attempt under the row lock, deletes unreferenced
 objects under the prefix and releases the reservation in one durable transaction;
-referenced objects are kept. Reservations of a still-current attempt stay protected,
+referenced objects are kept. Like every deletion check, references are compared
+after whitespace trimming, the same normalization reads and orphan inventory use. Reservations of a still-current attempt stay protected,
 whatever their age. Expected filesystem/S3 deletion failures roll back that
 reservation's release (it keeps protecting what remains), are reported as
 `storage_delete_failed` without backend details, and make the command exit nonzero;

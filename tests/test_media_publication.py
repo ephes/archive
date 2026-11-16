@@ -313,7 +313,8 @@ def test_publication_during_cleanup_verification_keeps_object(table, publish_whe
 
     def publish_around_verification(execute, sql, params, many, context):
         verifying = not published and sql.startswith("SELECT") and f'FROM "{table}"' in sql
-        verifying = verifying and (prefix in params or path in params)
+        # The reference check matches by containment, so its parameter wraps the path.
+        verifying = verifying and any(prefix in str(param) for param in params)
         if verifying and publish_when == "before":
             publish()
         result = execute(sql, params, many, context)

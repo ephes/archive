@@ -667,7 +667,8 @@ def _normalize_url(value: str, base_url: str) -> str:
     not end up in a stored media URL that is later linked or fetched.
     """
     cleaned = value.strip()
-    if not cleaned:
+    # Checked before parsing: urllib silently drops embedded tabs and newlines.
+    if not cleaned or _has_forbidden_url_control(cleaned):
         return ""
     try:
         normalized = urljoin(base_url, cleaned)
@@ -699,9 +700,10 @@ def _is_valid_http_authority(parsed) -> bool:
         return False
     if not hostname or port == 0:
         return False
-    if ":" in hostname:
-        # urllib only yields a colon for a bracketed IPv6 literal; zone IDs are
-        # link-local and never a public media host.
+    host_part = parsed.netloc.rpartition("@")[2]
+    if host_part.startswith("["):
+        # Only IPv6 literals: no IPvFuture forms, and no zone IDs (link-local,
+        # never a public media host).
         if "%" in hostname:
             return False
         try:
@@ -709,7 +711,9 @@ def _is_valid_http_authority(parsed) -> bool:
         except ValueError:
             return False
         return True
-    return not any(char in _FORBIDDEN_HOST_CHARACTERS or char.isspace() for char in hostname)
+    return not any(
+        char in _FORBIDDEN_HOST_CHARACTERS or char in ":[]" or char.isspace() for char in hostname
+    )
 
 
 def _first_nonempty(*values: str | None) -> str:

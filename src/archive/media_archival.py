@@ -68,6 +68,10 @@ class MediaArchivalError(RuntimeError):
     safe_detail: str | None = None
 
 
+class ArchiveMediaStorageKeyError(MediaArchivalError):
+    """The storage backend saved outside the reserved upload namespace."""
+
+
 class MediaSizeLimitError(MediaArchivalError):
     """A direct download stopped at its caller-supplied byte budget."""
 
@@ -539,10 +543,36 @@ def save_reserved_media_file(
         PendingArchiveMediaUpload.objects.using(using).create(prefix=prefix)
     fresh_name = prefix + target.name
     try:
-        return storage.save(fresh_name, File(file_handle, name=upload_name))
+        stored_name = storage.save(fresh_name, File(file_handle, name=upload_name))
+        if not _is_reserved_child_key(stored_name, prefix=prefix):
+            # Only the reserved prefix is provably ours; a key elsewhere may name
+            # another upload's object, so it is left to the orphan sweep.
+            logger.warning("Archive media storage returned a key outside its reservation")
+            raise ArchiveMediaStorageKeyError(
+                "Archive media storage key escaped its reserved upload namespace"
+            )
+        return stored_name
     except BaseException:
         _discard_unpublished_upload(fresh_name, using=using)
         raise
+
+
+def _is_reserved_child_key(stored_name: object, *, prefix: str) -> bool:
+    """Whether ``stored_name`` is a direct child of the reserved ``prefix``.
+
+    Reservations, publication release and orphan checks all derive the protecting
+    prefix from the object's parent, so a nested, relocated, untrimmed or
+    traversal key would leave the stored object unprotected.
+    """
+    if not isinstance(stored_name, str) or not stored_name.startswith(prefix):
+        return False
+    child = stored_name[len(prefix) :]
+    return (
+        bool(child)
+        and child == child.strip()
+        and child not in {".", ".."}
+        and not any(char in child for char in ("/", "\\", "\0"))
+    )
 
 
 def _item_database(item: Item) -> str:

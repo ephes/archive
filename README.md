@@ -1027,7 +1027,14 @@ objects remain protected. Retained objects can be reclaimed with the orphan swee
 A `PendingArchiveMediaUpload` reservation commits before each storage write and
 protects its namespace. Publication removes the reservation in the same transaction
 that commits the item references, so an uploaded object is always either reserved
-or referenced. Orphan cleanup spools the complete object inventory to temporary disk
+or referenced. Storage backends must return the saved key as a direct child of the
+reserved prefix (a different file name there, such as Django's available-name
+suffix, is fine). A key that is nested, relocated, untrimmed, contains traversal
+or separator characters, or is not a string is refused before publication: the
+upload fails like any storage error, the object inside the reserved prefix and the
+reservation are discarded, and the key outside it is never deleted directly, since
+it may name another upload's object; the orphan sweep reclaims it if unprotected.
+Orphan cleanup spools the complete object inventory to temporary disk
 storage before deleting anything, streams database references in bounded batches using
 the same whitespace normalization as other media paths, then processes sorted unique
 candidates. References are scanned once rather than once per object batch. Temporary

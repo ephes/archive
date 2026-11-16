@@ -5,6 +5,10 @@
 - Treat impossible optional publication dates (for example `2026-02-31`) as
   absent instead of aborting metadata extraction; try the next HTML/JSON-LD date
   candidate and keep title, media and other extracted metadata.
+- Refuse storage-returned media keys outside the reserved upload prefix before
+  publication; discard only the provably owned reserved object and reservation,
+  never another upload's object or reservation.
+
 - Fence summary/transcript success against source inputs and processing attempts;
   requeue changed inputs without settling newer work, preserving manual edits.
 - Bind metadata success and failure to the fetched URL/current attempt, preserving

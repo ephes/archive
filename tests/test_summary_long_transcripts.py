@@ -150,16 +150,20 @@ def test_long_transcript_refresh_survives_oversized_page_and_long_reply(monkeypa
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    "field,value,named",
+    "field,value,instruction",
     [
-        ("short_summary", "é" * 240, "short_summary"),
-        ("long_summary", "文" * 8001, "long_summary"),
-        ("tags", [f"tag{i}" for i in range(9)], "tags"),
-        ("tags", ["é" * 65], "tags"),
+        (
+            "short_summary",
+            "é" * 240,
+            "short_summary has 240 characters. Rewrite it to at most 160 characters",
+        ),
+        ("long_summary", "文" * 8001, "long_summary has 8001 characters. Rewrite it to at most"),
+        ("tags", [f"tag{i}" for i in range(9)], "tags has 9 entries. Keep only the 8 most"),
+        ("tags", ["é" * 65], "A tag has 65 characters. Shorten every tag to at most 64"),
     ],
     ids=["short", "long", "tag-count", "tag-length"],
 )
-def test_over_limit_reply_gets_one_bounded_shortening_request(model, field, value, named):
+def test_over_limit_reply_gets_one_bounded_shortening_request(model, field, value, instruction):
     item = Item(original_url="https://example.test/item", transcript=LONG_TRANSCRIPT)
     model.responses = [dict(VALID, **{field: value}), VALID]
 
@@ -170,10 +174,11 @@ def test_over_limit_reply_gets_one_bounded_shortening_request(model, field, valu
     repair = model.requests[1]
     assert len(repair) <= REQUEST_CAP
     instructions = _messages(repair)[1]["content"]
-    assert named in instructions
+    assert instruction in instructions
+    assert f"change only {field}." in instructions
     # The repair asks to shorten the reply only; the transcript is not sent again.
     assert "Wort Wort" not in instructions
-    for limit in ("239", "8000", "8 tags", "64"):
+    for limit in ("239", "8000", "3 to 8", "64"):
         assert limit in instructions
 
 
@@ -193,7 +198,8 @@ def test_still_over_limit_after_repair_fails_naming_the_fields(model):
     assert item.short_summary == ""
     assert item.long_summary == "Operator text"
     assert item.summary_error == (
-        "Summary response exceeded generated field limits (short_summary, tags)"
+        "Summary response exceeded generated field limits "
+        "(short_summary: 240 > 239 characters, tags: 9 > 8 tags)"
     )
 
 
@@ -202,7 +208,8 @@ def test_oversized_reply_is_not_sent_back_for_repair(model):
     item = Item(original_url="https://example.test/item")
     model.responses = [dict(VALID, long_summary="文" * 30_000)]
 
-    with pytest.raises(summaries.SummaryGenerationError, match=r"limits \(long_summary\)"):
+    expected = r"limits \(long_summary: 30000 > 8000 characters\)$"
+    with pytest.raises(summaries.SummaryGenerationError, match=expected):
         summaries.generate_item_summaries(item)
 
     assert len(model.requests) == 1
@@ -216,3 +223,16 @@ def test_prompt_states_the_validated_limits(model):
     assert "at most 239 characters" in prompt
     assert "at most 8000 characters" in prompt
     assert "3 to 8" in prompt and "at most 64 characters" in prompt
+
+
+@pytest.mark.django_db
+def test_shortening_request_shows_the_counted_tags_including_duplicates(model):
+    tags = ["dup", "Dup", *[f"tag{i}" for i in range(7)]]
+    model.responses = [dict(VALID, tags=tags), VALID]
+
+    summaries.generate_item_summaries(Item(original_url="https://example.test/item"))
+
+    instructions = _messages(model.requests[1])[1]["content"]
+    assert "tags has 9 entries" in instructions
+    shown = json.loads(instructions.rsplit("\n", 1)[1])
+    assert len(shown["tags"]) == 9

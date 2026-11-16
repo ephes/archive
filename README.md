@@ -1429,12 +1429,15 @@ normalized lowercase tag. Whitespace is normalized before measuring text; tag
 count is checked before deduplication. At least one nonempty tag is required.
 The prompt states these limits (and asks for about 200 characters in the short
 summary). When a reply still exceeds them, the archive sends one follow-up request
-that contains only that reply and the limits (no source text or transcript) and asks
-the model to shorten the named fields; it is skipped when it would not fit the 64 KiB
-request limit. Excess output after that is rejected as a summary-stage failure
-naming the fields, e.g. `Summary response exceeded generated field limits
-(short_summary, tags)`, and uses the existing retry policy; it is never silently
-truncated. Operator-authored fields are unchanged.
+that contains only that reply and the limits (no source text or transcript). It
+states each exceeded field's measured size and asks for a target well below the
+limit: a short summary of at most 160 characters (preferably one sentence), a long summary of at
+most 6,000 characters, the 8 most relevant tags, or tags of at most 64 characters.
+It is skipped when it would not fit the 64 KiB request limit. Excess output after
+that is rejected as a summary-stage failure naming the fields and sizes (no text),
+e.g. `Summary response exceeded generated field limits (short_summary: 287 > 239
+characters, tags: 9 > 8 tags)`, and uses the existing retry policy; it is never
+silently truncated. Operator-authored fields are unchanged.
 
 The summary source is the item's original page. Media and other non-text responses
 are not downloaded. Pages over 1 MiB (large video watch pages, for example)

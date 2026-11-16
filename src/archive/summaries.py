@@ -42,14 +42,26 @@ class SummaryGenerationError(RuntimeError):
     pass
 
 
-class SummaryLimitError(SummaryGenerationError):
-    """A reply exceeded the generated field limits; names the fields, never the text."""
+@dataclass(frozen=True)
+class FieldLimitViolation:
+    field: str
+    measured: int
+    limit: int
+    unit: str  # "characters", "tags" or "characters per tag"
 
-    def __init__(self, fields: tuple[str, ...], reply: dict[str, object]) -> None:
-        super().__init__(
-            f"Summary response exceeded generated field limits ({', '.join(fields)})"
-        )
-        self.fields = fields
+    def describe(self) -> str:
+        return f"{self.field}: {self.measured} > {self.limit} {self.unit}"
+
+
+class SummaryLimitError(SummaryGenerationError):
+    """A reply exceeded the generated field limits; names fields and sizes, never the text."""
+
+    def __init__(
+        self, violations: tuple[FieldLimitViolation, ...], reply: dict[str, object]
+    ) -> None:
+        details = ", ".join(violation.describe() for violation in violations)
+        super().__init__(f"Summary response exceeded generated field limits ({details})")
+        self.violations = violations
         self.reply = reply
 
 
@@ -361,15 +373,46 @@ _FIELD_LIMIT_INSTRUCTIONS = (
 )
 
 
+# Shortening targets sit well below the hard limits: models miscount characters.
+SHORTENING_SHORT_SUMMARY_TARGET_CHARS = 160
+SHORTENING_LONG_SUMMARY_TARGET_CHARS = 6_000
+
+
+def _shortening_instruction(violation: FieldLimitViolation) -> str:
+    if violation.field == "short_summary":
+        return (
+            f"short_summary has {violation.measured} characters. Rewrite it to at most "
+            f"{SHORTENING_SHORT_SUMMARY_TARGET_CHARS} characters including spaces, preferably "
+            f"one sentence (hard limit {MAX_SHORT_SUMMARY_CHARS})."
+        )
+    if violation.field == "long_summary":
+        return (
+            f"long_summary has {violation.measured} characters. Rewrite it to at most "
+            f"{SHORTENING_LONG_SUMMARY_TARGET_CHARS} characters "
+            f"(hard limit {MAX_LONG_SUMMARY_CHARS})."
+        )
+    if violation.unit == "tags":
+        return (
+            f"tags has {violation.measured} entries. Keep only the {MAX_SUMMARY_TAGS} "
+            "most relevant tags."
+        )
+    return (
+        f"A tag has {violation.measured} characters. Shorten every tag to at most "
+        f"{MAX_SUMMARY_TAG_CHARS} characters."
+    )
+
+
 def _build_shortening_prompt(exc: SummaryLimitError) -> str | None:
     """A bounded follow-up asking the model to shorten its own over-limit reply."""
     prompt = "\n".join(
         [
             "Your archive metadata JSON below exceeded these limits:",
             *_FIELD_LIMIT_INSTRUCTIONS,
+            "",
+            *(_shortening_instruction(violation) for violation in exc.violations),
             (
-                f"Too long: {', '.join(exc.fields)}. Return the same JSON keys with those "
-                f"fields shortened (at most {MAX_SUMMARY_TAGS} tags, keep the most relevant). "
+                "Return the same JSON keys; change only "
+                f"{', '.join(sorted({violation.field for violation in exc.violations}))}. "
                 "Keep the meaning and the language; do not translate."
             ),
             "",
@@ -479,24 +522,29 @@ def _parse_generated_summary(raw_content: str) -> GeneratedSummary:
     long_summary = _normalize_text(long)
     tags = _normalize_tags(raw_tags)
 
+    longest_tag = max((len(tag) for tag in tags), default=0)
     over_limit = tuple(
-        field
-        for field, exceeded in (
-            ("short_summary", len(short_summary) > MAX_SHORT_SUMMARY_CHARS),
-            ("long_summary", len(long_summary) > MAX_LONG_SUMMARY_CHARS),
-            (
-                "tags",
-                len(raw_tags) > MAX_SUMMARY_TAGS
-                or any(len(tag) > MAX_SUMMARY_TAG_CHARS for tag in tags),
+        violation
+        for violation in (
+            FieldLimitViolation(
+                "short_summary", len(short_summary), MAX_SHORT_SUMMARY_CHARS, "characters"
+            ),
+            FieldLimitViolation(
+                "long_summary", len(long_summary), MAX_LONG_SUMMARY_CHARS, "characters"
+            ),
+            FieldLimitViolation("tags", len(raw_tags), MAX_SUMMARY_TAGS, "tags"),
+            FieldLimitViolation(
+                "tags", longest_tag, MAX_SUMMARY_TAG_CHARS, "characters per tag"
             ),
         )
-        if exceeded
+        if violation.measured > violation.limit
     )
     if over_limit:
         reply: dict[str, object] = {
             "short_summary": short_summary,
             "long_summary": long_summary,
-            "tags": list(tags),
+            # Before deduplication, so the shown list matches the counted tags.
+            "tags": [_normalize_text(tag) for tag in raw_tags],
         }
         raise SummaryLimitError(over_limit, reply)
 

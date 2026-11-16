@@ -4,8 +4,10 @@
 
 - Keep summaries refreshable for long transcripts: ask the model once to shorten
   a reply that exceeds the generated field limits (only that reply and the limits
-  are sent), state the 239-character short-summary limit exactly in the prompt,
-  and name the exceeded fields in the error. Excess output is still never
+  are sent, with each exceeded field's measured size and a target well below the
+  limit, e.g. a short summary of at most 160 characters), state the
+  239-character short-summary limit exactly in the prompt, and name the exceeded
+  fields with their sizes in the error (`short_summary: 287 > 239 characters`). Excess output is still never
   truncated. Summary sources now use the first 1 MiB of oversized pages (large
   video watch pages) instead of failing, and skip downloading media or other
   non-text responses; article audio still refuses oversized pages.

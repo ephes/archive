@@ -32,6 +32,7 @@ MAX_SUMMARY_TAG_CHARS = 64
 MAX_SUMMARY_REQUEST_BYTES = 64 * 1024
 
 MAX_SUMMARY_SOURCE_BYTES = 1024 * 1024
+MAX_SUMMARY_HTML_DEPTH = 4096
 MAX_SUMMARY_INPUT_CHARS = 12_000
 MAX_ARTICLE_AUDIO_SOURCE_CHARS = 100_000
 MAX_TRANSCRIPT_INPUT_CHARS = 8_000
@@ -113,6 +114,9 @@ class _SummaryHTMLParser(HTMLParser):
         self._ignored_depth = 0
         # Open text containers, plus list markers opened inside a container.
         self._text_containers: list[str] = []
+        # Per-tag positions make absent/matching/implicit-close lookups constant
+        # work. Each opened container is appended and removed exactly once.
+        self._open_positions: dict[str, list[int]] = {}
         self._current_parts: list[str] = []
         # Index of the first chunk emitted by the open top-level <li>, if any.
         self._top_level_item_start: int | None = None
@@ -148,10 +152,10 @@ class _SummaryHTMLParser(HTMLParser):
             self._flush_text()
             if lowered == "li" and not self._text_containers:
                 self._top_level_item_start = len(self.text_chunks)
-            self._text_containers.append(lowered)
+            self._open_container(lowered)
         elif lowered in self._LIST_TAGS and self._text_containers:
             self._flush_text()
-            self._text_containers.append(lowered)
+            self._open_container(lowered)
         elif self._text_containers and lowered not in self._INLINE_TAGS:
             self._current_parts.append(" ")
 
@@ -164,12 +168,12 @@ class _SummaryHTMLParser(HTMLParser):
             return
 
         if lowered in self._LIST_TAGS:
-            if lowered in self._text_containers:
+            if lowered in self._open_positions:
                 self._close_through(lowered)
             else:
                 # A list opened outside any container closes every item still open in it.
                 self._close_through_all()
-        elif lowered in self._text_containers:
+        elif lowered in self._open_positions:
             # Also tolerate omitted inner closing tags without retaining a stale container.
             self._close_through(lowered)
         else:
@@ -182,22 +186,38 @@ class _SummaryHTMLParser(HTMLParser):
         if self._ignored_depth == 0 and self._text_containers:
             self._current_parts.append(data)
 
+    def _open_container(self, tag: str) -> None:
+        if len(self._text_containers) >= MAX_SUMMARY_HTML_DEPTH:
+            raise SummaryGenerationError("Summary source HTML exceeded container depth limit")
+        self._open_positions.setdefault(tag, []).append(len(self._text_containers))
+        self._text_containers.append(tag)
+
     def _close_through(self, tag: str, *, boundary: Collection[str] = ()) -> None:
-        for index in range(len(self._text_containers) - 1, -1, -1):
-            open_tag = self._text_containers[index]
-            if open_tag in boundary:
+        positions = self._open_positions.get(tag)
+        if not positions:
+            return
+        index = positions[-1]
+        # The nearest list marker prevents closing a parent list item. The
+        # boundary is the fixed, two-tag list set, independent of source depth.
+        for boundary_tag in boundary:
+            boundary_positions = self._open_positions.get(boundary_tag)
+            if boundary_positions and boundary_positions[-1] >= index:
                 return
-            if open_tag == tag:
-                self._flush_text()
-                del self._text_containers[index:]
-                self._finish_top_level_item()
-                return
+        self._close_containers_from(index)
+
+    def _close_containers_from(self, index: int) -> None:
+        self._flush_text()
+        while len(self._text_containers) > index:
+            tag = self._text_containers.pop()
+            positions = self._open_positions[tag]
+            positions.pop()
+            if not positions:
+                del self._open_positions[tag]
+        self._finish_top_level_item()
 
     def _close_through_all(self) -> None:
         if self._text_containers:
-            self._flush_text()
-            self._text_containers.clear()
-            self._finish_top_level_item()
+            self._close_containers_from(0)
 
     def _finish_top_level_item(self) -> None:
         """Drop a closed top-level <li> whose whole text, nested parts included, is short."""
@@ -286,7 +306,12 @@ def extract_summary_source_from_url(
             raise SummaryGenerationError("Summary source exceeded 1 MiB limit")
         payload = payload[:MAX_SUMMARY_SOURCE_BYTES]
 
-    text = payload.decode(charset, errors="replace")
+    try:
+        # bytes.decode admits text codecs only; remote codec names must never
+        # escape the source error boundary or appear in stored diagnostics.
+        text = payload.decode(charset, errors="replace")
+    except (LookupError, UnicodeError):
+        raise SummaryGenerationError("Summary source charset is unsupported or invalid") from None
     if content_type.startswith("text/plain"):
         return SummarySource(extracted_text=_truncate_text(text, max_chars=max_chars))
     return extract_summary_source_from_html(text, max_chars=max_chars)

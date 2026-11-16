@@ -1456,3 +1456,14 @@ list items whose whole text (nested content included) is under 25 characters are
 dropped as navigation/share noise; paragraphs,
 headings and nested items are kept at any length. Navigation, scripts and the
 existing ignored containers remain excluded.
+Open text/list container lookup and closure use linear total stack work, including
+omitted and unmatched end tags. At most 4,096 such containers may be open at once;
+excess nesting refuses the whole source with a fixed error, without using partial
+text or metadata. Summary and article-audio stored-text fallbacks still apply.
+
+Remote summary/article text sources are limited to 1 MiB before decoding. A missing
+charset defaults to UTF-8; supported text codecs replace malformed byte sequences.
+Unknown or non-text charsets are refused with a fixed source error, without exposing
+the charset or response body. Summary generation then uses stored item text and
+article audio uses its existing stored-text fallback; source refusal alone does not
+fail the processing stage.

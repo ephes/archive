@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Index open HTML text/list containers for linear extraction stack work while
+  preserving nested text and omitted-tag recovery. Refuse more than 4,096 open
+  containers without publishing partial source text or metadata.
+
+- Refuse unknown/non-text summary source charsets with a private source-domain
+  error, preserving stored-text fallback for summaries and article audio.
+
 - Keep summaries refreshable for long transcripts: ask the model once to shorten
   a reply that exceeds the generated field limits (only that reply and the limits
   are sent, with each exceeded field's measured size and a target well below the

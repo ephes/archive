@@ -9,6 +9,10 @@
   publication; discard only the provably owned reserved object and reservation,
   never another upload's object or reservation.
 
+- Record the owning item and processing attempt on upload reservations
+  (migration 0021). New `reconcile_archive_media_reservations` reports and, with
+  `--apply`, releases reservations whose attempt is provably retired, deleting only
+  their unreferenced objects. Live and legacy (unowned) reservations stay protected.
 - Fence summary/transcript success against source inputs and processing attempts;
   requeue changed inputs without settling newer work, preserving manual edits.
 - Bind metadata success and failure to the fetched URL/current attempt, preserving

@@ -41,34 +41,54 @@ def main() -> None:
         with storage.open(name) as handle:
             return handle.read().decode()
 
+    def barrier(item, name):
+        receipt = root / f"{mode}.receipt"
+        receipt.write_text(
+            json.dumps(
+                {
+                    "pk": item.pk,
+                    "started_at": item.processing_started_at.isoformat(),
+                    "staged": name,
+                    "reservations": list(
+                        PendingArchiveMediaUpload.objects.values_list("prefix", flat=True)
+                    ),
+                }
+            )
+        )
+        receipt.replace(root / f"{mode}.ready")
+        deadline = time.monotonic() + 120  # outlives parent restart + inspect
+        while not (root / f"{mode}.release").exists():
+            if time.monotonic() > deadline:
+                raise AssertionError("parent did not release synthetic upstream")
+            time.sleep(0.02)
+
     def download(item, timeout):
         assert not connections["default"].in_atomic_block
-        staged = mode != "killed" or os.environ["JOURNEY_POINT"] == "before-publication"
+        point = os.environ["JOURNEY_POINT"]
+        staged = mode != "killed" or point in {"before-publication", "during-upload"}
         name = ""
         if staged:
-            name = save_reserved_media_file(
-                target_name=f"staged/{mode}.mp3",
-                upload_name="audio.mp3",
-                file_handle=BytesIO(mode.encode()),
-                using="default",
-            )
-        if mode in {"killed", "late"}:
-            receipt = root / f"{mode}.receipt"
-            receipt.write_text(
-                json.dumps(
-                    {
-                        "pk": item.pk,
-                        "started_at": item.processing_started_at.isoformat(),
-                        "staged": name,
-                    }
+            save = storage.save
+
+            def paused_save(*args, **kwargs):
+                # The reservation is committed; the process dies before any object.
+                barrier(item, "")
+                return save(*args, **kwargs)
+
+            with (
+                patch.object(storage, "save", paused_save)
+                if mode == "killed" and point == "during-upload"
+                else nullcontext()
+            ):
+                name = save_reserved_media_file(
+                    target_name=f"staged/{mode}.mp3",
+                    upload_name="audio.mp3",
+                    file_handle=BytesIO(mode.encode()),
+                    using="default",
+                    owner=item,
                 )
-            )
-            receipt.replace(root / f"{mode}.ready")
-            deadline = time.monotonic() + 120  # outlives parent restart + inspect
-            while not (root / f"{mode}.release").exists():
-                if time.monotonic() > deadline:
-                    raise AssertionError("parent did not release synthetic upstream")
-                time.sleep(0.02)
+        if mode in {"killed", "late"}:
+            barrier(item, name)
         return ArchivedAudio(name, "audio/mpeg", len(mode))
 
     try:
@@ -113,6 +133,8 @@ def main() -> None:
                         }
                     )
                 )
+            elif mode == "reconcile":
+                call_command("reconcile_archive_media_reservations", apply=True)
             elif mode == "late":
                 # Reopen the killed attempt before recovery, then delay its result.
                 item = Item.objects.order_by("pk").first()

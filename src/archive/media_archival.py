@@ -227,6 +227,7 @@ def _archive_direct_audio(item: Item, source_url: str, timeout: int) -> Archived
                     upload_name=f"source{suffix}",
                     file_handle=spool,
                     using=_item_database(item),
+                    owner=item,
                 )
             finally:
                 spool.close()
@@ -282,11 +283,13 @@ def _archive_video_audio(item: Item, source_url: str, timeout: int) -> ArchivedA
                     target_name=source_object_name,
                     file_path=source_path,
                     using=_item_database(item),
+                    owner=item,
                 )
                 saved_audio_name = _save_storage_path(
                     target_name=audio_object_name,
                     file_path=extracted_audio_path,
                     using=_item_database(item),
+                    owner=item,
                 )
             except BaseException:
                 _discard_unpublished_upload(saved_audio_name, using=_item_database(item))
@@ -323,6 +326,7 @@ def _archive_supported_video_page_audio(
                 target_name=object_name,
                 file_path=source_path,
                 using=_item_database(item),
+                owner=item,
             )
     except OSError as exc:
         raise MediaArchivalError(f"Video archival failed: {exc}") from exc
@@ -517,13 +521,14 @@ def _extract_audio_with_ffmpeg(*, source_path: Path, output_path: Path, timeout:
         raise MediaArchivalError(f"Video audio extraction {exc}") from None
 
 
-def _save_storage_path(*, target_name: str, file_path: Path, using: str) -> str:
+def _save_storage_path(*, target_name: str, file_path: Path, using: str, owner: Item) -> str:
     with file_path.open("rb") as file_handle:
         return save_reserved_media_file(
             target_name=target_name,
             upload_name=file_path.name,
             file_handle=file_handle,
             using=using,
+            owner=owner,
         )
 
 
@@ -533,14 +538,25 @@ def save_reserved_media_file(
     upload_name: str,
     file_handle,
     using: str,
+    owner: Item | None = None,
 ) -> str:
+    """Upload into a fresh reserved namespace owned by ``owner``'s current attempt.
+
+    The reservation records the item and its ``processing_started_at`` attempt,
+    the same value the publication fence checks, so the reservation can later be
+    proven retired once that attempt is no longer current.
+    """
     storage = storages[ARCHIVE_MEDIA_STORAGE_ALIAS]
     target = Path(target_name)
     prefix = f"{target.parent}/{uuid4().hex}/"
     # Commit the reservation before the first storage write. Outer application
     # transactions are rejected: their rollback could erase the protection.
     with transaction.atomic(using=using, durable=True):
-        PendingArchiveMediaUpload.objects.using(using).create(prefix=prefix)
+        PendingArchiveMediaUpload.objects.using(using).create(
+            prefix=prefix,
+            owner_item_id=owner.pk if owner is not None else None,
+            owner_attempt=owner.processing_started_at if owner is not None else None,
+        )
     fresh_name = prefix + target.name
     try:
         stored_name = storage.save(fresh_name, File(file_handle, name=upload_name))

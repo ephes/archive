@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 
 from django.core.files.storage import storages
 from django.db import transaction
@@ -132,3 +133,114 @@ def release_pending_archive_media_paths(paths: Iterable[str], *, using: str = "d
 
 def _reservation_prefix(path: str) -> str:
     return path.rsplit("/", 1)[0] + "/"
+
+
+MAX_RECONCILED_PREFIX_OBJECTS = 16
+
+
+@dataclass(frozen=True)
+class ReservationReconciliation:
+    """Outcome for one upload reservation.
+
+    ``state`` is ``retired`` (owner attempt provably over), ``live`` (owner attempt
+    still current), ``unowned`` (no recorded owner attempt; manual recovery only),
+    ``oversized`` (too many objects under the prefix to reconcile automatically)
+    or ``gone`` (released concurrently).
+    """
+
+    state: str
+    prefix: str
+    owner_item_id: int | None = None
+    deleted: tuple[str, ...] = ()
+    kept_referenced: tuple[str, ...] = ()
+    released: bool = False
+
+
+def reconcile_upload_reservation(
+    reservation_id: int, *, using: str = "default", apply: bool = False
+) -> ReservationReconciliation:
+    """Retire one reservation whose owning processing attempt is provably over.
+
+    The owner attempt is the item's ``processing_started_at`` captured at upload,
+    the same value every media publication fence compares. Once the item's current
+    attempt differs (recovered, settled, re-claimed) or the item is gone, the upload
+    can never be published, whether or not its process is still running. Age alone
+    never retires a reservation, and reservations without a recorded owner attempt
+    are left for manual recovery. With ``apply``, unreferenced objects under the
+    prefix are deleted and the reservation is released in one durable transaction;
+    a storage failure rolls the release back, keeping the remaining protection.
+    """
+    from archive.models import Item, PendingArchiveMediaUpload
+
+    snapshot = (
+        PendingArchiveMediaUpload.objects.using(using)
+        .filter(pk=reservation_id)
+        .values("prefix", "owner_item_id", "owner_attempt")
+        .first()
+    )
+    if snapshot is None:
+        return ReservationReconciliation(state="gone", prefix="")
+    prefix = snapshot["prefix"]
+    owner_item_id = snapshot["owner_item_id"]
+    if owner_item_id is None or snapshot["owner_attempt"] is None:
+        return ReservationReconciliation(state="unowned", prefix=prefix)
+
+    storage = storages[ARCHIVE_MEDIA_STORAGE_ALIAS]
+    with transaction.atomic(using=using, durable=True):
+        # Lock the owner row before the reservation, like publication does.
+        current_attempts = list(
+            Item.objects.using(using)
+            .select_for_update()
+            .filter(pk=owner_item_id)
+            .values_list("processing_started_at", flat=True)
+        )
+        reservation = (
+            PendingArchiveMediaUpload.objects.using(using)
+            .select_for_update()
+            .filter(pk=reservation_id, prefix=prefix, owner_item_id=owner_item_id)
+            .first()
+        )
+        if reservation is None or reservation.owner_attempt is None:
+            return ReservationReconciliation(state="gone", prefix=prefix)
+        if current_attempts and current_attempts[0] == reservation.owner_attempt:
+            return ReservationReconciliation(
+                state="live", prefix=prefix, owner_item_id=owner_item_id
+            )
+
+        names = []
+        for name in iter_archive_media_object_names(prefix):
+            names.append(name)
+            if len(names) > MAX_RECONCILED_PREFIX_OBJECTS:
+                return ReservationReconciliation(
+                    state="oversized", prefix=prefix, owner_item_id=owner_item_id
+                )
+        deleted: list[str] = []
+        kept: list[str] = []
+        for name in names:
+            if _is_referenced_archive_media_path(name, using=using):
+                kept.append(name)
+                continue
+            if apply:
+                storage.delete(name)
+            deleted.append(name)
+        if apply:
+            reservation.delete()
+    return ReservationReconciliation(
+        state="retired",
+        prefix=prefix,
+        owner_item_id=owner_item_id,
+        deleted=tuple(deleted),
+        kept_referenced=tuple(kept),
+        released=apply,
+    )
+
+
+def _is_referenced_archive_media_path(path: str, *, using: str) -> bool:
+    from archive.models import Item
+
+    return (
+        Item.objects.using(using)
+        .select_for_update()
+        .filter(Q(archived_audio_path=path) | Q(archived_video_path=path) | Q(article_audio_file=path))
+        .exists()
+    )

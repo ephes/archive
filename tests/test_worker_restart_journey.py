@@ -14,7 +14,7 @@ PEER = Path(__file__).with_name("worker_recovery_peer.py")
 BASE = datetime(2026, 11, 8, 12, tzinfo=UTC)
 
 
-@pytest.mark.parametrize("point", ["after-claim", "before-publication"])
+@pytest.mark.parametrize("point", ["after-claim", "during-upload", "before-publication"])
 def test_killed_worker_reopens_recovers_once_and_fences_late_media(tmp_path, point):
     # Every process connects independently to this synthetic on-disk database.
     env = {
@@ -87,6 +87,12 @@ def test_killed_worker_reopens_recovers_once_and_fences_late_media(tmp_path, poi
         assert "Processed 0 item(s)." in fresh.stdout
         assert "Recovered" not in fresh.stderr
         assert inspect()["started_at"] == abandoned["started_at"]
+        # Unproven retirement: the killed attempt is still the item's current one.
+        premature = run("reconcile", seconds=60)
+        assert "released=0 deleted=0" in premature.stdout
+        assert inspect()["reservations"] == abandoned["reservations"]
+        if abandoned["staged"]:
+            assert (tmp_path / "media" / abandoned["staged"]).exists()
 
         late = start("late", seconds=60)
         delayed = ready(late, "late")
@@ -111,13 +117,28 @@ def test_killed_worker_reopens_recovers_once_and_fences_late_media(tmp_path, poi
         assert after["successes"] == 1
         assert not any(delayed["staged"].startswith(prefix) for prefix in after["reservations"])
         assert not (tmp_path / "media" / delayed["staged"]).exists()
-        # A killed upload stays reserved for the existing orphan-recovery workflow.
+        # A killed upload stays reserved until its retirement is reconciled.
+        assert after["reservations"] == abandoned["reservations"]
         if abandoned["staged"]:
             assert any(abandoned["staged"].startswith(prefix) for prefix in after["reservations"])
             assert (tmp_path / "media" / abandoned["staged"]).exists()
         again = run("probe", seconds=122)
         assert "Recovered" not in again.stderr
         assert "Processed 0 item(s)." in again.stdout
+
+        # Recovery and the restarted attempt prove the killed attempt retired.
+        reconciled = run("reconcile", seconds=123)
+        released = len(abandoned["reservations"])
+        deleted = 1 if abandoned["staged"] else 0
+        assert f"retired={released} " in reconciled.stdout
+        assert f"released={released} deleted={deleted} " in reconciled.stdout
+        final = inspect()
+        assert final["reservations"] == []
+        if abandoned["staged"]:
+            assert not (tmp_path / "media" / abandoned["staged"]).exists()
+        assert final["audio"] == published["audio"]
+        assert final["bytes"] == "restart"
+        assert final["shared_bytes"] == "referenced bytes"
     finally:
         for process in (killed, late):
             if process is not None:

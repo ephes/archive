@@ -207,6 +207,7 @@ def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
                     upload_name="speech.mp3",
                     file_handle=temporary,
                     using=using,
+                    owner=item,
                 )
             with transaction.atomic(using=using, durable=True):
                 published = (

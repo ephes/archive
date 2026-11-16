@@ -981,8 +981,10 @@ hard-kills a subprocess after claim and before media publication, then opens the
 temporary SQLite database in new workers. File barriers and a controlled clock
 verify fresh-lease preservation, one-time recovery, rejection of a delayed
 superseded result, and preservation of media still referenced by another item.
-Killed uploads remain reserved for the existing orphan-recovery workflow. The
-fake upstream uses only temporary storage; no network or archive data is used.
+Killed uploads (before and after their object exists) remain reserved while their
+attempt is current, and `reconcile_archive_media_reservations --apply` releases them
+only after recovery retired that attempt. The fake upstream uses only temporary
+storage; no network or archive data is used.
 
 ## Media publication and orphan recovery
 
@@ -1064,14 +1066,37 @@ while workers are archiving. Apply database migrations before running updated
 workers or cleanup.
 
 After an unclean worker crash, or when discarding a failed upload could not be
-verified, reservations deliberately remain and keep their objects protected
-indefinitely. Stop the affected worker and confirm no upload/publication is active
-before removing the reservation in the Django shell; then rerun orphan cleanup. Do
-not expire reservations solely by age. Direct callers of `archive_item_audio`
-receive staged, reserved objects and must either publish them (releasing the
-reservations in the publishing transaction) or discard them with
+verified, reservations deliberately remain and keep their objects protected. Each
+reservation records its owner item and processing attempt (the item's
+`processing_started_at` at upload, the value every media publication fence
+compares). Once the item's current attempt differs (stale recovery, settlement,
+a new claim) or the item is gone, that upload can never be published, even if its
+process is still running, so the reservation is provably retired:
+
+```bash
+just manage reconcile_archive_media_reservations          # dry-run report
+just manage reconcile_archive_media_reservations --apply  # release retired ones
+```
+
+Dry-run lists retired prefixes with their owner item and the objects that would be
+deleted. Apply rechecks the owner attempt under the row lock, deletes unreferenced
+objects under the prefix and releases the reservation in one durable transaction;
+referenced objects are kept. Reservations of a still-current attempt stay protected,
+whatever their age. Expected filesystem/S3 deletion failures roll back that
+reservation's release (it keeps protecting what remains), are reported as
+`storage_delete_failed` without backend details, and make the command exit nonzero;
+rerun it after the backend recovers. Prefixes holding more than 16 objects are
+reported as `oversized` and left alone. Reservations without a recorded owner
+attempt (rows created before this change, or uploads by unclaimed direct callers)
+are reported as `unowned` and never released automatically: stop the affected
+worker and confirm no upload/publication is active before removing such a
+reservation in the Django shell, then rerun orphan cleanup. Do not expire
+reservations solely by age. Direct callers of `archive_item_audio` receive staged,
+reserved objects and must either publish them (releasing the reservations in the
+publishing transaction) or discard them with
 `delete_unreferenced_archive_media_paths(..., owns_reservation=True)`; the worker
-service handles this lifecycle automatically.
+service handles this lifecycle automatically. Apply migration `0021` before running
+updated workers.
 
 Generated summary output must be a JSON object with nonempty string
 `short_summary` and `long_summary` values and an array of nonempty string tags.

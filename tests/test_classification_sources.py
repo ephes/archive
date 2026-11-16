@@ -101,3 +101,102 @@ def test_legacy_unbound_cache_does_not_invent_source_identity():
     assert decision.evidence["media_candidates"] == []
     assert decision.evidence["metadata_signals"] == {}
 
+
+@pytest.mark.parametrize(
+    "base,path,kind",
+    [
+        ("youtube.com", "/watch?v=synthetic", ItemKind.VIDEO),
+        ("youtu.be", "/synthetic", ItemKind.VIDEO),
+        ("vimeo.com", "/123", ItemKind.VIDEO),
+        ("castro.fm", "/episode/synthetic", ItemKind.PODCAST_EPISODE),
+    ],
+)
+@pytest.mark.parametrize("scheme,port", [("https", "443"), ("http", "80")])
+def test_adapter_identity_accepts_case_and_default_port(base, path, kind, scheme, port):
+    plain = classify_item(original_url=f"{scheme}://{base}{path}")
+    equivalent = classify_item(original_url=f"{scheme}://{base.upper()}:{port}{path}")
+    assert equivalent.kind == plain.kind == kind
+    assert equivalent.rule == plain.rule
+    assert bool(equivalent.evidence["selected_media"]["video"]) == bool(
+        plain.evidence["selected_media"]["video"]
+    )
+
+
+@pytest.mark.parametrize(
+    "authority",
+    [
+        "user@youtube.com",
+        "user:password@youtube.com",
+        "youtube.com:8443",
+        "youtube.com.attacker.test",
+        "youtube.com.",
+    ],
+)
+def test_adapter_identity_refuses_non_equivalent_authorities(authority):
+    decision = classify_item(original_url=f"https://{authority}/watch?v=synthetic")
+    assert decision.kind == ItemKind.LINK
+    assert decision.evidence["source_adapter"] == ""
+    assert decision.evidence["selected_media"]["video"] == ""
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"url": None},
+        {"url": []},
+        {"url": {}},
+        {"url": 123},
+        {"url": "https://example.test/" + "x" * 8192},
+        {"url": "file:///tmp/audio.mp3"},
+        {"url": "relative.mp3"},
+        {"url": "https://example.test:99999/audio.mp3"},
+        {"candidate_type": "invented"},
+        {"candidate_type": ["audio"]},
+        {"detection_source": "invented"},
+        {"detection_source": {"audio": True}},
+        {"detection_source": "html_video"},
+        {"detection_source": "original_url"},
+        {"candidate_type": "page_video", "detection_source": "og_video"},
+    ],
+)
+def test_stored_candidates_skip_corrupt_fields_and_keep_valid_later_evidence(bad):
+    original = "https://example.test/story"
+    corrupt = MediaCandidate("https://example.test/corrupt.mp3", "audio", "html_audio").as_dict()
+    corrupt.update(bad)
+    healthy = MediaCandidate("https://example.test/valid", "audio", "html_audio")
+    decision = classify_item(
+        original_url=original,
+        existing_evidence={
+            "original_url": original,
+            "audio_url": "",
+            "media_url": "",
+            "media_candidates": [corrupt, healthy.as_dict()],
+        },
+    )
+    assert decision.evidence["media_candidates"] == [healthy.as_dict()]
+    assert decision.evidence["selected_media"]["audio"] == healthy.url
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "html_audio",
+        "og_audio",
+        "twitter_player_stream",
+        "json_ld_audio",
+        "ard_media_object",
+    ],
+)
+def test_stored_typed_audio_can_be_suffixless(source):
+    original = "https://example.test/story"
+    candidate = MediaCandidate("https://example.test/download?id=123", "audio", source)
+    decision = classify_item(
+        original_url=original,
+        existing_evidence={
+            "original_url": original,
+            "audio_url": "",
+            "media_url": "",
+            "media_candidates": [candidate.as_dict()],
+        },
+    )
+    assert decision.evidence["selected_media"]["audio"] == candidate.url

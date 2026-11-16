@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Normalize supported adapter authorities by hostname and scheme-default port,
+  refusing userinfo and non-equivalent authorities. Skip damaged restored media
+  candidates with bounded, typed fields and validated URL/provenance semantics.
+
 - Select usable video evidence beyond weak earlier discoveries, accept explicit
   HTTP(S) audio endpoints without file suffixes, and bind cached classification
   candidates/signals to all current source URLs. Legacy unbound discoveries are

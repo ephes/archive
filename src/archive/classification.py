@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 from django.utils import timezone
 
-from archive.metadata import AUDIO_SUFFIXES, VIDEO_SUFFIXES
+from archive.metadata import AUDIO_SUFFIXES, VIDEO_SUFFIXES, _normalize_url
 from archive.models import Item, ItemKind, PodcastFeedPolicy
 from archive.safe_fetch import BlockedFetchError, require_http_url
 
@@ -16,6 +16,21 @@ VIDEO_HOSTS = {"youtube.com", "www.youtube.com", "youtu.be", "vimeo.com", "www.v
 YOUTUBE_PAGE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
 OVERRIDE_CLASSIFICATION_RULES = {"explicit_kind", "operator_override"}
 CURRENT_CLASSIFICATION_ENGINE_VERSION = 2
+MAX_MEDIA_CANDIDATE_URL_LENGTH = 8192
+_MEDIA_CANDIDATE_SOURCE_TYPES = {
+    "explicit_audio_url": {"audio"},
+    "html_audio": {"audio"},
+    "og_audio": {"audio"},
+    "twitter_player_stream": {"audio"},
+    "json_ld_audio": {"audio"},
+    "ard_media_object": {"audio"},
+    "html_video": {"video"},
+    "og_video": {"video", "page_video"},
+    "twitter_player": {"video", "page_video"},
+    "json_ld_video": {"video", "page_video"},
+    "media_url": {"audio", "video", "page_video"},
+    "original_url": {"audio", "video", "page_video"},
+}
 
 
 @dataclass(frozen=True)
@@ -394,7 +409,7 @@ def _generic_url_rule(*, original_url: str, audio_url: str) -> tuple[str, str]:
         return str(ItemKind.PODCAST_EPISODE), "audio_url_signal"
 
     parsed = urlparse(original_url)
-    host = parsed.netloc.lower()
+    host = _adapter_hostname(original_url)
     path = parsed.path.lower()
 
     if host in VIDEO_HOSTS:
@@ -406,7 +421,7 @@ def _generic_url_rule(*, original_url: str, audio_url: str) -> tuple[str, str]:
 
 def _match_source_adapter(url: str) -> tuple[str, str]:
     parsed = urlparse(url)
-    host = parsed.netloc.lower()
+    host = _adapter_hostname(url)
     path = parsed.path
 
     if host in {"castro.fm", "www.castro.fm"} and path.startswith("/episode/"):
@@ -418,12 +433,28 @@ def _match_source_adapter(url: str) -> tuple[str, str]:
     return "", ""
 
 
+def _adapter_hostname(url: str) -> str:
+    if not _is_http_url(url):
+        return ""
+    parsed = urlparse(url)
+    if parsed.username is not None or parsed.password is not None:
+        return ""
+    try:
+        if parsed.port not in {None, 443 if parsed.scheme == "https" else 80}:
+            return ""
+    except ValueError:
+        return ""
+    return parsed.hostname or ""
+
+
 def _is_http_url(url: str) -> bool:
     try:
         require_http_url(url)
     except BlockedFetchError:
         return False
-    return True
+    # Use the same syntactic authority/control admission as extracted media;
+    # this performs no DNS lookup or network request.
+    return _normalize_url(url, "") == url
 
 
 def _looks_like_audio_url(url: str) -> bool:
@@ -440,7 +471,7 @@ def _looks_like_direct_video_url(url: str) -> bool:
 
 def _looks_like_supported_video_page_url(url: str) -> bool:
     parsed = urlparse(url)
-    host = parsed.netloc.lower()
+    host = _adapter_hostname(url)
     if parsed.scheme not in {"http", "https"} or host not in YOUTUBE_PAGE_HOSTS:
         return False
     if _looks_like_direct_video_url(url):
@@ -509,11 +540,37 @@ def _media_candidates_from_evidence(
     for value in values:
         if not isinstance(value, dict):
             continue
-        url = str(value.get("url", "")).strip()
-        candidate_type = str(value.get("candidate_type", "")).strip()
-        detection_source = str(value.get("detection_source", "")).strip()
-        if not url or not candidate_type or not detection_source:
+        fields = [
+            ("url", MAX_MEDIA_CANDIDATE_URL_LENGTH),
+            ("candidate_type", 16),
+            ("detection_source", 64),
+        ]
+        if any(
+            not isinstance(value.get(key), str) or len(value[key]) > limit for key, limit in fields
+        ):
             continue
+        url = value["url"].strip()
+        candidate_type = value["candidate_type"].strip()
+        detection_source = value["detection_source"].strip()
+        if candidate_type not in _MEDIA_CANDIDATE_SOURCE_TYPES.get(detection_source, set()):
+            continue
+        if not _is_http_url(url):
+            continue
+        if candidate_type == "page_video" and not _looks_like_supported_video_page_url(url):
+            continue
+        input_key = {
+            "explicit_audio_url": "audio_url",
+            "original_url": "original_url",
+            "media_url": "media_url",
+        }.get(detection_source)
+        if input_key:
+            if url != evidence.get(input_key):
+                continue
+            if (
+                detection_source != "explicit_audio_url"
+                and candidate_type != _candidate_type_for_url(url)
+            ):
+                continue
         candidates.append(
             MediaCandidate(
                 url=url,

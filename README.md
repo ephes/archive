@@ -868,7 +868,9 @@ Current first-slice behavior:
 
 - source-specific adapters run first for strong URL semantics
 - `https://castro.fm/episode/...` classifies as `podcast_episode`
-- supported YouTube page URLs classify as `video`
+- supported YouTube page URLs classify as `video`; adapter hosts are case-insensitive and accept
+  the scheme's default port (`http:80`, `https:443`). Userinfo, nondefault ports, trailing dots,
+  and suffix lookalikes do not identify an adapter
 - generic metadata extraction still parses OG, Twitter, JSON-LD, and HTML title fields
 - media references found in a page are only kept when they resolve to an `http`/`https` URL;
   `javascript:`, `data:`, `file:` and other schemes are dropped before they can be stored or linked
@@ -899,6 +901,11 @@ Media-resolution policy in this slice:
 - otherwise supported video candidates are used and Archive extracts a stable local MP3 enclosure, but weak
   embedded HTML `<video>` candidates are ignored for non-`video` items so article-audio can still win on
   long-form written pages
+- restored candidates require string URLs (at most 8192 characters), known candidate types
+  (at most 16 characters) and supported provenance (at most 64 characters). Corrupt fields,
+  unsupported combinations and invalid HTTP(S) authorities are skipped independently. Page-video
+  evidence must name a supported page, and explicit/input provenance must match its recorded input.
+  Typed discovered audio may use extensionless endpoints
 - Castro episode pages rely on generic HTML audio discovery unless a future Castro-specific extractor becomes
   necessary
 

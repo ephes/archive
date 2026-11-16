@@ -339,13 +339,13 @@ def enrich_item_metadata(
 
 def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
     using = item._state.db or router.db_for_write(Item, instance=item)
-    if not _summary_generation_needed(item):
+    if not summary_generation_needed(item):
         captured_skip = _failure_state(item, "summary")
         with transaction.atomic(using=using):
             item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
             if _item_state(item, captured_skip) != captured_skip:
                 return True
-            if not _summary_generation_needed(item):
+            if not summary_generation_needed(item):
                 item.summary_status = EnrichmentStatus.COMPLETE
                 item.summary_error = ""
                 item.summary_retry_count = 0
@@ -1027,7 +1027,7 @@ def _has_generated_summaries(item: Item) -> bool:
     return bool(item.short_summary.strip() and item.long_summary.strip() and item.tag_list)
 
 
-def _summary_generation_needed(item: Item) -> bool:
+def summary_generation_needed(item: Item) -> bool:
     if not _has_generated_summaries(item):
         return True
     return (

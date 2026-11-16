@@ -51,7 +51,7 @@ def test_generate_item_summaries_parses_json_payload(monkeypatch, settings) -> N
 
     monkeypatch.setattr(
         "archive.summaries.extract_summary_source_from_url",
-        lambda url, timeout: type(
+        lambda url, timeout, **kwargs: type(
             "Source",
             (),
             {"meta_description": "Meta", "extracted_text": "Body text with useful context."},

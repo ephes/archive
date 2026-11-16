@@ -42,6 +42,17 @@ class SummaryGenerationError(RuntimeError):
     pass
 
 
+class SummaryLimitError(SummaryGenerationError):
+    """A reply exceeded the generated field limits; names the fields, never the text."""
+
+    def __init__(self, fields: tuple[str, ...], reply: dict[str, object]) -> None:
+        super().__init__(
+            f"Summary response exceeded generated field limits ({', '.join(fields)})"
+        )
+        self.fields = fields
+        self.reply = reply
+
+
 @dataclass(frozen=True)
 class GeneratedSummary:
     short_summary: str
@@ -206,12 +217,22 @@ def generate_item_summaries(item: Item, timeout: int = 60) -> GeneratedSummary:
     source = _best_effort_summary_source(item=item, timeout=timeout)
     prompt = _build_summary_prompt(item=item, source=source)
     response = _request_summary(prompt=prompt, timeout=timeout)
-    return _parse_generated_summary(response)
+    try:
+        return _parse_generated_summary(response)
+    except SummaryLimitError as exc:
+        # Models miscount characters, mostly in long non-English replies. Ask once to
+        # shorten the reply itself (no source text again); never truncate it here.
+        repair = _build_shortening_prompt(exc)
+        if repair is None:
+            raise
+        return _parse_generated_summary(_request_summary(prompt=repair, timeout=timeout))
 
 
 def _best_effort_summary_source(item: Item, timeout: int) -> SummarySource:
     try:
-        return extract_summary_source_from_url(item.original_url, timeout=timeout)
+        return extract_summary_source_from_url(
+            item.original_url, timeout=timeout, truncate_oversized=True
+        )
     except SummaryGenerationError as exc:
         logger.warning("Summary source extraction failed for item %s: %s", item.pk, exc)
         return SummarySource()
@@ -222,12 +243,18 @@ def extract_summary_source_from_url(
     timeout: int = 60,
     *,
     max_chars: int = MAX_SUMMARY_INPUT_CHARS,
+    truncate_oversized: bool = False,
 ) -> SummarySource:
+    """Extract page text. Larger pages fail unless ``truncate_oversized`` allows
+    using their first 1 MiB (summaries only excerpt a few thousand characters)."""
     request = Request(url, headers=REQUEST_HEADERS)
     try:
         with open_public_url(request, timeout=timeout) as response:
             content_type = response.headers.get_content_type()
             charset = response.headers.get_content_charset() or "utf-8"
+            if not _is_text_source(content_type):
+                # Media and other binary bodies carry no summary text; do not download them.
+                return SummarySource()
             payload = response.read(MAX_SUMMARY_SOURCE_BYTES + 1)
     except HTTPError as exc:
         raise SummaryGenerationError(
@@ -243,14 +270,18 @@ def extract_summary_source_from_url(
         ) from None
 
     if len(payload) > MAX_SUMMARY_SOURCE_BYTES:
-        raise SummaryGenerationError("Summary source exceeded 1 MiB limit")
+        if not truncate_oversized:
+            raise SummaryGenerationError("Summary source exceeded 1 MiB limit")
+        payload = payload[:MAX_SUMMARY_SOURCE_BYTES]
 
     text = payload.decode(charset, errors="replace")
     if content_type.startswith("text/plain"):
         return SummarySource(extracted_text=_truncate_text(text, max_chars=max_chars))
-    if "html" in content_type or "xml" in content_type:
-        return extract_summary_source_from_html(text, max_chars=max_chars)
-    return SummarySource()
+    return extract_summary_source_from_html(text, max_chars=max_chars)
+
+
+def _is_text_source(content_type: str) -> bool:
+    return content_type.startswith("text/plain") or "html" in content_type or "xml" in content_type
 
 
 def extract_summary_source_from_html(
@@ -281,12 +312,7 @@ def _build_summary_prompt(item: Item, source: SummarySource) -> str:
     sections = [
         "Generate archive metadata for this captured item.",
         "Return JSON with keys short_summary, long_summary, and tags.",
-        "short_summary must be 1 or 2 sentences and under 240 characters.",
-        f"long_summary must be 2 to 4 sentences and at most {MAX_LONG_SUMMARY_CHARS} characters.",
-        (
-            "tags must be a JSON array of 3 to 8 lowercase tags, "
-            f"at most {MAX_SUMMARY_TAG_CHARS} characters each."
-        ),
+        *_FIELD_LIMIT_INSTRUCTIONS,
         "Write summaries and tags in the same language as the transcript when present.",
         (
             "If there is no transcript, use the dominant language of the page description and "
@@ -320,6 +346,39 @@ def _build_summary_prompt(item: Item, source: SummarySource) -> str:
         sections[first_optional + index] += text
         remaining -= len(json.dumps(text, ensure_ascii=False).encode("utf-8")) - 2
     return "\n".join(sections)
+
+
+_FIELD_LIMIT_INSTRUCTIONS = (
+    (
+        "short_summary must be 1 or 2 sentences and at most "
+        f"{MAX_SHORT_SUMMARY_CHARS} characters including spaces; aim for about 200."
+    ),
+    f"long_summary must be 2 to 4 sentences and at most {MAX_LONG_SUMMARY_CHARS} characters.",
+    (
+        f"tags must be a JSON array of 3 to {MAX_SUMMARY_TAGS} lowercase tags, "
+        f"at most {MAX_SUMMARY_TAG_CHARS} characters each."
+    ),
+)
+
+
+def _build_shortening_prompt(exc: SummaryLimitError) -> str | None:
+    """A bounded follow-up asking the model to shorten its own over-limit reply."""
+    prompt = "\n".join(
+        [
+            "Your archive metadata JSON below exceeded these limits:",
+            *_FIELD_LIMIT_INSTRUCTIONS,
+            (
+                f"Too long: {', '.join(exc.fields)}. Return the same JSON keys with those "
+                f"fields shortened (at most {MAX_SUMMARY_TAGS} tags, keep the most relevant). "
+                "Keep the meaning and the language; do not translate."
+            ),
+            "",
+            json.dumps(exc.reply, ensure_ascii=False),
+        ]
+    )
+    if len(_summary_request_body(prompt)) > MAX_SUMMARY_REQUEST_BYTES:
+        return None
+    return prompt
 
 
 def _truncate_prompt_value(value: str, *, max_bytes: int) -> str:
@@ -420,13 +479,26 @@ def _parse_generated_summary(raw_content: str) -> GeneratedSummary:
     long_summary = _normalize_text(long)
     tags = _normalize_tags(raw_tags)
 
-    if (
-        len(short_summary) > MAX_SHORT_SUMMARY_CHARS
-        or len(long_summary) > MAX_LONG_SUMMARY_CHARS
-        or len(raw_tags) > MAX_SUMMARY_TAGS
-        or any(len(tag) > MAX_SUMMARY_TAG_CHARS for tag in tags)
-    ):
-        raise SummaryGenerationError("Summary response exceeded generated field limits")
+    over_limit = tuple(
+        field
+        for field, exceeded in (
+            ("short_summary", len(short_summary) > MAX_SHORT_SUMMARY_CHARS),
+            ("long_summary", len(long_summary) > MAX_LONG_SUMMARY_CHARS),
+            (
+                "tags",
+                len(raw_tags) > MAX_SUMMARY_TAGS
+                or any(len(tag) > MAX_SUMMARY_TAG_CHARS for tag in tags),
+            ),
+        )
+        if exceeded
+    )
+    if over_limit:
+        reply: dict[str, object] = {
+            "short_summary": short_summary,
+            "long_summary": long_summary,
+            "tags": list(tags),
+        }
+        raise SummaryLimitError(over_limit, reply)
 
     if not short_summary or not long_summary or not tags:
         raise SummaryGenerationError("Summary response did not include all required fields")

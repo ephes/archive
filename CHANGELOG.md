@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Keep summaries refreshable for long transcripts: ask the model once to shorten
+  a reply that exceeds the generated field limits (only that reply and the limits
+  are sent), state the 239-character short-summary limit exactly in the prompt,
+  and name the exceeded fields in the error. Excess output is still never
+  truncated. Summary sources now use the first 1 MiB of oversized pages (large
+  video watch pages) instead of failing, and skip downloading media or other
+  non-text responses; article audio still refuses oversized pages.
+  `reprocess_items --only summary --regenerate` re-queues complete generated
+  summaries, e.g. one whose refresh from a new transcript failed.
+
 - Attempt media-command KILL, bounded reap and both pipe closes independently
   after cleanup errors or interruptions, preserving the primary error/cancellation
   without exposing raw cleanup diagnostics. A cleanup cancellation still

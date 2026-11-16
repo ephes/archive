@@ -7,6 +7,9 @@ from django.db import migrations, models
 from django.utils import timezone
 
 
+BATCH_SIZE = 200
+
+
 def compact_failure_streaks(apps, schema_editor):
     alias = schema_editor.connection.alias
     State = apps.get_model("archive", "ProcessingStepState")
@@ -33,28 +36,39 @@ def restore_failure_streaks(apps, schema_editor):
     Event = apps.get_model("archive", "ProcessingEvent")
     Member = apps.get_model("archive", "ProcessingFailureItem")
     for state in State.objects.using(alias).exclude(failing_since=None).iterator():
-        for item_id in (
-            Member.objects.using(alias)
-            .filter(step=state.step)
-            .values_list("item_id", flat=True)
-            .iterator(chunk_size=200)
-        ):
-            if (
-                not Event.objects.using(alias)
+        members = Member.objects.using(alias).filter(step=state.step)
+        last_pk = None
+        while True:
+            page = members if last_pk is None else members.filter(pk__gt=last_pk)
+            rows = list(page.order_by("pk").values_list("pk", "item_id")[:BATCH_SIZE])
+            if not rows:
+                break
+            item_ids = [item_id for _, item_id in rows]
+            existing = set(
+                Event.objects.using(alias)
                 .filter(
                     step=state.step,
-                    item_id=item_id,
+                    item_id__in=item_ids,
                     succeeded=False,
                     occurred_at__gte=state.failing_since,
                 )
-                .exists()
-            ):
-                Event.objects.using(alias).create(
-                    step=state.step,
-                    item_id=item_id,
-                    succeeded=False,
-                    occurred_at=state.failing_since,
-                )
+                .order_by()
+                .values_list("item_id", flat=True)
+                .distinct()
+            )
+            Event.objects.using(alias).bulk_create(
+                [
+                    Event(
+                        step=state.step,
+                        item_id=item_id,
+                        succeeded=False,
+                        occurred_at=state.failing_since,
+                    )
+                    for item_id in item_ids if item_id not in existing
+                ],
+                batch_size=BATCH_SIZE,
+            )
+            last_pk = rows[-1][0]
 
 
 class Migration(migrations.Migration):

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Batch migration `0018` rollback membership lookups and missing representative
+  event inserts, preserving active distinct failure counts, existing events and
+  `failing_since` on the selected database without per-item database queries.
+
 - Isolate malformed stored URLs during migration `0008`, checking the other URL
   and remaining rows without rewriting evidence or logging private URLs.
 

@@ -868,6 +868,15 @@ and a new failure starts a fresh streak. The migration backfills existing active
 before pruning old events. Reversing the migration restores representative
 failure events for compacted memberships, preserving distinct streak counts; old
 retry attempt totals are not reconstructed. The per-step latest timestamps are not pruned.
+
+The `0018` rollback pages membership and checks existing failure events in batches
+of 200 on the selected database, creating only missing representatives at the
+unchanged `failing_since`. It keeps the migration transaction atomic and does not
+change other databases. Rollback restores membership counts, not deleted retry
+history; restore a pre-upgrade backup if that exact history is required. These
+historical migration corrections do not rerun migrations already recorded as
+applied and require no repair of previously completed requeues or memberships.
+
 State and current-streak membership follow nondecreasing observation timestamps. A delayed
 older outcome remains in the retained attempt history but cannot reverse the current
 projection or its membership. Success wins equal-timestamp ties, regardless of arrival order;

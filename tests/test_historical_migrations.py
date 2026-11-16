@@ -357,3 +357,103 @@ for row, (original, media, status) in zip(Item.objects.order_by("pk"), cases, st
         original, media, status, "synthetic evidence", "link")
 connections.close_all()
 ''')
+
+
+@pytest.mark.parametrize("count", [205, 2205])
+def test_failure_streak_downgrade_batches_membership(tmp_path, count):
+    run_journey(tmp_path, r'''
+import copy
+import sqlite3
+from datetime import timedelta
+import django
+from django.conf import settings
+from django.db import connections
+from django.db.migrations.executor import MigrationExecutor
+from django.utils import timezone
+
+django.setup()
+pre = [("archive", "0017_seed_youtube_media_archive_success")]
+target = [("archive", "0018_processingfailureitem")]
+settings.DATABASES["secondary"] = copy.deepcopy(settings.DATABASES["default"])
+settings.DATABASES["secondary"]["NAME"] += ".secondary"
+count = COUNT
+now = timezone.now()
+since = now - timedelta(days=60)
+steps = ("metadata", "summary")
+for alias in ("default", "secondary"):
+    executor = MigrationExecutor(connections[alias])
+    executor.migrate(pre)
+    apps = executor.loader.project_state(pre).apps
+    State = apps.get_model("archive", "ProcessingStepState")
+    Event = apps.get_model("archive", "ProcessingEvent")
+    for step in steps:
+        State.objects.using(alias).create(step=step, failing_since=since)
+    State.objects.using(alias).create(step="transcript")
+    Event.objects.using(alias).bulk_create([
+        Event(step=step, item_id=n, succeeded=False, occurred_at=since)
+        for step in steps for n in range(1, count + 1) for retry in range(2)
+    ])
+    # Some current failures survive pruning; old failures and successes do not
+    # substitute for missing current-streak failures.
+    Event.objects.using(alias).bulk_create([
+        Event(step=step, item_id=n, succeeded=succeeded, occurred_at=when)
+        for step in steps for n in range(1, count + 1)
+        for succeeded, when in [(False, since - timedelta(days=1)), (True, now)]
+    ] + [Event(step=step, item_id=n, succeeded=False, occurred_at=now)
+         for step in steps for n in range(3, count + 1, 3) for retry in range(2)])
+    Event.objects.using(alias).create(step="metadata", succeeded=False, occurred_at=now)
+    executor = MigrationExecutor(connections[alias])
+    executor.migrate(target)
+    Member = executor.loader.project_state(target).apps.get_model(
+        "archive", "ProcessingFailureItem")
+    for step in steps:
+        assert set(Member.objects.using(alias).filter(step=step).values_list(
+            "item_id", flat=True)) == set(range(1, count + 1))
+    # Ignore stale membership for an inactive state.
+    Member.objects.using(alias).create(step="transcript", item_id=999999)
+before_default = [list(model.objects.using("default").order_by("pk").values())
+                  for model in (State, Event, Member)]
+db = connections["secondary"]
+before_events = list(Event.objects.using("secondary").order_by("pk").values())
+queries, params_seen, pages = [], [], []
+def inspect(execute, sql, params, many, context):
+    queries.append(sql)
+    params_seen.append(len(params or ()))
+    if sql.startswith("SELECT") and '"archive_processingfailureitem"' in sql:
+        pages.append(sql)
+    return execute(sql, params, many, context)
+def no_default(*args):
+    raise AssertionError("downgrade touched default database")
+old_limit = db.connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+try:
+    executor = MigrationExecutor(db)
+    with db.execute_wrapper(inspect), connections["default"].execute_wrapper(no_default):
+        executor.migrate(pre)
+finally:
+    db.connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, old_limit)
+batch_count = (count + 199) // 200
+assert len(queries) <= 6 * batch_count + 30, len(queries)
+assert pages and all("LIMIT 200" in sql and "OFFSET" not in sql for sql in pages), pages
+assert max(params_seen) <= 999
+for step in steps:
+    events = Event.objects.using("secondary").filter(
+        step=step, succeeded=False, occurred_at__gte=since).exclude(item_id=None)
+    assert set(events.values_list("item_id", flat=True)) == set(range(1, count + 1))
+    for n in range(1, count + 1):
+        times = list(events.filter(item_id=n).values_list("occurred_at", flat=True))
+        assert times == ([now, now] if n % 3 == 0 else [since])
+    assert State.objects.using("secondary").get(step=step).failing_since == since
+assert not Event.objects.using("secondary").filter(step="transcript").exists()
+assert list(Event.objects.using("secondary").filter(
+    pk__in=[event["id"] for event in before_events]).order_by("pk").values()) == before_events
+assert [list(model.objects.using("default").order_by("pk").values())
+        for model in (State, Event, Member)] == before_default
+# Re-upgrading retains exactly the active distinct membership.
+executor = MigrationExecutor(db)
+executor.migrate(target)
+Member = executor.loader.project_state(target).apps.get_model("archive", "ProcessingFailureItem")
+for step in steps:
+    assert set(Member.objects.using("secondary").filter(step=step).values_list(
+        "item_id", flat=True)) == set(range(1, count + 1))
+connections.close_all()
+'''.replace("COUNT", str(count)))

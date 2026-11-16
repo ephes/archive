@@ -5,23 +5,34 @@ from urllib.parse import urlparse
 
 
 VIDEO_SUFFIXES = (".mp4", ".m4v", ".mov", ".webm")
+BATCH_SIZE = 200
 
 
 def queue_existing_archivable_video(apps, schema_editor) -> None:
     alias = schema_editor.connection.alias
     Item = apps.get_model("archive", "Item")
-    candidate_ids: list[int] = []
-
-    for item in Item.objects.using(alias).filter(
+    eligible = Item.objects.using(alias).filter(
         archived_audio_path="",
         media_archive_status="complete",
-    ).only("id", "original_url", "media_url"):
-        urls = (item.original_url or "", item.media_url or "")
-        if any(urlparse(url).path.lower().endswith(VIDEO_SUFFIXES) for url in urls if url):
-            candidate_ids.append(item.id)
-
-    if candidate_ids:
-        Item.objects.using(alias).filter(id__in=candidate_ids).update(media_archive_status="pending")
+    )
+    last_pk = None
+    while True:
+        page = eligible if last_pk is None else eligible.filter(pk__gt=last_pk)
+        rows = list(page.order_by("pk").values_list(
+            "pk", "original_url", "media_url"
+        )[:BATCH_SIZE])
+        if not rows:
+            break
+        candidate_ids = [
+            pk for pk, original_url, media_url in rows
+            if any(urlparse(url).path.lower().endswith(VIDEO_SUFFIXES)
+                   for url in (original_url, media_url) if url)
+        ]
+        if candidate_ids:
+            Item.objects.using(alias).filter(pk__in=candidate_ids).update(
+                media_archive_status="pending"
+            )
+        last_pk = rows[-1][0]
 
 
 class Migration(migrations.Migration):

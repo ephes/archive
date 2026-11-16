@@ -238,3 +238,85 @@ fresh, created = capture_item(CurrentItem(original_url="https://example.com/lega
 assert created and fresh.pk != row.pk
 connections.close_all()
 ''')
+
+
+def test_legacy_video_migration_bounds_candidate_work(tmp_path):
+    run_journey(tmp_path, r'''
+import copy
+import sqlite3
+from unittest.mock import patch
+import django
+from django.conf import settings
+from django.db import connections
+from django.db.migrations.executor import MigrationExecutor
+from django.db.models.query import QuerySet
+
+django.setup()
+pre = [("archive", "0007_item_archived_audio_content_type_and_more")]
+target = [("archive", "0008_item_archived_video_content_type_and_more")]
+settings.DATABASES["secondary"] = copy.deepcopy(settings.DATABASES["default"])
+settings.DATABASES["secondary"]["NAME"] += ".secondary"
+for alias in ("default", "secondary"):
+    executor = MigrationExecutor(connections[alias])
+    executor.migrate(pre)
+Item = executor.loader.project_state(pre).apps.get_model("archive", "Item")
+Item.objects.using("default").create(
+    original_url="https://example.test/untouched.mp4", media_archive_status="complete")
+before = list(Item.objects.using("default").values())
+rows = []
+expected = set()
+for n in range(1205):
+    fields = dict(original_url=f"https://example.test/{n}.txt", title="Syntheticmarker",
+                  media_archive_status="complete")
+    case = n % 6
+    if case == 0:
+        fields["original_url"] = f"https://example.test/{n}.MP4?download=1#part"
+    elif case == 1:
+        fields["media_url"] = f"https://example.test/{n}.webm"
+    elif case == 2:
+        fields["original_url"] = f"https://example.test/{n}.mov"
+        fields["archived_audio_path"] = "kept.mp3"
+    elif case == 3:
+        fields["original_url"] = f"https://example.test/{n}.m4v"
+        fields["media_archive_status"] = "failed"
+    elif case == 4:
+        fields["original_url"] += "?name=movie.mp4"
+    rows.append(Item(**fields))
+Item.objects.using("secondary").bulk_create(rows)
+expected = {row.pk for n, row in enumerate(rows) if n % 6 in (0, 1)}
+db = connections["secondary"]
+sizes, selects, params_seen = [], [], []
+fetch_all = QuerySet._fetch_all
+def bounded_cache(queryset):
+    fetch_all(queryset)
+    if queryset.model._meta.label == "archive.Item" and queryset._result_cache is not None:
+        sizes.append(len(queryset._result_cache))
+def inspect(execute, sql, params, many, context):
+    params_seen.append(len(params or ()))
+    if sql.startswith("SELECT") and '"archive_item"' in sql:
+        selects.append(sql)
+    if sql.startswith("UPDATE") and '"media_archive_status"' in sql:
+        assert db.in_atomic_block
+    return execute(sql, params, many, context)
+def no_default(*args):
+    raise AssertionError("migration touched default database")
+old_limit = db.connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 250)
+try:
+    with patch.object(QuerySet, "_fetch_all", bounded_cache), db.execute_wrapper(inspect), \
+            connections["default"].execute_wrapper(no_default):
+        executor = MigrationExecutor(db)
+        executor.migrate(target)
+finally:
+    db.connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, old_limit)
+assert sizes and max(sizes) <= 200, sizes
+assert len(selects) >= 4 and all("LIMIT 200" in sql and "OFFSET" not in sql for sql in selects)
+assert max(params_seen) <= 250
+assert set(Item.objects.using("secondary").filter(
+    media_archive_status="pending").values_list("pk", flat=True)) == expected
+for row in rows:
+    actual = Item.objects.using("secondary").get(pk=row.pk)
+    assert (actual.original_url, actual.media_url, actual.title, actual.archived_audio_path) == (
+        row.original_url, row.media_url, row.title, row.archived_audio_path)
+assert list(Item.objects.using("default").values()) == before
+connections.close_all()
+''')

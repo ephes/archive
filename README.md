@@ -110,6 +110,15 @@ journeys are covered by `tests/test_historical_migrations.py`; rolling back the 
 processing timestamp restores SQLite triggers after Django rebuilds the Item table.
 No manual search rebuild is needed for these journeys.
 
+The legacy video requeue in migration `0008` reads historical rows in primary-key
+pages of 200 and updates at most 200 candidate IDs per statement, on the selected
+database inside the migration transaction. It retains the original path-suffix
+rules (`.mp4`, `.m4v`, `.mov`, `.webm`, case-insensitive, ignoring query/fragment)
+and only requeues completed rows without archived audio. This correction applies
+to future/replayed upgrades; an already-applied `0008` is not rerun. A failed
+atomic upgrade leaves no partial requeue: resolve the failure and retry `migrate`
+on the same database, without faking or unapplying migrations.
+
 FTS UPDATE triggers compare indexed text and row identity with null-safe equality;
 status/retry/publication-only writes do no index work. Migration 0019 reversibly
 installs this guard. Visibility continues to be checked against Item rows at query time.

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bound migration `0008` legacy video scanning and requeue updates to 200-row
+  primary-key batches on the selected database, preserving its atomic upgrade
+  and original suffix rules for future/replayed migrations.
+
 - Stop blocking the metadata worker on Voxhelm batch transcriptions: the worker
   uploads oversized archived audio, submits the job and stores it on the item
   (migration 0022: `transcript_job_id`, `transcript_job_ref`,

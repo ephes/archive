@@ -117,9 +117,7 @@ def test_matching_lengths_keep_validated_responses(
         assert response["Content-Length"] == length
     if content_range is not None:
         assert response["Content-Range"] == content_range
-    content = (
-        b"".join(response.streaming_content) if response.streaming else response.content
-    )
+    content = b"".join(response.streaming_content) if response.streaming else response.content
     assert content == body
     response.close()
     assert len(observed_closes) == 1

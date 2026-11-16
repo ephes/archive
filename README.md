@@ -33,7 +33,19 @@ Public endpoints:
   Transient pre-stream 5xx errors always use `Cache-Control: no-store`, including
   seek failures, storage-open and article-audio preparation failures, so a recovered
   backend can be retried immediately. This is at least as restrictive as private
-  caller policies. Successful public delivery retains its one-hour cache lifetime.
+  caller policies. Successful public delivery uses `Cache-Control: public, no-cache`:
+  caches may store the audio but must revalidate every reuse with the origin, which
+  rechecks that the item is still public. Each response carries a strong `ETag`
+  bound to the route, item, stored object key, recorded size and content type, so a
+  matching `If-None-Match` gets a cheap `304` (handle closed once) and a new object
+  generation gets a new validator. `If-Range` is honoured only when it equals the
+  current `ETag`; anything else, including dates, gets the whole file. Unpublished or
+  deleted items answer `404` with `no-store`; all other error responses of both
+  routes (except a `416` for a stable unsatisfiable range) are `no-store` too. The
+  revocation window for conforming caches is therefore the next request. Responses
+  stored before this policy shipped, under the earlier `public, max-age=3600`, may
+  still be reused for up to one hour after deployment, and bytes already downloaded
+  by clients cannot be recalled.
   Seek failures log one fixed `stored_media_range_seek_failed` event without backend
   exception text, traceback, object key or signed URL; acquired handles close once.
   Before any length, range or body is committed, a known recorded size is compared

@@ -35,7 +35,9 @@ class Command(BaseCommand):
             else "Dry-run mode: reporting upload reservations only."
         )
         reservation_ids = list(
-            PendingArchiveMediaUpload.objects.using(using).order_by("pk").values_list("pk", flat=True)
+            PendingArchiveMediaUpload.objects.using(using)
+            .order_by("pk")
+            .values_list("pk", flat=True)
         )
         for ordinal, reservation_id in enumerate(reservation_ids, start=1):
             try:

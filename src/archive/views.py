@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import logging
 import re
 from contextlib import suppress
 from datetime import UTC
+from functools import wraps
 from urllib.parse import urlencode
 
 from django.conf import settings
@@ -22,6 +24,7 @@ from django.http import (
     HttpRequest,
     HttpResponse,
     HttpResponseBadRequest,
+    HttpResponseNotFound,
     JsonResponse,
 )
 from django.shortcuts import get_object_or_404, redirect, render
@@ -521,6 +524,36 @@ def weekly_items_json(request: HttpRequest, week: str) -> JsonResponse:
     )
 
 
+# Public audio is mutable (unpublication, replacement), so every reuse must be
+# revalidated: caches may store it but must ask the origin, which rechecks
+# visibility. The ETag binds the stored object generation for cheap 304s.
+PUBLIC_AUDIO_CACHE_CONTROL = "public, no-cache"
+
+
+def _public_audio_etag(route: str, pk: int, object_name: str, size: int, content_type: str) -> str:
+    identity = "\0".join((route, str(pk), object_name, str(size), content_type))
+    return '"' + hashlib.sha256(identity.encode()).hexdigest()[:32] + '"'
+
+
+def _uncacheable_public_audio_errors(view):
+    """Error responses of public audio routes are never stored by caches."""
+
+    @wraps(view)
+    def wrapped(request: HttpRequest, *args, **kwargs) -> HttpResponse:
+        try:
+            response = view(request, *args, **kwargs)
+        except Http404:
+            response = HttpResponseNotFound(
+                "Audio is not available.", content_type="text/plain; charset=utf-8"
+            )
+        if response.status_code >= 400 and response.status_code != 416:
+            response["Cache-Control"] = "no-store"
+        return response
+
+    return wrapped
+
+
+@_uncacheable_public_audio_errors
 @require_http_methods(["GET", "HEAD"])
 def item_archived_audio(request: HttpRequest, pk: int) -> HttpResponse:
     item = get_object_or_404(Item, pk=pk, is_public=True)
@@ -536,12 +569,20 @@ def item_archived_audio(request: HttpRequest, pk: int) -> HttpResponse:
             headers={"Cache-Control": "no-store"},
         )
 
+    content_type = item.archived_audio_content_type or "audio/mpeg"
     return ranged_file_response(
         request,
         file_handle=audio_file,
         size=item.archived_audio_size_bytes,
-        content_type=item.archived_audio_content_type or "audio/mpeg",
-        cache_control="public, max-age=3600",
+        content_type=content_type,
+        cache_control=PUBLIC_AUDIO_CACHE_CONTROL,
+        etag=_public_audio_etag(
+            "archived-audio",
+            item.pk,
+            item.archived_audio_path,
+            item.archived_audio_size_bytes,
+            content_type,
+        ),
     )
 
 
@@ -558,6 +599,7 @@ def item_detail(request: HttpRequest, pk: int) -> HttpResponse:
     )
 
 
+@_uncacheable_public_audio_errors
 @require_http_methods(["GET", "HEAD"])
 def item_article_audio(request: HttpRequest, pk: int) -> HttpResponse:
     item = get_object_or_404(Item, pk=pk, is_public=True)
@@ -604,12 +646,20 @@ def item_article_audio(request: HttpRequest, pk: int) -> HttpResponse:
             audio_file.close()
         raise
 
+    content_type = item.article_audio_content_type or "audio/mpeg"
     return ranged_file_response(
         request,
         file_handle=audio_file,
         size=item.article_audio_size_bytes or 0,
-        content_type=item.article_audio_content_type or "audio/mpeg",
-        cache_control="public, max-age=3600",
+        content_type=content_type,
+        cache_control=PUBLIC_AUDIO_CACHE_CONTROL,
+        etag=_public_audio_etag(
+            "article-audio",
+            item.pk,
+            item.article_audio_file.name,
+            item.article_audio_size_bytes or 0,
+            content_type,
+        ),
     )
 
 

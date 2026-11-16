@@ -53,9 +53,7 @@ def _relocating_save(monkeypatch, relocate, *, during=None):
 
 def _old_mtime(monkeypatch):
     storage = storages["archive_media"]
-    monkeypatch.setattr(
-        storage, "get_modified_time", lambda path: datetime(2000, 1, 1, tzinfo=UTC)
-    )
+    monkeypatch.setattr(storage, "get_modified_time", lambda path: datetime(2000, 1, 1, tzinfo=UTC))
 
 
 def _podcast_item() -> Item:
@@ -105,7 +103,9 @@ def test_relocated_key_is_refused_before_publication_while_sweeper_runs(monkeypa
 @pytest.mark.parametrize(
     "relocate",
     [
-        pytest.param(lambda name: name.rsplit("/", 2)[0] + "/other/source.mp3", id="sibling-prefix"),
+        pytest.param(
+            lambda name: name.rsplit("/", 2)[0] + "/other/source.mp3", id="sibling-prefix"
+        ),
         pytest.param(lambda name: name.rsplit("/", 1)[0] + "/nested/source.mp3", id="nested"),
         pytest.param(lambda name: name.rsplit("/", 1)[0] + "/../x/source.mp3", id="parent-segment"),
         pytest.param(lambda name: "unrelated/source.mp3", id="unrelated"),
@@ -156,9 +156,7 @@ def test_refusal_never_touches_another_uploads_reservation_or_object(monkeypatch
             using="default",
         )
 
-    assert list(PendingArchiveMediaUpload.objects.values_list("prefix", flat=True)) == [
-        live_prefix
-    ]
+    assert list(PendingArchiveMediaUpload.objects.values_list("prefix", flat=True)) == [live_prefix]
     assert storage.exists(live_object)
 
 

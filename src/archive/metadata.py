@@ -682,7 +682,7 @@ def _normalize_url(value: str, base_url: str) -> str:
 
 
 # Characters that never appear in a usable host, whether reg-name or IDN.
-_FORBIDDEN_HOST_CHARACTERS = frozenset(" \"<>\\^`{|}%")
+_FORBIDDEN_HOST_CHARACTERS = frozenset(' "<>\\^`{|}%')
 
 
 def _has_forbidden_url_control(url: str) -> bool:
@@ -709,9 +709,7 @@ def _is_valid_http_authority(parsed) -> bool:
         except ValueError:
             return False
         return True
-    return not any(
-        char in _FORBIDDEN_HOST_CHARACTERS or char.isspace() for char in hostname
-    )
+    return not any(char in _FORBIDDEN_HOST_CHARACTERS or char.isspace() for char in hostname)
 
 
 def _first_nonempty(*values: str | None) -> str:

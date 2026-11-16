@@ -241,6 +241,8 @@ def _is_referenced_archive_media_path(path: str, *, using: str) -> bool:
     return (
         Item.objects.using(using)
         .select_for_update()
-        .filter(Q(archived_audio_path=path) | Q(archived_video_path=path) | Q(article_audio_file=path))
+        .filter(
+            Q(archived_audio_path=path) | Q(archived_video_path=path) | Q(article_audio_file=path)
+        )
         .exists()
     )

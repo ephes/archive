@@ -6,6 +6,11 @@
   invalid/zero/out-of-range port, malformed bracketed host or IPv6 zone, host
   delimiters/whitespace, URL controls), keeping other metadata and valid relative,
   IPv6 and internationalized references.
+- Serve public archived/article audio with `public, no-cache` and a strong
+  generation `ETag` (304 on `If-None-Match`, `If-Range` only on an exact match)
+  instead of `max-age=3600`, so unpublication takes effect at the next request.
+  Audio 404/405 and other error responses are `no-store`.
+
 - Treat impossible optional publication dates (for example `2026-02-31`) as
   absent instead of aborting metadata extraction; try the next HTML/JSON-LD date
   candidate and keep title, media and other extracted metadata.

@@ -14,7 +14,8 @@ import re
 from typing import IO
 
 from django.db.models.fields.files import FieldFile
-from django.http import FileResponse, HttpRequest, HttpResponse
+from django.http import FileResponse, HttpRequest, HttpResponse, HttpResponseNotModified
+from django.utils.http import parse_etags
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ def ranged_file_response(
     size: int,
     content_type: str,
     cache_control: str,
+    etag: str | None = None,
 ) -> HttpResponse:
     """Answer GET/HEAD for an open file of ``size`` bytes; the response owns and closes the file.
 
@@ -90,6 +92,10 @@ def ranged_file_response(
     reports its own length (see ``opened_object_length``) and it disagrees with
     a known recorded size, no length, range or body is committed: the request
     gets a non-cacheable 502 and the handle is closed.
+
+    ``etag`` is a strong validator for the current stored generation. A matching
+    ``If-None-Match`` (weak comparison) answers 304 and closes the handle; an
+    ``If-Range`` is honoured only when it equals ``etag`` exactly.
     """
 
     def finalize(response: HttpResponse) -> HttpResponse:
@@ -103,16 +109,25 @@ def ranged_file_response(
             if available is not None and available != size:
                 logger.warning("stored_media_length_mismatch")
                 return finalize(HttpResponse("Audio is temporarily unavailable.", status=502))
+        if etag is not None and _if_none_match(request.headers.get("If-None-Match"), etag):
+            # Conditionals precede Range (RFC 9110 section 13.2.2); the handle closes below.
+            not_modified = HttpResponseNotModified()
+            not_modified["ETag"] = etag
+            return finalize(not_modified)
         byte_range = None
-        # Without a validator (ETag/Last-Modified) an If-Range can never match, so
+        # An If-Range other than the current strong validator never matches, so
         # such a request gets the whole file (RFC 9110 section 13.1.5).
-        if request.method == "GET" and size > 0 and "If-Range" not in request.headers:
+        if_range = request.headers.get("If-Range")
+        range_allowed = if_range is None or (etag is not None and if_range == etag)
+        if request.method == "GET" and size > 0 and range_allowed:
             try:
                 byte_range = parse_single_byte_range(request.headers.get("Range", ""), size)
             except UnsatisfiableRange:
                 response = HttpResponse(status=416)
                 response["Content-Range"] = f"bytes */{size}"
                 response["Accept-Ranges"] = "bytes"
+                if etag is not None:
+                    response["ETag"] = etag
                 return finalize(response)
 
         if byte_range is None:
@@ -137,6 +152,8 @@ def ranged_file_response(
             response["Content-Range"] = f"bytes {start}-{end}/{size}"
             response["Content-Length"] = str(length)
             response["Accept-Ranges"] = "bytes"
+        if etag is not None:
+            response["ETag"] = etag
         if request.method == "HEAD":
             # Keep GET headers without iterating the body. The response already
             # owns the file and closes it exactly once when the server closes it.
@@ -182,3 +199,14 @@ def opened_object_length(file_handle: object) -> int | None:
     if isinstance(reported, bool) or not isinstance(reported, int) or reported < 0:
         return None
     return reported
+
+
+def _if_none_match(header: str | None, etag: str) -> bool:
+    """Weak comparison of ``If-None-Match`` against the current validator."""
+    if not header:
+        return False
+    candidates = parse_etags(header)
+    if candidates == ["*"]:
+        return True
+    current = etag.removeprefix("W/")
+    return any(candidate.removeprefix("W/") == current for candidate in candidates)

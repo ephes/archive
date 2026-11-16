@@ -249,6 +249,11 @@ def _requeue(
                     transcript_generated=False,
                     transcript_status=EnrichmentStatus.PENDING,
                     transcript_error="",
+                    # Transcribe afresh: never resume an earlier batch job.
+                    transcript_job_id="",
+                    transcript_job_ref="",
+                    transcript_job_submitted_at=None,
+                    transcript_poll_at=None,
                 )
             )
         elif step == "article_audio":

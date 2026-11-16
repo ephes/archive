@@ -12,7 +12,6 @@ from archive.models import Item, ItemKind
 def clock(monkeypatch, settings):
     now = [0.0]
     monkeypatch.setattr(tr, "monotonic", lambda: now[0])
-    monkeypatch.setattr(tr, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
     settings.ARCHIVE_TRANSCRIPTION_API_KEY = "synthetic"
     settings.ARCHIVE_TRANSCRIPTION_POLL_SECONDS = 3
     return now
@@ -86,14 +85,16 @@ def test_batch_pipeline_does_not_restart_timeout(clock, monkeypatch, settings, c
     monkeypatch.setattr(
         tr,
         "_poll_batch_transcription_job",
-        lambda **kw: pytest.fail("poll started after the shared budget was consumed by sleep"),
+        lambda **kw: pytest.fail("the submitting pass waited for the batch job"),
     )
     if complete:
         assert tr.generate_item_transcript(item, timeout=10) == "words"
         assert calls == [("stage", 10), ("submit", 6), ("coverage", 2)]
     else:
-        with pytest.raises(tr.TranscriptionGenerationError, match="[Tt]ime"):
+        # A queued job is handed back for a later poll instead of being awaited.
+        with pytest.raises(tr.TranscriptionPending) as pending:
             tr.generate_item_transcript(item, timeout=10)
+        assert pending.value.job.job_id == "job-a"
         assert calls == [("stage", 10), ("submit", 6)]
 
 
@@ -198,15 +199,31 @@ def test_real_batch_boundaries_share_deadline(clock, monkeypatch, settings, expi
         return Response(payload)
 
     monkeypatch.setattr(tr, "urlopen", request)
-    expected = [("uploads", 10), ("jobs", 6), ("job-a", 2), ("segments.json", 1)]
-    if expire_at is None:
-        assert tr.generate_item_transcript(item, timeout=10) == "words"
-        assert seen == expected
-    else:
+    submitting = [("uploads", 10), ("jobs", 6)]
+    polling = [("job-a", 10), ("segments.json", 1)]
+    if expire_at in ("uploads", "jobs"):
         with pytest.raises(tr.TranscriptionGenerationError, match="[Tt]ime"):
             tr.generate_item_transcript(item, timeout=10)
-        index = [name for name, _ in expected].index(expire_at)
-        assert seen == expected[: index + 1]
+        index = [name for name, _ in submitting].index(expire_at)
+        assert seen == submitting[: index + 1]
+        return
+    with pytest.raises(tr.TranscriptionPending) as submitted:
+        tr.generate_item_transcript(item, timeout=10)
+    assert seen == submitting
+    # The later poll pass has its own budget, shared by the status and evidence requests.
+    clock[0] = 0
+    seen.clear()
+    if expire_at is None:
+        assert tr.generate_item_transcript(item, timeout=10, batch_job=submitted.value.job) == (
+            "words"
+        )
+        assert seen == polling
+    else:
+        with pytest.raises(tr.TranscriptionPending) as polled:
+            tr.generate_item_transcript(item, timeout=10, batch_job=submitted.value.job)
+        assert "timeout exceeded" in polled.value.poll_error
+        index = [name for name, _ in polling].index(expire_at)
+        assert seen == polling[: index + 1]
 
 
 def test_storage_staging_deadline_closes_source_without_starting_transport(clock, monkeypatch):

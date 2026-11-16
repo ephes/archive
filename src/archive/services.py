@@ -36,7 +36,14 @@ from archive.metadata import extract_metadata_from_url
 from archive.models import EnrichmentStatus, Item, ItemKind, ProcessingStep
 from archive.processing_health import media_archive_step, record_step_outcome
 from archive.summaries import generate_item_summaries
-from archive.transcriptions import can_transcribe_item, generate_item_transcript
+from archive.transcriptions import (
+    BatchTranscriptionJob,
+    TranscriptionJobFailed,
+    TranscriptionPending,
+    can_transcribe_item,
+    generate_item_transcript,
+    transcription_job_ref,
+)
 
 logger = logging.getLogger(__name__)
 SUMMARY_RETRY_DELAYS = (
@@ -70,6 +77,13 @@ TRANSCRIPT_SOURCE_FIELDS = (
     "archived_audio_size_bytes",
     "archived_video_content_type",
     "archived_video_size_bytes",
+)
+# The Voxhelm batch transcription job in flight, polled on later worker passes.
+TRANSCRIPT_JOB_FIELDS = (
+    "transcript_job_id",
+    "transcript_job_ref",
+    "transcript_job_submitted_at",
+    "transcript_poll_at",
 )
 
 
@@ -219,9 +233,12 @@ def prepare_item_for_enrichment(item: Item) -> Item:
         item.transcript_status = EnrichmentStatus.COMPLETE
         item.transcript_error = ""
         item.transcript_generated = bool(item.transcript_generated)
+        _clear_transcript_job(item)
     else:
         item.transcript_status = EnrichmentStatus.PENDING
         item.transcript_error = ""
+        # Keep a running batch job (it is polled, never uploaded again), but poll it now.
+        item.transcript_poll_at = None
 
     if item.has_archived_audio:
         item.media_archive_status = EnrichmentStatus.COMPLETE
@@ -299,6 +316,8 @@ def enrich_item_metadata(
                     if item._has_processing_status() and (
                         not owned or item.processing_started_at != started_at
                     ):
+                        continue
+                    if stage == "transcript" and not _transcript_poll_due(item, timezone.now()):
                         continue
                     setattr(item, field, EnrichmentStatus.PROCESSING)
                     item.processing_started_at = started_at
@@ -412,15 +431,34 @@ def enrich_item_transcript(item: Item, timeout: int = 300) -> bool:
             if item.has_transcript or not can_transcribe_item(item):
                 item.transcript_status = EnrichmentStatus.COMPLETE
                 item.transcript_error = ""
-                item.save(using=using, update_fields=["transcript_status", "transcript_error"])
+                _clear_transcript_job(item)
+                item.save(
+                    using=using,
+                    update_fields=["transcript_status", "transcript_error", *TRANSCRIPT_JOB_FIELDS],
+                )
         return True
 
-    result_state = _result_state(item, "transcript", TRANSCRIPT_SOURCE_FIELDS)
+    result_state = _result_state(
+        item, "transcript", (*TRANSCRIPT_SOURCE_FIELDS, *TRANSCRIPT_JOB_FIELDS)
+    )
     failure_state = _failure_state(item, "transcript")
     captured = (item.transcript, item.transcript_generated)
+    stored_job = _stored_transcript_job(item)
     try:
-        transcript = generate_item_transcript(item=item, timeout=timeout)
+        if stored_job is None:
+            transcript = generate_item_transcript(item=item, timeout=timeout)
+        else:
+            # Poll the running job; never upload the audio again for it.
+            transcript = generate_item_transcript(item=item, timeout=timeout, batch_job=stored_job)
+    except TranscriptionPending as pending:
+        return _mark_transcript_pending(item, pending, expected=result_state)
     except Exception as exc:
+        if stored_job is not None and not isinstance(exc, TranscriptionJobFailed):
+            # The job may still finish; keep it and poll again until its maximum age.
+            logger.warning("Transcript job poll failed for item %s: %s", item.pk, exc)
+            return _mark_transcript_pending(
+                item, TranscriptionPending(stored_job, poll_error=str(exc)), expected=result_state
+            )
         logger.exception("Transcript generation failed for item %s", item.pk)
         return _mark_transcript_failure(item, str(exc), expected=failure_state)
 
@@ -433,11 +471,13 @@ def enrich_item_transcript(item: Item, timeout: int = 300) -> bool:
             item.transcript_generated = True
         item.transcript_status = EnrichmentStatus.COMPLETE
         item.transcript_error = ""
+        _clear_transcript_job(item)
         update_fields = [
             "transcript",
             "transcript_generated",
             "transcript_status",
             "transcript_error",
+            *TRANSCRIPT_JOB_FIELDS,
         ]
 
         if _summary_should_refresh_from_transcript(item):
@@ -457,6 +497,71 @@ def enrich_item_transcript(item: Item, timeout: int = 300) -> bool:
         item.save(using=using, update_fields=sorted(set(update_fields)))
         record_step_outcome(ProcessingStep.TRANSCRIPT, succeeded=True, item_id=item.pk, using=using)
         return True
+
+
+def _stored_transcript_job(item: Item) -> BatchTranscriptionJob | None:
+    """Return the item's running batch job, unless it was made for an older source."""
+    job_id = item.transcript_job_id.strip()
+    if not job_id or item.transcript_job_ref != transcription_job_ref(item):
+        return None
+    return BatchTranscriptionJob(job_id=job_id, job_ref=item.transcript_job_ref)
+
+
+def _clear_transcript_job(item: Item) -> None:
+    item.transcript_job_id = ""
+    item.transcript_job_ref = ""
+    item.transcript_job_submitted_at = None
+    item.transcript_poll_at = None
+
+
+def _mark_transcript_pending(item: Item, pending: TranscriptionPending, *, expected: dict) -> bool:
+    """Store a running batch job and when to poll it; fail it once it is too old."""
+    using = item._state.db or router.db_for_write(Item, instance=item)
+    now = timezone.now()
+    job = pending.job
+    with transaction.atomic(using=using):
+        item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
+        if not _current_result(item, "transcript", expected):
+            return True
+        if (
+            job.job_id != item.transcript_job_id
+            or job.job_ref != item.transcript_job_ref
+            or item.transcript_job_submitted_at is None
+        ):
+            item.transcript_job_submitted_at = now
+        item.transcript_job_id = job.job_id
+        item.transcript_job_ref = job.job_ref
+        max_age = settings.ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS
+        if (now - item.transcript_job_submitted_at).total_seconds() >= max_age:
+            message = f"Batch transcription job {job.job_id} did not finish within {max_age:g} s"
+            if pending.poll_error:
+                message += f"; last status request: {pending.poll_error}"
+            logger.warning("Transcript failed for item %s: %s", item.pk, message)
+            record_step_outcome(
+                ProcessingStep.TRANSCRIPT, succeeded=False, item_id=item.pk, using=using
+            )
+            item.transcript_error = message
+            item.transcript_status = (
+                EnrichmentStatus.COMPLETE if item.has_transcript else EnrichmentStatus.FAILED
+            )
+            _clear_transcript_job(item)
+        else:
+            item.transcript_status = EnrichmentStatus.PENDING
+            item.transcript_error = pending.poll_error
+            item.transcript_poll_at = now + timedelta(
+                seconds=settings.ARCHIVE_TRANSCRIPTION_POLL_SECONDS
+            )
+            if pending.poll_error:
+                record_step_outcome(
+                    ProcessingStep.TRANSCRIPT, succeeded=False, item_id=item.pk, using=using
+                )
+            else:
+                logger.info("Transcript job %s for item %s is still running", job.job_id, item.pk)
+        item.save(
+            using=using,
+            update_fields=["transcript_status", "transcript_error", *TRANSCRIPT_JOB_FIELDS],
+        )
+        return item.transcript_status == EnrichmentStatus.PENDING and not pending.poll_error
 
 
 def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
@@ -804,6 +909,11 @@ def _recover_processing_items(query: Q) -> int:
                 When(article_audio_status=EnrichmentStatus.PROCESSING, then=Value(None)),
                 default=F("article_audio_poll_at"),
             ),
+            # A recovered transcript keeps its batch job and polls it on the next pass.
+            transcript_poll_at=Case(
+                When(transcript_status=EnrichmentStatus.PROCESSING, then=Value(None)),
+                default=F("transcript_poll_at"),
+            ),
             processing_started_at=Value(None),
         )
     )
@@ -820,7 +930,7 @@ def claim_pending_item(*, exclude_ids: set[int] | None = None) -> Item | None:
             .filter(
                 Q(enrichment_status=EnrichmentStatus.PENDING)
                 | _claimable_media_archive_query(now)
-                | _claimable_transcript_query()
+                | _claimable_transcript_query(now)
                 | _claimable_summary_query(now)
                 | _claimable_article_audio_query(now)
             )
@@ -848,7 +958,7 @@ def claim_pending_item(*, exclude_ids: set[int] | None = None) -> Item | None:
             update_fields.extend(
                 ["media_archive_status", "media_archive_error", "media_archive_retry_at"]
             )
-        if _transcript_should_start(item):
+        if _transcript_should_start(item, now):
             item.transcript_status = EnrichmentStatus.PROCESSING
             item.transcript_error = ""
             update_fields.extend(["transcript_status", "transcript_error"])
@@ -863,7 +973,7 @@ def claim_pending_item(*, exclude_ids: set[int] | None = None) -> Item | None:
             # stage too, so every returned claim has a recoverable timestamp.
             for stage, query in (
                 ("media_archive", _claimable_media_archive_query(now)),
-                ("transcript", _claimable_transcript_query()),
+                ("transcript", _claimable_transcript_query(now)),
                 ("article_audio", _claimable_article_audio_query(now)),
             ):
                 if Item.objects.using(using).filter(pk=item.pk).filter(query).exists():
@@ -1054,6 +1164,7 @@ _FAILURE_FIELDS = {
         "archived_audio_size_bytes",
         "archived_video_content_type",
         "archived_video_size_bytes",
+        *TRANSCRIPT_JOB_FIELDS,
     ),
     "media_archive": (
         "archived_audio_path",
@@ -1146,7 +1257,12 @@ def _mark_transcript_failure(item: Item, error_message: str, *, expected: dict) 
             item.transcript_status = EnrichmentStatus.COMPLETE
         else:
             item.transcript_status = EnrichmentStatus.FAILED
-        item.save(using=using, update_fields=["transcript_status", "transcript_error"])
+        # A failed step has no job to poll; a retry transcribes afresh.
+        _clear_transcript_job(item)
+        item.save(
+            using=using,
+            update_fields=["transcript_status", "transcript_error", *TRANSCRIPT_JOB_FIELDS],
+        )
         return False
 
 
@@ -1233,7 +1349,7 @@ def _summary_should_start(item: Item, now: datetime) -> bool:
     return item.summary_retry_at is None or item.summary_retry_at <= now
 
 
-def _claimable_transcript_query() -> Q:
+def _claimable_transcript_query(now: datetime) -> Q:
     transcribable_query = (
         ~Q(archived_audio_path="")
         | ~Q(archived_video_path="")
@@ -1241,7 +1357,11 @@ def _claimable_transcript_query() -> Q:
         | ~Q(media_url="")
         | Q(kind__in=TRANSCRIBABLE_ITEM_KINDS)
     )
-    return Q(transcript_status=EnrichmentStatus.PENDING) & transcribable_query
+    return (
+        Q(transcript_status=EnrichmentStatus.PENDING)
+        & transcribable_query
+        & (Q(transcript_poll_at__isnull=True) | Q(transcript_poll_at__lte=now))
+    )
 
 
 def _claimable_media_archive_query(now: datetime) -> Q:
@@ -1252,8 +1372,16 @@ def _claimable_media_archive_query(now: datetime) -> Q:
     )
 
 
-def _transcript_should_start(item: Item) -> bool:
-    return item.transcript_status == EnrichmentStatus.PENDING and can_transcribe_item(item)
+def _transcript_should_start(item: Item, now: datetime) -> bool:
+    return (
+        item.transcript_status == EnrichmentStatus.PENDING
+        and _transcript_poll_due(item, now)
+        and can_transcribe_item(item)
+    )
+
+
+def _transcript_poll_due(item: Item, now: datetime) -> bool:
+    return item.transcript_poll_at is None or item.transcript_poll_at <= now
 
 
 def _media_archive_should_start(item: Item, now: datetime) -> bool:
@@ -1354,6 +1482,7 @@ def request_item_reprocess(item: Item) -> Item:
                 "transcript_status",
                 "transcript_error",
                 "transcript_generated",
+                *TRANSCRIPT_JOB_FIELDS,
                 "media_archive_status",
                 "media_archive_error",
                 "media_archive_retry_count",
@@ -1442,6 +1571,20 @@ def _normalize_transcript_fields(
         changes=changes,
         update_fields=update_fields,
     )
+    for field_name, value in (
+        ("transcript_job_id", ""),
+        ("transcript_job_ref", ""),
+        ("transcript_job_submitted_at", None),
+        ("transcript_poll_at", None),
+    ):
+        _set_normalized_attr(
+            item=item,
+            field_name=field_name,
+            value=value,
+            label=field_name.removeprefix("transcript_"),
+            changes=changes,
+            update_fields=update_fields,
+        )
     _append_normalization_description(
         feature="transcript",
         reason=reason,

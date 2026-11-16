@@ -437,7 +437,10 @@ Important values:
 - `ARCHIVE_TRANSCRIPTION_API_KEY` defaults to `ARCHIVE_SUMMARY_API_KEY`
 - `ARCHIVE_TRANSCRIPTION_API_BASE` defaults to `ARCHIVE_SUMMARY_API_BASE`
 - `ARCHIVE_TRANSCRIPTION_MODEL` defaults to `gpt-4o-mini-transcribe`
-- `ARCHIVE_TRANSCRIPTION_POLL_SECONDS` defaults to `30`
+- `ARCHIVE_TRANSCRIPTION_POLL_SECONDS` defaults to `60`: how long the worker waits before it asks
+  Voxhelm again about a running batch transcription job
+- `ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS` defaults to `7200`: a batch job that is still
+  unfinished (or whose status cannot be read) this long after submission fails the transcript step
 - `ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS` defaults to `600`: a Voxhelm batch transcript whose
   segments leave a longer stretch of audio uncovered is rejected as incomplete; `0` disables the check.
   Coverage uses the sorted union of intervals without changing transcript order. Segment times
@@ -652,7 +655,16 @@ transcription is also asynchronous and writes transcript text back onto the item
 source is available, preferring archived local audio first, then archived local video, and falling back to
 direct remote media URLs within the sync API size limit. Oversized archived local audio now stages into
 Voxhelm's batch upload path (`POST /v1/uploads` plus `POST /v1/jobs` with `input.kind=upload`) instead of
-trying to chunk/transcode inside Archive. Archive then reads the job's segment JSON and rejects the
+trying to chunk/transcode inside Archive. The worker does not wait for that job: it stores the job id on the
+item (`transcript_job_id`, with the job's source fingerprint and submission time), leaves the transcript step
+`pending` with a `transcript_poll_at` time `ARCHIVE_TRANSCRIPTION_POLL_SECONDS` later, and moves on to other
+items. A later pass makes one `GET /v1/jobs/<id>` request: a running job is polled again later, a failed job
+fails the step and forgets the job, and a finished job is checked and stored. A stored job is never uploaded
+again; status requests that fail (HTTP errors, timeouts) keep the job and retry until
+`ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS` (2 hours) after submission, then the step fails. Because the job
+lives in the database, a worker restart or deploy picks the polling up again. A job made for an older source
+(the archived audio changed) is not resumed; the current audio is uploaded instead. Summaries generated while
+the job runs are refreshed from the transcript once it arrives. Archive then reads the job's segment JSON and rejects the
 transcript as incomplete when a stretch of audio longer than `ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS`
 (10 minutes) has no segment: whisper.cpp splits long audio across processors and ignores a worker
 thread that fails, so a job can succeed with whole parts of the audio missing (item 408, a 3:09 h
@@ -753,6 +765,8 @@ just manage reprocess_items --ids 408 --only transcript --regenerate --dry-run
   state the worker uses for its own scheduled retries, so the full 5 min / 30 min / 2 h backoff
   applies again if the retry fails. `article_audio` and `transcript` set the step back to
   `pending`.
+- `transcript` also forgets any earlier Voxhelm batch job of the item, so the worker uploads the
+  audio and submits a new job instead of polling the old one.
 - `--regenerate` (with `--only transcript`) also re-queues complete transcripts the archive
   generated itself, for example one that is missing parts of the audio. It clears the stored
   transcript, so the item shows none until the worker has transcribed it again (and none if
@@ -764,7 +778,7 @@ just manage reprocess_items --ids 408 --only transcript --regenerate --dry-run
   time, and a retry that fails again falls back to the normal backoff. Not available for
   `article_audio`: the worker runs pending article audio whenever it processes the item for
   another step, so no due time can hold it back. Not available for `transcript` either: the
-  worker claims every pending transcript right away.
+  worker claims every pending transcript right away (a running batch job only at its poll time).
 - A successful summary immediately starts paid article audio (text-to-speech) for articles
   whose article audio is `pending`, in the same worker pass. `--hold-article-audio` (with
   `--only summary`) marks that pending, not yet submitted article audio as `failed` with a
@@ -1208,10 +1222,11 @@ article-audio downloads retain their separate configured media limit. Authentica
 exchanges run in a disposable transport process with one elapsed timeout covering
 DNS, connect, same-origin redirects, response reads (including errors), and
 transport teardown. Timeout kills and reaps that process; no timed-out request
-thread remains. Each transcription attempt has one monotonic elapsed budget
-(`timeout`, normally 300 seconds) shared across source loading, staging, job
-submission, polling sleeps/requests, segment coverage evidence and final result
-admission. Remote (non-archived) media sources are fetched in the same disposable
+thread remains. Each transcription pass has one monotonic elapsed budget
+(the worker's `--transcription-timeout`, 300 seconds by default) shared across source
+loading, staging, job submission, the job status request, segment coverage evidence and
+final result admission. Submitting and polling a batch job are separate passes, each with
+its own budget; a poll pass that runs out of time keeps the job and polls again later. Remote (non-archived) media sources are fetched in the same disposable
 download process as direct media archival, killed at the remaining budget, so DNS,
 redirects and drip-fed bodies cannot outlast it. Every network step receives only
 the remaining time; expired attempts

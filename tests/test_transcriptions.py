@@ -10,6 +10,8 @@ from archive.models import Item, ItemKind
 from archive.transcriptions import (
     MAX_TRANSCRIPTION_BYTES,
     TranscriptionGenerationError,
+    TranscriptionJobFailed,
+    TranscriptionPending,
     can_transcribe_item,
     find_transcript_gaps,
     generate_item_transcript,
@@ -51,6 +53,13 @@ class _FakeResponse:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         return None
+
+
+def _transcribe_through_batch_job(item: Item) -> str:
+    """Upload and submit the batch job, then poll it once as a later worker pass does."""
+    with pytest.raises(TranscriptionPending) as pending:
+        generate_item_transcript(item=item)
+    return generate_item_transcript(item=item, batch_job=pending.value.job)
 
 
 def _delete_archived_object(path: str) -> None:
@@ -258,7 +267,6 @@ def test_generate_item_transcript_stages_oversized_archived_audio_for_batch_job(
         item.archived_audio_path,
         ContentFile(b"oversized-archived-audio".ljust(MAX_TRANSCRIPTION_BYTES + 1, b"x")),
     )
-    monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
 
     def fake_urlopen(request, timeout):
         assert request.full_url != "https://cdn.example.com/episode.mp3"
@@ -299,7 +307,7 @@ def test_generate_item_transcript_stages_oversized_archived_audio_for_batch_job(
 
     monkeypatch.setattr("archive.transcriptions.urlopen", fake_urlopen)
 
-    assert generate_item_transcript(item=item) == "Batch staged transcript"
+    assert _transcribe_through_batch_job(item) == "Batch staged transcript"
 
 
 def _oversized_archived_audio_item() -> Item:
@@ -376,7 +384,6 @@ def test_generate_item_transcript_rejects_batch_transcript_with_missing_audio_pa
     item = _oversized_archived_audio_item()
     settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
     settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
-    monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
     requested: list[str] = []
     segments = _segments((0, 3536), (5672, 6378), (8508, 9208))
     monkeypatch.setattr(
@@ -388,7 +395,7 @@ def test_generate_item_transcript_rejects_batch_transcript_with_missing_audio_pa
         TranscriptionGenerationError,
         match=r"job-123 is incomplete: 2 stretch\(es\) .* from 0:58:56 to 1:34:32",
     ):
-        generate_item_transcript(item=item)
+        _transcribe_through_batch_job(item)
     assert requested[-1].endswith("/jobs/job-123/artifacts/transcript.json")
 
 
@@ -399,7 +406,6 @@ def test_generate_item_transcript_accepts_batch_transcript_covering_the_audio(
     item = _oversized_archived_audio_item()
     settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
     settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
-    monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
     requested: list[str] = []
     # A five-minute music break stays below the default ten-minute limit.
     segments = _segments((0, 3000), (3300, 11343))
@@ -408,7 +414,7 @@ def test_generate_item_transcript_accepts_batch_transcript_covering_the_audio(
         _batch_job_urlopen(segments=segments, requested=requested),
     )
 
-    assert generate_item_transcript(item=item) == "Batch staged transcript"
+    assert _transcribe_through_batch_job(item) == "Batch staged transcript"
     assert requested[-1].endswith("/jobs/job-123/artifacts/transcript.json")
 
 
@@ -418,14 +424,13 @@ def test_generate_item_transcript_skips_coverage_check_when_disabled(monkeypatch
     settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
     settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
     settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = 0
-    monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
     requested: list[str] = []
     monkeypatch.setattr(
         "archive.transcriptions.urlopen",
         _batch_job_urlopen(segments=_segments((0, 60), (5000, 5060)), requested=requested),
     )
 
-    assert generate_item_transcript(item=item) == "Batch staged transcript"
+    assert _transcribe_through_batch_job(item) == "Batch staged transcript"
     assert not any(url.endswith("transcript.json") for url in requested)
 
 
@@ -468,7 +473,6 @@ def test_generate_item_transcript_reports_failed_batch_job_for_oversized_archive
         item.archived_audio_path,
         ContentFile(b"oversized-archived-audio".ljust(MAX_TRANSCRIPTION_BYTES + 1, b"x")),
     )
-    monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
 
     def fake_urlopen(request, timeout):
         assert request.full_url != "https://cdn.example.com/episode.mp3"
@@ -499,8 +503,8 @@ def test_generate_item_transcript_reports_failed_batch_job_for_oversized_archive
 
     monkeypatch.setattr("archive.transcriptions.urlopen", fake_urlopen)
 
-    with pytest.raises(TranscriptionGenerationError, match="Batch transcription job failed"):
-        generate_item_transcript(item=item)
+    with pytest.raises(TranscriptionJobFailed, match="Batch transcription job failed"):
+        _transcribe_through_batch_job(item)
 
 
 @pytest.mark.django_db
@@ -609,7 +613,6 @@ def test_generate_transcript_rejects_malformed_batch_evidence(
     item = _oversized_archived_audio_item()
     settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
     settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
-    monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
     requested: list[str] = []
     response = _batch_job_urlopen(
         segments=[{"start": 0, "end": float("inf")}, {"start": 900, "end": 905}],
@@ -630,7 +633,7 @@ def test_generate_transcript_rejects_malformed_batch_evidence(
     monkeypatch.setattr("archive.transcriptions.urlopen", fake_urlopen)
     expected = "did not return transcript text" if malformed_text else "segment times were invalid"
     with pytest.raises(TranscriptionGenerationError, match=expected):
-        generate_item_transcript(item=item)
+        _transcribe_through_batch_job(item)
     assert any(url.endswith("transcript.json") for url in requested) is not malformed_text
 
 
@@ -686,7 +689,6 @@ def test_missing_coverage_evidence_cannot_publish_transcript(monkeypatch, settin
     item.save(update_fields=["short_summary"])
     settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
     settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
-    monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
     requested: list[str] = []
     response = _batch_job_urlopen(segments=[], requested=requested)
 
@@ -711,12 +713,20 @@ def test_missing_coverage_evidence_cannot_publish_transcript(monkeypatch, settin
         )
 
     monkeypatch.setattr("archive.transcriptions.urlopen", fake_urlopen)
+    assert enrich_item_transcript(item=item) is True
+    item.refresh_from_db()
+    assert item.transcript_status == EnrichmentStatus.PENDING
+    assert item.transcript_job_id == "job-123"
+    item.transcript_poll_at = None
+    item.save(update_fields=["transcript_poll_at"])
     assert enrich_item_transcript(item=item) is False
     item.refresh_from_db()
     assert item.transcript == ""
     assert item.transcript_status == EnrichmentStatus.FAILED
     assert item.short_summary == "Existing summary"
     assert item.transcript_error
+    # The evidence of a finished job never improves; a retry needs a new job.
+    assert item.transcript_job_id == ""
 
 
 @pytest.mark.django_db
@@ -726,7 +736,6 @@ def test_old_batch_service_requires_explicit_coverage_opt_out(monkeypatch, setti
     settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
     settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
     settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = threshold
-    monkeypatch.setattr("archive.transcriptions.sleep", lambda seconds: None)
     requested: list[str] = []
     response = _batch_job_urlopen(segments=[], requested=requested)
 
@@ -742,5 +751,379 @@ def test_old_batch_service_requires_explicit_coverage_opt_out(monkeypatch, setti
         return response(request, timeout)
 
     monkeypatch.setattr("archive.transcriptions.urlopen", fake_urlopen)
-    assert generate_item_transcript(item=item) == "Valid"
+    assert _transcribe_through_batch_job(item) == "Valid"
     assert not any(url.endswith("transcript.json") for url in requested)
+
+
+class _FakeVoxhelm:
+    """A batch transcription service whose job state the test advances between passes."""
+
+    BASE = "https://voxhelm.example.test/v1"
+
+    def __init__(self) -> None:
+        self.requested: list[str] = []
+        self.state = "queued"
+        self.poll_error: Exception | None = None
+        self.segments = _segments((0, 3000))
+        self.jobs = 0
+
+    def __call__(self, request, timeout):
+        url = request.full_url
+        self.requested.append(url)
+        payload: object
+        if url == f"{self.BASE}/uploads":
+            b"".join(request.data)
+            payload = {"id": "upload-123"}
+        elif url == f"{self.BASE}/jobs":
+            self.jobs += 1
+            payload = {"id": f"job-{self.jobs}", "state": "queued"}
+        elif url.endswith("/artifacts/transcript.json"):
+            payload = {"segments": self.segments}
+        else:
+            assert url.startswith(f"{self.BASE}/jobs/job-")
+            if self.poll_error is not None:
+                raise self.poll_error
+            job_id = url.rsplit("/", 1)[1]
+            payload = {"id": job_id, "state": self.state}
+            if self.state == "succeeded":
+                payload["result"] = {
+                    "text": " Async   batch transcript ",
+                    "artifacts": {"json": f"/v1/jobs/{job_id}/artifacts/transcript.json"},
+                }
+        return _FakeResponse(
+            json.dumps(payload).encode("utf-8"), content_type="application/json", url=url
+        )
+
+    def uploads(self) -> int:
+        return self.requested.count(f"{self.BASE}/uploads")
+
+
+@pytest.fixture
+def voxhelm(monkeypatch, settings) -> _FakeVoxhelm:
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
+    settings.ARCHIVE_TRANSCRIPTION_API_BASE = _FakeVoxhelm.BASE
+    settings.ARCHIVE_TRANSCRIPTION_POLL_SECONDS = 60
+    settings.ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS = 7200
+    fake = _FakeVoxhelm()
+    monkeypatch.setattr("archive.transcriptions.urlopen", fake)
+    return fake
+
+
+def _claimed_batch_item() -> Item:
+    from archive.models import EnrichmentStatus
+
+    item = _oversized_archived_audio_item()
+    Item.objects.filter(pk=item.pk).update(
+        enrichment_status=EnrichmentStatus.COMPLETE,
+        media_archive_status=EnrichmentStatus.COMPLETE,
+        summary_status=EnrichmentStatus.COMPLETE,
+        short_summary="Summary from metadata",
+        long_summary="Long summary from metadata",
+        tags="podcast",
+        short_summary_generated=True,
+        long_summary_generated=True,
+        tags_generated=True,
+        transcript_status=EnrichmentStatus.PROCESSING,
+    )
+    item.refresh_from_db()
+    return item
+
+
+def _make_poll_due(item: Item) -> None:
+    from django.utils import timezone
+
+    Item.objects.filter(pk=item.pk).update(transcript_poll_at=timezone.now())
+    item.refresh_from_db()
+
+
+@pytest.mark.django_db
+def test_batch_job_is_stored_and_polled_later_instead_of_awaited(voxhelm) -> None:
+    from django.utils import timezone
+
+    from archive.models import EnrichmentStatus
+    from archive.services import enrich_item_transcript
+
+    item = _claimed_batch_item()
+    before = timezone.now()
+
+    assert enrich_item_transcript(item=item) is True
+
+    item.refresh_from_db()
+    # The worker uploads and submits, then moves on without asking for the job's state.
+    assert voxhelm.requested == [f"{voxhelm.BASE}/uploads", f"{voxhelm.BASE}/jobs"]
+    assert item.transcript_status == EnrichmentStatus.PENDING
+    assert item.transcript_error == ""
+    assert item.transcript_job_id == "job-1"
+    assert item.transcript_job_ref.startswith(f"archive-item-{item.pk}-transcript-")
+    assert item.transcript_job_submitted_at is not None
+    assert item.transcript_job_submitted_at >= before
+    assert item.transcript_poll_at is not None
+    assert item.transcript_poll_at >= before + timezone.timedelta(seconds=60)
+    assert item.processing_started_at is None
+
+    # A running job costs one status request per pass and is never uploaded again.
+    _make_poll_due(item)
+    voxhelm.state = "running"
+    assert enrich_item_transcript(item=item) is True
+    item.refresh_from_db()
+    assert voxhelm.requested[2:] == [f"{voxhelm.BASE}/jobs/job-1"]
+    assert item.transcript_status == EnrichmentStatus.PENDING
+    assert item.transcript_job_id == "job-1"
+    assert item.transcript_poll_at > timezone.now()
+
+    _make_poll_due(item)
+    voxhelm.state = "succeeded"
+    assert enrich_item_transcript(item=item) is True
+    item.refresh_from_db()
+    assert voxhelm.requested[3:] == [
+        f"{voxhelm.BASE}/jobs/job-1",
+        f"{voxhelm.BASE}/jobs/job-1/artifacts/transcript.json",
+    ]
+    assert voxhelm.uploads() == 1
+    assert item.transcript == "Async batch transcript"
+    assert item.transcript_generated is True
+    assert item.transcript_status == EnrichmentStatus.COMPLETE
+    assert item.transcript_error == ""
+    assert (item.transcript_job_id, item.transcript_job_ref) == ("", "")
+    assert item.transcript_job_submitted_at is None
+    assert item.transcript_poll_at is None
+    # Summaries generated without the transcript are refreshed from it.
+    assert item.summary_status == EnrichmentStatus.PENDING
+
+
+@pytest.mark.django_db
+def test_failed_batch_job_fails_the_step_and_forgets_the_job(voxhelm) -> None:
+    from archive.models import EnrichmentStatus
+    from archive.services import enrich_item_transcript
+
+    item = _claimed_batch_item()
+    assert enrich_item_transcript(item=item) is True
+    item.refresh_from_db()
+    _make_poll_due(item)
+    voxhelm.state = "failed"
+
+    assert enrich_item_transcript(item=item) is False
+
+    item.refresh_from_db()
+    assert item.transcript_status == EnrichmentStatus.FAILED
+    assert item.transcript_error == "Batch transcription job failed"
+    assert item.transcript_job_id == ""
+    assert item.transcript_poll_at is None
+    assert voxhelm.uploads() == 1
+
+
+@pytest.mark.django_db
+def test_incomplete_batch_transcript_fails_after_polling(voxhelm) -> None:
+    from archive.models import EnrichmentStatus
+    from archive.services import enrich_item_transcript
+
+    item = _claimed_batch_item()
+    assert enrich_item_transcript(item=item) is True
+    item.refresh_from_db()
+    _make_poll_due(item)
+    voxhelm.state = "succeeded"
+    voxhelm.segments = _segments((0, 600), (2000, 2600))
+
+    assert enrich_item_transcript(item=item) is False
+
+    item.refresh_from_db()
+    assert item.transcript == ""
+    assert item.transcript_status == EnrichmentStatus.FAILED
+    assert "job-1 is incomplete" in item.transcript_error
+    assert item.transcript_job_id == ""
+
+
+@pytest.mark.django_db
+def test_unreadable_job_status_keeps_the_job_and_polls_again(voxhelm) -> None:
+    from urllib.error import URLError
+
+    from django.utils import timezone
+
+    from archive.models import EnrichmentStatus, ProcessingStepState
+    from archive.services import enrich_item_transcript
+
+    item = _claimed_batch_item()
+    assert enrich_item_transcript(item=item) is True
+    item.refresh_from_db()
+    submitted_at = item.transcript_job_submitted_at
+    _make_poll_due(item)
+    voxhelm.poll_error = URLError("connection refused")
+
+    assert enrich_item_transcript(item=item) is False
+
+    item.refresh_from_db()
+    assert item.transcript_status == EnrichmentStatus.PENDING
+    assert "Batch transcription job status request failed" in item.transcript_error
+    assert item.transcript_job_id == "job-1"
+    assert item.transcript_job_submitted_at == submitted_at
+    assert item.transcript_poll_at > timezone.now()
+    assert ProcessingStepState.objects.get(step="transcript").failing_since is not None
+
+    _make_poll_due(item)
+    voxhelm.poll_error = None
+    voxhelm.state = "succeeded"
+    assert enrich_item_transcript(item=item) is True
+    item.refresh_from_db()
+    assert item.transcript == "Async batch transcript"
+    assert item.transcript_error == ""
+    assert voxhelm.uploads() == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("poll_error", [False, True])
+def test_batch_job_older_than_the_maximum_age_fails(voxhelm, poll_error) -> None:
+    from urllib.error import URLError
+
+    from django.utils import timezone
+
+    from archive.models import EnrichmentStatus
+    from archive.services import enrich_item_transcript
+
+    item = _claimed_batch_item()
+    assert enrich_item_transcript(item=item) is True
+    Item.objects.filter(pk=item.pk).update(
+        transcript_job_submitted_at=timezone.now() - timezone.timedelta(hours=2, seconds=1),
+        transcript_poll_at=timezone.now(),
+    )
+    item.refresh_from_db()
+    voxhelm.state = "running"
+    if poll_error:
+        voxhelm.poll_error = URLError("connection refused")
+
+    assert enrich_item_transcript(item=item) is False
+
+    item.refresh_from_db()
+    assert item.transcript_status == EnrichmentStatus.FAILED
+    assert item.transcript_error.startswith(
+        "Batch transcription job job-1 did not finish within 7200 s"
+    )
+    assert ("last status request" in item.transcript_error) is poll_error
+    assert item.transcript_job_id == ""
+    assert item.transcript_job_submitted_at is None
+    assert voxhelm.uploads() == 1
+
+
+@pytest.mark.django_db
+def test_finished_job_is_still_used_after_the_maximum_age(voxhelm) -> None:
+    from django.utils import timezone
+
+    from archive.services import enrich_item_transcript
+
+    item = _claimed_batch_item()
+    assert enrich_item_transcript(item=item) is True
+    Item.objects.filter(pk=item.pk).update(
+        transcript_job_submitted_at=timezone.now() - timezone.timedelta(hours=3),
+        transcript_poll_at=timezone.now(),
+    )
+    item.refresh_from_db()
+    voxhelm.state = "succeeded"
+
+    assert enrich_item_transcript(item=item) is True
+    item.refresh_from_db()
+    assert item.transcript == "Async batch transcript"
+
+
+@pytest.mark.django_db
+def test_job_for_an_older_source_is_not_resumed(voxhelm) -> None:
+    from archive.models import EnrichmentStatus
+    from archive.services import enrich_item_transcript
+
+    item = _claimed_batch_item()
+    assert enrich_item_transcript(item=item) is True
+    item.refresh_from_db()
+    old_ref = item.transcript_job_ref
+    # The archived audio was replaced by a different file after the job was submitted.
+    Item.objects.filter(pk=item.pk).update(archived_audio_size_bytes=MAX_TRANSCRIPTION_BYTES + 2)
+    storages["archive_media"].delete(item.archived_audio_path)
+    storages["archive_media"].save(
+        item.archived_audio_path,
+        ContentFile(b"replaced-archived-audio".ljust(MAX_TRANSCRIPTION_BYTES + 2, b"y")),
+    )
+    _make_poll_due(item)
+
+    assert enrich_item_transcript(item=item) is True
+
+    item.refresh_from_db()
+    assert voxhelm.uploads() == 2
+    assert f"{voxhelm.BASE}/jobs/job-1" not in voxhelm.requested
+    assert item.transcript_status == EnrichmentStatus.PENDING
+    assert item.transcript_job_id == "job-2"
+    assert item.transcript_job_ref != old_ref
+
+
+@pytest.mark.django_db
+def test_worker_claims_a_pending_job_only_when_its_poll_is_due(voxhelm, monkeypatch) -> None:
+    from django.utils import timezone
+
+    from archive.models import EnrichmentStatus
+    from archive.services import (
+        claim_pending_item,
+        enrich_item_metadata,
+        recover_processing_items,
+    )
+
+    item = _claimed_batch_item()
+    Item.objects.filter(pk=item.pk).update(transcript_status=EnrichmentStatus.PENDING)
+    monkeypatch.setattr(
+        "archive.services.generate_item_summaries",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("summary unavailable")),
+    )
+
+    claimed = claim_pending_item()
+    assert claimed is not None and claimed.pk == item.pk
+    assert enrich_item_metadata(item=claimed) is True
+    item.refresh_from_db()
+    assert item.transcript_job_id == "job-1"
+    assert item.processing_started_at is None
+
+    # Not claimable again until the poll is due, so the worker stays idle meanwhile.
+    assert claim_pending_item() is None
+
+    # Claimed for another step, the pass leaves the job alone until its poll is due.
+    Item.objects.filter(pk=item.pk).update(summary_status=EnrichmentStatus.PENDING)
+    claimed = claim_pending_item()
+    assert claimed is not None and claimed.transcript_status == EnrichmentStatus.PENDING
+    voxhelm.requested.clear()
+    assert enrich_item_metadata(item=claimed) is True
+    assert voxhelm.requested == []
+    item.refresh_from_db()
+    assert item.transcript_status == EnrichmentStatus.PENDING
+    assert item.transcript_job_id == "job-1"
+
+    # A worker that died while polling hands the job on; the next pass polls it at once.
+    Item.objects.filter(pk=item.pk).update(
+        summary_status=EnrichmentStatus.COMPLETE,
+        transcript_status=EnrichmentStatus.PROCESSING,
+        processing_started_at=timezone.now(),
+    )
+    assert recover_processing_items() == 1
+    item.refresh_from_db()
+    assert item.transcript_status == EnrichmentStatus.PENDING
+    assert item.transcript_job_id == "job-1"
+    assert item.transcript_poll_at is None
+    voxhelm.state = "succeeded"
+    claimed = claim_pending_item()
+    assert claimed is not None and claimed.transcript_status == EnrichmentStatus.PROCESSING
+    # The summary refresh that follows the transcript fails here; the transcript stands.
+    enrich_item_metadata(item=claimed)
+    item.refresh_from_db()
+    assert item.transcript == "Async batch transcript"
+    assert item.transcript_status == EnrichmentStatus.COMPLETE
+    assert voxhelm.uploads() == 0  # since the first pass: polled, never uploaded again
+
+
+@pytest.mark.django_db
+def test_item_reprocess_keeps_a_running_job_and_polls_it_now(voxhelm) -> None:
+    from archive.models import EnrichmentStatus
+    from archive.services import enrich_item_transcript, request_item_reprocess
+
+    item = _claimed_batch_item()
+    assert enrich_item_transcript(item=item) is True
+    item.refresh_from_db()
+
+    request_item_reprocess(item)
+
+    item.refresh_from_db()
+    assert item.transcript_status == EnrichmentStatus.PENDING
+    assert item.transcript_job_id == "job-1"
+    assert item.transcript_poll_at is None

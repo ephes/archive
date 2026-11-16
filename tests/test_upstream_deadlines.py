@@ -79,25 +79,53 @@ raise SystemExit(ns['main']())
     assert time.monotonic() - start < 3
 
 
-@pytest.mark.parametrize("late", [False, True])
-def test_poll_does_not_accept_or_request_after_deadline(monkeypatch, settings, late):
-    clock = [0.0]
+@pytest.mark.parametrize("timing", ["in-time", "late", "expired"])
+def test_poll_does_not_accept_or_request_after_deadline(monkeypatch, settings, timing):
+    clock = [10.0 if timing == "expired" else 0.0]
     calls = []
-    settings.ARCHIVE_TRANSCRIPTION_POLL_SECONDS = 1 if late else 10
+    settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = 0
     monkeypatch.setattr(transcriptions, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(transcriptions, "sleep", lambda seconds: clock.__setitem__(0, seconds))
 
     def poll(job_id, timeout, **kwargs):
         calls.append(timeout)
-        clock[0] = 10
+        clock[0] = 10 if timing == "late" else 5
         return transcriptions.BatchTranscriptionJobUpdate(job_id, "succeeded", "words")
 
     monkeypatch.setattr(transcriptions, "_poll_batch_transcription_job", poll)
-    with pytest.raises(transcriptions.TranscriptionGenerationError, match="Timed out"):
-        transcriptions._wait_for_batch_transcription_job(
-            update=transcriptions.BatchTranscriptionJobUpdate("synthetic", "running"), timeout=10
-        )
-    assert calls == ([9] if late else [])
+    job = transcriptions.BatchTranscriptionJob("synthetic", "synthetic-ref")
+    if timing == "in-time":
+        assert transcriptions._poll_stored_batch_transcription_job(job=job, deadline=10) == "words"
+    else:
+        # A late or unrequested result stays pending; the job is polled again later.
+        with pytest.raises(transcriptions.TranscriptionPending) as pending:
+            transcriptions._poll_stored_batch_transcription_job(job=job, deadline=10)
+        assert pending.value.job == job
+        assert "timeout exceeded" in pending.value.poll_error
+    assert calls == ([] if timing == "expired" else [10])
+
+
+def test_poll_does_not_admit_a_transcript_normalized_after_deadline(monkeypatch, settings):
+    clock = [0.0]
+    settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = 0
+    monkeypatch.setattr(transcriptions, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        transcriptions,
+        "_poll_batch_transcription_job",
+        lambda job_id, timeout, **kwargs: transcriptions.BatchTranscriptionJobUpdate(
+            job_id, "succeeded", "words"
+        ),
+    )
+
+    def slow_normalize(value):
+        clock[0] = 11
+        return value
+
+    monkeypatch.setattr(transcriptions, "_normalize_transcript", slow_normalize)
+    job = transcriptions.BatchTranscriptionJob("synthetic", "synthetic-ref")
+    with pytest.raises(transcriptions.TranscriptionPending) as pending:
+        transcriptions._poll_stored_batch_transcription_job(job=job, deadline=10)
+    assert pending.value.job == job
+    assert "timeout exceeded" in pending.value.poll_error
 
 
 @pytest.mark.parametrize(

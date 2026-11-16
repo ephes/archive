@@ -124,10 +124,15 @@ def test_wrong_poll_identity_preserves_previous_results(kind, monkeypatch, setti
             "_submit_batch_transcription_job",
             lambda **kw: tr.BatchTranscriptionJobUpdate("job-a", "queued"),
         )
-        monkeypatch.setattr(tr, "sleep", lambda seconds: None)
         settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = 0
-        with pytest.raises(tr.TranscriptionGenerationError, match="identity mismatch"):
+        with pytest.raises(tr.TranscriptionPending) as submitted:
             tr.generate_item_transcript(item)
+        assert submitted.value.job.job_id == "job-a"
+        # The later poll pass refuses the wrong job's result and keeps polling job-a.
+        with pytest.raises(tr.TranscriptionPending) as polled:
+            tr.generate_item_transcript(item, batch_job=submitted.value.job)
+        assert polled.value.job == submitted.value.job
+        assert "identity mismatch" in polled.value.poll_error
     else:
         with pytest.raises(audio.ArticleAudioGenerationError, match="identity mismatch"):
             audio.generate_item_article_audio(item)

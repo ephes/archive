@@ -167,6 +167,13 @@ class Item(models.Model):
     article_audio_size_bytes = models.PositiveBigIntegerField(blank=True, null=True)
     article_audio_content_type = models.CharField(max_length=100, blank=True, null=True)
     article_audio_poll_at = models.DateTimeField(blank=True, null=True)
+    # A Voxhelm batch transcription job in flight: the worker polls it later instead
+    # of waiting, and never uploads the audio again while the job id is stored.
+    transcript_job_id = models.CharField(max_length=64, blank=True, default="", db_default="")
+    # The job's task_ref, which fingerprints the transcription source it was made for.
+    transcript_job_ref = models.CharField(max_length=128, blank=True, default="", db_default="")
+    transcript_job_submitted_at = models.DateTimeField(blank=True, null=True)
+    transcript_poll_at = models.DateTimeField(blank=True, null=True)
 
     class Meta:
         ordering = ("-shared_at", "-id")

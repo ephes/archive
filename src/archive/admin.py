@@ -73,6 +73,9 @@ class ItemAdmin(admin.ModelAdmin):
         "summary_retry_at",
         "media_archive_retry_count",
         "media_archive_retry_at",
+        "transcript_job_id",
+        "transcript_job_submitted_at",
+        "transcript_poll_at",
     )
 
     @admin.display(description="Podcast feed")

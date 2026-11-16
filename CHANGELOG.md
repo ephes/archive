@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Stop blocking the metadata worker on Voxhelm batch transcriptions: the worker
+  uploads oversized archived audio, submits the job and stores it on the item
+  (migration 0022: `transcript_job_id`, `transcript_job_ref`,
+  `transcript_job_submitted_at`, `transcript_poll_at`), then polls it with one
+  status request every `ARCHIVE_TRANSCRIPTION_POLL_SECONDS` (default now 60).
+  Retries and worker restarts poll the stored job and never upload again; failed
+  status requests keep the job until `ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS`
+  (default 7200) after submission. Failed or incomplete jobs fail the step and are
+  forgotten, as are jobs made for an older source. `reprocess_items --only
+  transcript` also forgets an earlier job. `--transcription-timeout` is now the
+  budget of one pass (upload and submission, or one poll), not the wait for the job.
+
 - Recheck mutable reclassification selectors under the current row lock; report
   changed selections as skipped without normalizing or counting them as applied.
 - Treat malformed classification URLs as unknown sources, retaining explicit kind

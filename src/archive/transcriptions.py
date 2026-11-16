@@ -8,7 +8,7 @@ import re
 import uuid
 from contextlib import closing
 from dataclasses import dataclass
-from time import monotonic, sleep
+from time import monotonic
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request
@@ -66,8 +66,30 @@ class TranscriptionGenerationError(RuntimeError):
     pass
 
 
+class TranscriptionJobFailed(TranscriptionGenerationError):
+    """The batch job can never yield a usable transcript; a retry needs a new job."""
+
+
+class TranscriptionPending(Exception):  # noqa: N818 - a state signal, not an error
+    """A Voxhelm batch job is still running; poll it again on a later pass."""
+
+    def __init__(self, job: BatchTranscriptionJob, *, poll_error: str = "") -> None:
+        super().__init__(f"Batch transcription job {job.job_id} is still running")
+        self.job = job
+        # Set when this pass could not read the job's status or result evidence.
+        self.poll_error = poll_error
+
+
 class _ArchivedAudioRequiresBatchUpload(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class BatchTranscriptionJob:
+    """A submitted Voxhelm batch job and the task_ref of the source it transcribes."""
+
+    job_id: str
+    job_ref: str
 
 
 @dataclass(frozen=True)
@@ -106,7 +128,20 @@ def can_transcribe_item(item: Item) -> bool:
     return _select_transcription_source(item) is not None
 
 
-def generate_item_transcript(item: Item, timeout: float = 300) -> str:
+def generate_item_transcript(
+    item: Item,
+    timeout: float = 300,
+    *,
+    batch_job: BatchTranscriptionJob | None = None,
+) -> str:
+    """Return the item's transcript, or raise ``TranscriptionPending`` for a running job.
+
+    Oversized archived audio goes to a Voxhelm batch job. This call uploads the audio
+    and submits the job, but never waits for it: it raises ``TranscriptionPending``
+    with the job, which the caller stores and passes back as ``batch_job`` on a later
+    pass. That pass makes one status request. A job made for an older source is
+    ignored and the current source is transcribed afresh.
+    """
     deadline = monotonic() + timeout
     api_key = settings.ARCHIVE_TRANSCRIPTION_API_KEY.strip()
     if not api_key:
@@ -115,6 +150,11 @@ def generate_item_transcript(item: Item, timeout: float = 300) -> str:
     source = _select_transcription_source(item)
     if source is None:
         raise TranscriptionGenerationError("Item does not have a transcribable media source yet")
+
+    if batch_job is not None and batch_job.job_ref == _transcription_job_task_ref(
+        item=item, source=source
+    ):
+        return _poll_stored_batch_transcription_job(job=batch_job, deadline=deadline)
 
     prompt = _build_transcription_prompt(item=item)
     if source.kind == "archived_audio" and source.size_bytes > MAX_TRANSCRIPTION_BYTES:
@@ -148,6 +188,12 @@ def generate_item_transcript(item: Item, timeout: float = 300) -> str:
         raise TranscriptionGenerationError("Transcription response was empty")
     _remaining(deadline)
     return transcript
+
+
+def transcription_job_ref(item: Item) -> str:
+    """Return the batch task_ref of the item's current source, or "" without a source."""
+    source = _select_transcription_source(item)
+    return "" if source is None else _transcription_job_task_ref(item=item, source=source)
 
 
 def _remaining(deadline: float) -> float:
@@ -331,14 +377,48 @@ def _request_staged_archived_audio_transcription(
         timeout=_remaining(deadline),
         deadline=deadline,
     )
-    completed = _wait_for_batch_transcription_job(
-        update=update, timeout=_remaining(deadline), deadline=deadline
-    )
+    if update.is_pending:
+        raise TranscriptionPending(
+            BatchTranscriptionJob(
+                job_id=update.job_id,
+                job_ref=_transcription_job_task_ref(item=item, source=source),
+            )
+        )
+    return _finish_batch_transcription_job(update=update, deadline=deadline)
+
+
+def _poll_stored_batch_transcription_job(*, job: BatchTranscriptionJob, deadline: float) -> str:
+    """One status request for a stored job; unreadable status or evidence stays pending."""
+    try:
+        update = _poll_batch_transcription_job(
+            job_id=job.job_id, timeout=_remaining(deadline), deadline=deadline
+        )
+        if update.is_pending:
+            raise TranscriptionPending(job)
+        transcript = _normalize_transcript(
+            _finish_batch_transcription_job(update=update, deadline=deadline)
+        )
+        # Admission is the last step of the pass: an expired pass keeps the job.
+        _remaining(deadline)
+    except (TranscriptionPending, TranscriptionJobFailed):
+        raise
+    except TranscriptionGenerationError as exc:
+        raise TranscriptionPending(job, poll_error=str(exc)) from None
+    if not transcript:
+        raise TranscriptionJobFailed(f"Batch transcription job {job.job_id} returned no text")
+    return transcript
+
+
+def _finish_batch_transcription_job(*, update: BatchTranscriptionJobUpdate, deadline: float) -> str:
+    if not update.is_complete:
+        raise TranscriptionJobFailed(
+            update.error_message or f"Batch transcription job {update.job_id} failed"
+        )
     _check_batch_transcript_coverage(
-        completed=completed, timeout=_remaining(deadline), deadline=deadline
+        completed=update, timeout=_remaining(deadline), deadline=deadline
     )
     _remaining(deadline)
-    return completed.transcript
+    return update.transcript
 
 
 def _check_batch_transcript_coverage(
@@ -356,7 +436,7 @@ def _check_batch_transcript_coverage(
     if max_gap_seconds <= 0:
         return
     if not completed.json_artifact_path:
-        raise TranscriptionGenerationError(
+        raise TranscriptionJobFailed(
             f"Batch transcription job {completed.job_id} is missing its JSON segment artifact; "
             "retry with a service that provides segment evidence, or explicitly disable "
             "coverage checking with ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS<=0"
@@ -371,15 +451,17 @@ def _check_batch_transcript_coverage(
         timeout=timeout,
         deadline=deadline,
         error_prefix="Batch transcription segment download failed",
+        # A finished job's artifact does not change; only transport errors may pass.
+        invalid_payload_error=TranscriptionJobFailed,
     )
     try:
         gaps = find_transcript_gaps(payload.get("segments"), max_gap_seconds=max_gap_seconds)
     except TranscriptionGenerationError as exc:
-        raise TranscriptionGenerationError(f"Batch transcription evidence: {exc}") from None
+        raise TranscriptionJobFailed(f"Batch transcription evidence: {exc}") from None
     if not gaps:
         return
     start, end = max(gaps, key=lambda gap: gap[1] - gap[0])
-    raise TranscriptionGenerationError(
+    raise TranscriptionJobFailed(
         f"Batch transcription job {completed.job_id} is incomplete: {len(gaps)} stretch(es) "
         f"of audio longer than {max_gap_seconds:g} s have no transcript, the longest from "
         f"{_format_seconds(start)} to {_format_seconds(end)}"
@@ -523,41 +605,6 @@ def _submit_batch_transcription_job(
     return _parse_batch_transcription_job_update(payload)
 
 
-def _wait_for_batch_transcription_job(
-    *,
-    update: BatchTranscriptionJobUpdate,
-    timeout: float,
-    deadline: float | None = None,
-) -> BatchTranscriptionJobUpdate:
-    if update.is_complete:
-        return update
-    if not update.is_pending:
-        raise TranscriptionGenerationError(update.error_message or "Batch transcription job failed")
-
-    if deadline is None:
-        deadline = monotonic() + timeout
-    current = update
-    while current.is_pending:
-        remaining = deadline - monotonic()
-        if remaining <= 0:
-            raise TranscriptionGenerationError(
-                f"Timed out waiting for batch transcription job {current.job_id}"
-            )
-        sleep(min(settings.ARCHIVE_TRANSCRIPTION_POLL_SECONDS, remaining))
-        remaining = deadline - monotonic()
-        if remaining <= 0:
-            raise TranscriptionGenerationError("Timed out waiting for batch transcription job")
-        current = _poll_batch_transcription_job(
-            job_id=current.job_id, timeout=remaining, deadline=deadline
-        )
-        if monotonic() >= deadline:
-            raise TranscriptionGenerationError("Timed out waiting for batch transcription job")
-
-    if current.is_complete:
-        return current
-    raise TranscriptionGenerationError(current.error_message or "Batch transcription job failed")
-
-
 def _poll_batch_transcription_job(
     job_id: str, timeout: float, deadline: float | None = None
 ) -> BatchTranscriptionJobUpdate:
@@ -575,10 +622,14 @@ def _poll_batch_transcription_job(
         deadline=deadline,
         error_prefix="Batch transcription job status request failed",
     )
-    update = _parse_batch_transcription_job_update(payload)
-    if update.job_id != job_id:
+    # Check identity first: another job's result must not decide this job's fate.
+    try:
+        polled_id = wire_id(payload.get("id"))
+    except ValueError:
+        raise TranscriptionGenerationError("Invalid upstream job envelope") from None
+    if polled_id != job_id:
         raise TranscriptionGenerationError("Upstream poll job identity mismatch")
-    return update
+    return _parse_batch_transcription_job_update(payload)
 
 
 def _parse_batch_transcription_job_update(
@@ -591,25 +642,24 @@ def _parse_batch_transcription_job_update(
         raise TranscriptionGenerationError("Invalid upstream job envelope") from None
 
     if state == "succeeded":
+        # A succeeded job keeps its result, so a malformed one never becomes usable.
         result = payload.get("result")
         if not isinstance(result, dict):
-            raise TranscriptionGenerationError("Batch transcription job result was missing")
+            raise TranscriptionJobFailed("Batch transcription job result was missing")
         text = result.get("text")
         if not isinstance(text, str) or not text.strip():
-            raise TranscriptionGenerationError(
-                "Batch transcription job did not return transcript text"
-            )
+            raise TranscriptionJobFailed("Batch transcription job did not return transcript text")
         artifacts = result.get("artifacts")
         json_artifact_path = ""
         # Explicit nulls mean "no artifact", as for older services; only a
         # present value of the wrong type is a malformed envelope.
         if artifacts is not None and not isinstance(artifacts, dict):
-            raise TranscriptionGenerationError("Invalid JSON segment artifact container")
+            raise TranscriptionJobFailed("Invalid JSON segment artifact container")
         if isinstance(artifacts, dict) and artifacts.get("json") is not None:
             try:
                 json_artifact_path = artifact_path(artifacts["json"])
             except ValueError:
-                raise TranscriptionGenerationError("Invalid JSON segment artifact path") from None
+                raise TranscriptionJobFailed("Invalid JSON segment artifact path") from None
         return BatchTranscriptionJobUpdate(
             job_id=job_id,
             state=state,
@@ -853,7 +903,12 @@ def _encode_multipart_formdata(fields: dict[str, str], media: DownloadedMedia) -
 
 
 def _request_json(
-    request: Request, timeout: float, error_prefix: str, deadline: float | None = None
+    request: Request,
+    timeout: float,
+    error_prefix: str,
+    deadline: float | None = None,
+    *,
+    invalid_payload_error: type[TranscriptionGenerationError] = TranscriptionGenerationError,
 ) -> dict[str, object]:
     try:
         with urlopen(
@@ -867,12 +922,12 @@ def _request_json(
     except OSError as exc:
         raise TranscriptionGenerationError(f"{error_prefix}: {safe_api_error(exc)}") from None
     except InvalidAPIJSON:
-        raise TranscriptionGenerationError(f"{error_prefix}: invalid JSON response") from None
+        raise invalid_payload_error(f"{error_prefix}: invalid JSON response") from None
 
     if deadline is not None:
         _remaining(deadline)
     if not isinstance(payload, dict):
-        raise TranscriptionGenerationError(f"{error_prefix}: response was not an object")
+        raise invalid_payload_error(f"{error_prefix}: response was not an object")
     return payload
 
 

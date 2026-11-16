@@ -299,6 +299,36 @@ def test_transcript_regenerate_clears_a_complete_generated_transcript() -> None:
     assert "Only the first hour" not in out
 
 
+@pytest.mark.parametrize("regenerate", [False, True])
+def test_transcript_requeue_forgets_an_earlier_batch_job(regenerate) -> None:
+    job_fields = {
+        "transcript_job_id": "job-old",
+        "transcript_job_ref": "archive-item-1-transcript-0123456789abcdef",
+        "transcript_job_submitted_at": timezone.now() - timedelta(hours=3),
+        "transcript_poll_at": timezone.now() + timedelta(minutes=1),
+    }
+    args: tuple[str, ...]
+    if regenerate:
+        item = transcribed_podcast(**job_fields)
+        args = ("--only", "transcript", "--regenerate")
+    else:
+        item = transcribed_podcast(
+            transcript="", transcript_generated=False, transcript_status=FAILED, **job_fields
+        )
+        args = ("--only", "transcript")
+
+    run("--ids", str(item.pk), *args)
+
+    item.refresh_from_db()
+    assert item.transcript_status == PENDING
+    assert item.transcript_job_id == ""
+    assert item.transcript_job_ref == ""
+    assert item.transcript_job_submitted_at is None
+    assert item.transcript_poll_at is None
+    claimed = claim_pending_item()
+    assert claimed is not None and claimed.pk == item.pk
+
+
 def test_transcript_regenerate_never_touches_hand_entered_transcripts() -> None:
     manual = transcribed_podcast(transcript="Typed by hand", transcript_generated=False)
     no_source = transcribed_podcast(audio_url="", original_url="https://example.com/notes")

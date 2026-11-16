@@ -137,8 +137,13 @@ ARCHIVE_TRANSCRIPTION_MODEL = os.getenv(
     "ARCHIVE_TRANSCRIPTION_MODEL",
     "gpt-4o-mini-transcribe",
 )
+# Seconds between status requests for a running Voxhelm batch transcription job.
 ARCHIVE_TRANSCRIPTION_POLL_SECONDS = float(
-    os.getenv("ARCHIVE_TRANSCRIPTION_POLL_SECONDS", "30")
+    os.getenv("ARCHIVE_TRANSCRIPTION_POLL_SECONDS", "60")
+)
+# A batch job still unfinished this long after submission fails the transcript step.
+ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS = float(
+    os.getenv("ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS", "7200")
 )
 ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = float(
     os.getenv("ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS", "600")

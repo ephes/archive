@@ -33,9 +33,31 @@ Public endpoints:
   Transient pre-stream 5xx errors always use `Cache-Control: no-store`, including
   seek failures, storage-open and article-audio preparation failures, so a recovered
   backend can be retried immediately. This is at least as restrictive as private
-  caller policies. Successful public delivery retains its one-hour cache lifetime.
+  caller policies. Successful public delivery uses `Cache-Control: public, no-cache`:
+  caches may store the audio but must revalidate every reuse with the origin, which
+  rechecks that the item is still public. Each response carries a strong `ETag`
+  bound to the route, item, stored object key, recorded size and content type, so a
+  matching `If-None-Match` gets a cheap `304` (handle closed once) and a new object
+  generation gets a new validator. `If-Range` is honoured only when it equals the
+  current `ETag`; anything else, including dates, gets the whole file. Unpublished or
+  deleted items answer `404` with `no-store`; all other error responses of both
+  routes (except a `416` for a stable unsatisfiable range) are `no-store` too. The
+  revocation window for conforming caches is therefore the next request. Responses
+  stored before this policy shipped, under the earlier `public, max-age=3600`, may
+  still be reused for up to one hour after deployment, and bytes already downloaded
+  by clients cannot be recalled.
   Seek failures log one fixed `stored_media_range_seek_failed` event without backend
   exception text, traceback, object key or signed URL; acquired handles close once.
+  Before any length, range or body is committed, a known recorded size is compared
+  with the opened object's own length (`fstat` of a real descriptor, otherwise the
+  backend file's integer `size`, such as the S3 object length). A disagreement, from
+  truncation or replacement outside the publication protocol, answers GET, HEAD and
+  range requests with a `no-store` 502, logs the fixed `stored_media_length_mismatch`
+  event and closes the handle once. Backends without usable length evidence keep the
+  recorded size, and an unknown recorded size (0) keeps whole-file delivery. Changes
+  after the response has started streaming are not detected. HEAD keeps the GET
+  headers without reading the body and closes the handle once, when the server
+  closes the response.
 - `/feeds/podcast.xml` podcast-style feed for items with stable local audio enclosures
 - `/feeds/podcast/page/<n>.xml` older podcast feed pages when more than 50 eligible items exist
 - `/api/health/` unauthenticated JSON processing health for monitoring (step counts and timestamps
@@ -464,6 +486,14 @@ media URLs are decoded once as JSON strings, then restricted to HTTP(S) using th
 same relative-URL normalization as other media candidates. Malformed strings, including unpaired Unicode surrogate escapes, are skipped.
 URL/candidate deduplication uses sets while preserving first-seen order. The same
 URL may retain distinct candidate types or detection sources.
+Normalized media references also need a usable HTTP(S) authority, checked through
+urllib's parsed `hostname`/`port`: an empty host (`http://:80/a`), a non-numeric,
+zero or out-of-range port, malformed or non-IPv6 bracketed hosts (including IPvFuture), IPv6 zone IDs,
+whitespace or URL-delimiter characters in the host, and any C0 control or DEL inside
+the reference (checked before urllib would silently drop tabs/newlines) drop only
+that reference. Relative and protocol-relative references, explicit
+valid ports, bracketed IPv6 literals and internationalized hostnames are kept, and
+the remaining metadata (title, dates, other candidates) is unaffected.
 
 Credential-bearing summary, transcription and article-audio requests only follow
 redirects on the initial HTTP(S) origin (scheme, host and effective port).
@@ -567,6 +597,14 @@ Extracted display metadata is truncated to a Unicode prefix using the Item model
 limits: title 500 characters, source and author 255 each. This policy applies to
 HTML and structured/provider metadata before publication. Existing nonempty manual
 values remain unchanged. Media URLs/identities are never truncated by this policy.
+
+Publication dates are optional hints. Candidates are tried in order: HTML
+`article:published_time`, `og:published_time`, `date`, `pubdate`, then the first
+JSON-LD `datePublished`/`dateCreated`/`uploadDate`. Each value is read as ISO
+datetime, ISO date (default-timezone midnight), then RFC 2822. Impossible values
+(`2026-02-31`, hour 25, an offset outside the UTC range) only disqualify that
+candidate. If no candidate is valid, no date is recorded; title, media and other
+metadata are still extracted.
 
 Quote classification is intentionally external to Archive. Archive owns storage
 and exposes the authenticated item PATCH API; Daybook/macOS runners decide when
@@ -973,8 +1011,10 @@ hard-kills a subprocess after claim and before media publication, then opens the
 temporary SQLite database in new workers. File barriers and a controlled clock
 verify fresh-lease preservation, one-time recovery, rejection of a delayed
 superseded result, and preservation of media still referenced by another item.
-Killed uploads remain reserved for the existing orphan-recovery workflow. The
-fake upstream uses only temporary storage; no network or archive data is used.
+Killed uploads (before and after their object exists) remain reserved while their
+attempt is current, and `reconcile_archive_media_reservations --apply` releases them
+only after recovery retired that attempt. The fake upstream uses only temporary
+storage; no network or archive data is used.
 
 ## Media publication and orphan recovery
 
@@ -1019,7 +1059,14 @@ objects remain protected. Retained objects can be reclaimed with the orphan swee
 A `PendingArchiveMediaUpload` reservation commits before each storage write and
 protects its namespace. Publication removes the reservation in the same transaction
 that commits the item references, so an uploaded object is always either reserved
-or referenced. Orphan cleanup spools the complete object inventory to temporary disk
+or referenced. Storage backends must return the saved key as a direct child of the
+reserved prefix (a different file name there, such as Django's available-name
+suffix, is fine). A key that is nested, relocated, untrimmed, contains traversal
+or separator characters, or is not a string is refused before publication: the
+upload fails like any storage error, the object inside the reserved prefix and the
+reservation are discarded, and the key outside it is never deleted directly, since
+it may name another upload's object; the orphan sweep reclaims it if unprotected.
+Orphan cleanup spools the complete object inventory to temporary disk
 storage before deleting anything, streams database references in bounded batches using
 the same whitespace normalization as other media paths, then processes sorted unique
 candidates. References are scanned once rather than once per object batch. Temporary
@@ -1049,14 +1096,38 @@ while workers are archiving. Apply database migrations before running updated
 workers or cleanup.
 
 After an unclean worker crash, or when discarding a failed upload could not be
-verified, reservations deliberately remain and keep their objects protected
-indefinitely. Stop the affected worker and confirm no upload/publication is active
-before removing the reservation in the Django shell; then rerun orphan cleanup. Do
-not expire reservations solely by age. Direct callers of `archive_item_audio`
-receive staged, reserved objects and must either publish them (releasing the
-reservations in the publishing transaction) or discard them with
+verified, reservations deliberately remain and keep their objects protected. Each
+reservation records its owner item and processing attempt (the item's
+`processing_started_at` at upload, the value every media publication fence
+compares). Once the item's current attempt differs (stale recovery, settlement,
+a new claim) or the item is gone, that upload can never be published, even if its
+process is still running, so the reservation is provably retired:
+
+```bash
+just manage reconcile_archive_media_reservations          # dry-run report
+just manage reconcile_archive_media_reservations --apply  # release retired ones
+```
+
+Dry-run lists retired prefixes with their owner item and the objects that would be
+deleted. Apply rechecks the owner attempt under the row lock, deletes unreferenced
+objects under the prefix and releases the reservation in one durable transaction;
+referenced objects are kept. Like every deletion check, references are compared
+after whitespace trimming, the same normalization reads and orphan inventory use. Reservations of a still-current attempt stay protected,
+whatever their age. Expected filesystem/S3 deletion failures roll back that
+reservation's release (it keeps protecting what remains), are reported as
+`storage_delete_failed` without backend details, and make the command exit nonzero;
+rerun it after the backend recovers. Prefixes holding more than 16 objects are
+reported as `oversized` and left alone. Reservations without a recorded owner
+attempt (rows created before this change, or uploads by unclaimed direct callers)
+are reported as `unowned` and never released automatically: stop the affected
+worker and confirm no upload/publication is active before removing such a
+reservation in the Django shell, then rerun orphan cleanup. Do not expire
+reservations solely by age. Direct callers of `archive_item_audio` receive staged,
+reserved objects and must either publish them (releasing the reservations in the
+publishing transaction) or discard them with
 `delete_unreferenced_archive_media_paths(..., owns_reservation=True)`; the worker
-service handles this lifecycle automatically.
+service handles this lifecycle automatically. Apply migration `0021` before running
+updated workers.
 
 Generated summary output must be a JSON object with nonempty string
 `short_summary` and `long_summary` values and an array of nonempty string tags.

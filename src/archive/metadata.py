@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import codecs
+import ipaddress
 import json
 import re
 import subprocess
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import UTC, datetime, time
 from email.message import Message
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
@@ -380,17 +381,14 @@ def _build_metadata_from_parser(parser: _MetadataHTMLParser, base_url: str) -> E
         meta.get("og:article:author"),
         jsonld_metadata.author,
     )
-    original_published_at = _parse_datetime_value(
-        _first_nonempty(
-            meta.get("article:published_time"),
-            meta.get("og:published_time"),
-            meta.get("date"),
-            meta.get("pubdate"),
-            jsonld_metadata.original_published_at.isoformat()
-            if jsonld_metadata.original_published_at
-            else "",
-        )
+    original_published_at = _first_parsed_datetime(
+        meta.get("article:published_time"),
+        meta.get("og:published_time"),
+        meta.get("date"),
+        meta.get("pubdate"),
     )
+    if original_published_at is None:
+        original_published_at = jsonld_metadata.original_published_at
     media_url = _normalize_url(
         _first_nonempty(
             meta.get("og:audio"),
@@ -529,12 +527,10 @@ def _extract_from_jsonld_record(record: dict, base_url: str) -> ExtractedMetadat
         _entity_name(record.get("creator")),
     )
     record_url = _string_value(record.get("url"))
-    original_published_at = _parse_datetime_value(
-        _first_nonempty(
-            _string_value(record.get("datePublished")),
-            _string_value(record.get("dateCreated")),
-            _string_value(record.get("uploadDate")),
-        )
+    original_published_at = _first_parsed_datetime(
+        _string_value(record.get("datePublished")),
+        _string_value(record.get("dateCreated")),
+        _string_value(record.get("uploadDate")),
     )
 
     media_url = _normalize_url(
@@ -602,26 +598,60 @@ def _string_value(value) -> str:
     return str(value).strip()
 
 
+def _first_parsed_datetime(*values: str | None) -> datetime | None:
+    """First candidate that parses to a storable aware datetime, else ``None``.
+
+    Publication dates are optional page hints. A date-shaped but impossible value
+    (``2026-02-31``, hour 25, an offset pushing the instant past year 9999) only
+    disqualifies that candidate; later candidates and other metadata still apply.
+    """
+    for value in values:
+        if value and value.strip():
+            parsed = _parse_datetime_value(value)
+            if parsed is not None:
+                return parsed
+    return None
+
+
 def _parse_datetime_value(value: str) -> datetime | None:
+    """ISO datetime, then ISO date, then RFC 2822; ``None`` if none is valid.
+
+    Each interpretation is isolated: an impossible value under one parser falls
+    through to the next instead of aborting metadata extraction.
+    """
     cleaned = value.strip()
     if not cleaned:
         return None
 
-    parsed = parse_datetime(cleaned)
-    if parsed:
-        return _ensure_aware(parsed)
+    for interpret in (_interpret_iso_datetime, _interpret_iso_date, _interpret_rfc_datetime):
+        try:
+            parsed = interpret(cleaned)
+            if parsed is not None:
+                parsed = _ensure_aware(parsed)
+                # The stored instant must be representable in UTC.
+                parsed.astimezone(UTC)
+                return parsed
+        except (TypeError, ValueError, IndexError, OverflowError):
+            continue
+    return None
 
-    parsed_date = parse_date(cleaned)
-    if parsed_date:
-        return timezone.make_aware(
-            datetime.combine(parsed_date, time.min),
-            timezone.get_default_timezone(),
-        )
 
-    try:
-        return _ensure_aware(parsedate_to_datetime(cleaned))
-    except (TypeError, ValueError, IndexError):
+def _interpret_iso_datetime(value: str) -> datetime | None:
+    return parse_datetime(value)
+
+
+def _interpret_iso_date(value: str) -> datetime | None:
+    parsed_date = parse_date(value)
+    if parsed_date is None:
         return None
+    return timezone.make_aware(
+        datetime.combine(parsed_date, time.min),
+        timezone.get_default_timezone(),
+    )
+
+
+def _interpret_rfc_datetime(value: str) -> datetime | None:
+    return parsedate_to_datetime(value)
 
 
 def _ensure_aware(value: datetime) -> datetime:
@@ -637,7 +667,8 @@ def _normalize_url(value: str, base_url: str) -> str:
     not end up in a stored media URL that is later linked or fetched.
     """
     cleaned = value.strip()
-    if not cleaned:
+    # Checked before parsing: urllib silently drops embedded tabs and newlines.
+    if not cleaned or _has_forbidden_url_control(cleaned):
         return ""
     try:
         normalized = urljoin(base_url, cleaned)
@@ -646,7 +677,43 @@ def _normalize_url(value: str, base_url: str) -> str:
         return ""
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         return ""
+    if _has_forbidden_url_control(normalized) or not _is_valid_http_authority(parsed):
+        return ""
     return normalized
+
+
+# Characters that never appear in a usable host, whether reg-name or IDN.
+_FORBIDDEN_HOST_CHARACTERS = frozenset(' "<>\\^`{|}%')
+
+
+def _has_forbidden_url_control(url: str) -> bool:
+    return any(ord(char) < 0x20 or ord(char) == 0x7F for char in url)
+
+
+def _is_valid_http_authority(parsed) -> bool:
+    """Hostname and port usable for an HTTP(S) request, via urllib's public API."""
+    try:
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        # Out-of-range or non-numeric port, or a malformed bracketed host.
+        return False
+    if not hostname or port == 0:
+        return False
+    host_part = parsed.netloc.rpartition("@")[2]
+    if host_part.startswith("["):
+        # Only IPv6 literals: no IPvFuture forms, and no zone IDs (link-local,
+        # never a public media host).
+        if "%" in hostname:
+            return False
+        try:
+            ipaddress.IPv6Address(hostname)
+        except ValueError:
+            return False
+        return True
+    return not any(
+        char in _FORBIDDEN_HOST_CHARACTERS or char in ":[]" or char.isspace() for char in hostname
+    )
 
 
 def _first_nonempty(*values: str | None) -> str:

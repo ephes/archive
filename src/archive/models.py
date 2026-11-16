@@ -313,10 +313,19 @@ class Item(models.Model):
 
 
 class PendingArchiveMediaUpload(models.Model):
-    """A durable reservation protecting an upload until publication or compensation."""
+    """A durable reservation protecting an upload until publication or compensation.
+
+    ``owner_item_id``/``owner_attempt`` record the item and the processing attempt
+    (``Item.processing_started_at``) whose publication fence the upload must pass.
+    Once that attempt is no longer the item's current one, the upload can never be
+    published and the reservation is provably retired. Reservations without an
+    owner attempt (legacy rows, unclaimed direct callers) are never auto-retired.
+    """
 
     prefix = models.CharField(max_length=512, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    owner_item_id = models.BigIntegerField(blank=True, null=True)
+    owner_attempt = models.DateTimeField(blank=True, null=True)
 
 
 class ProcessingStep(models.TextChoices):

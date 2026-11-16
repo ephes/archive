@@ -100,7 +100,7 @@ def test_archived_audio_without_range_is_served_whole_and_offers_ranges(
     assert response["Content-Type"] == "audio/mpeg"
     assert response["Content-Length"] == "9"
     assert response["Accept-Ranges"] == "bytes"
-    assert response["Cache-Control"] == "public, max-age=3600"
+    assert response["Cache-Control"] == "public, no-cache"
     assert "Content-Range" not in response
     assert b"".join(response.streaming_content) == PAYLOAD
     response.close()
@@ -129,7 +129,7 @@ def test_archived_audio_answers_a_single_range_with_206(
     assert response["Content-Range"] == content_range
     assert response["Content-Length"] == str(len(body))
     assert response["Accept-Ranges"] == "bytes"
-    assert response["Cache-Control"] == "public, max-age=3600"
+    assert response["Cache-Control"] == "public, no-cache"
     assert b"".join(response.streaming_content) == body
     response.close()
     assert handle.closed
@@ -157,7 +157,7 @@ def test_archived_audio_answers_an_unsatisfiable_range_with_416(
     assert response.status_code == 416
     assert response["Content-Range"] == "bytes */9"
     assert response["Accept-Ranges"] == "bytes"
-    assert response["Cache-Control"] == "public, max-age=3600"
+    assert response["Cache-Control"] == "public, no-cache"
     assert response.content == b""
     assert handle.closed
 
@@ -477,7 +477,7 @@ def test_transient_range_failure_is_not_cached_and_retry_recovers(client, monkey
     assert handles[0].closes == 1
     recovered = client.get(url, headers={"Range": "bytes=2-4"})
     assert recovered.status_code == 206
-    assert recovered["Cache-Control"] == "public, max-age=3600"
+    assert recovered["Cache-Control"] == "public, no-cache"
     assert b"".join(recovered.streaming_content) == PAYLOAD[2:5]
     recovered.close()
     assert handles[1].closes == 1

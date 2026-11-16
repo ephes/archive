@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Drop extracted media references whose HTTP(S) authority is unusable (empty host,
+  invalid/zero/out-of-range port, malformed bracketed host or IPv6 zone, host
+  delimiters/whitespace, URL controls), keeping other metadata and valid relative,
+  IPv6 and internationalized references.
+- Serve public archived/article audio with `public, no-cache` and a strong
+  generation `ETag` (304 on `If-None-Match`, `If-Range` only on an exact match)
+  instead of `max-age=3600`, so unpublication takes effect at the next request.
+  Audio 404/405 and other error responses are `no-store`.
+
+- Treat impossible optional publication dates (for example `2026-02-31`) as
+  absent instead of aborting metadata extraction; try the next HTML/JSON-LD date
+  candidate and keep title, media and other extracted metadata.
+- Refuse storage-returned media keys outside the reserved upload prefix before
+  publication; discard only the provably owned reserved object and reservation,
+  never another upload's object or reservation.
+
+- Record the owning item and processing attempt on upload reservations
+  (migration 0021). New `reconcile_archive_media_reservations` reports and, with
+  `--apply`, releases reservations whose attempt is provably retired, deleting only
+  their unreferenced objects. Live and legacy (unowned) reservations stay protected.
+- Validate a stored object's opened length against its recorded size before
+  committing stored-audio lengths or ranges; mismatches get a `no-store` 502 for
+  GET/HEAD/range and close the handle once. HEAD no longer closes the file twice.
+
 - Fence summary/transcript success against source inputs and processing attempts;
   requeue changed inputs without settling newer work, preserving manual edits.
 - Bind metadata success and failure to the fetched URL/current attempt, preserving

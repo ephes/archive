@@ -116,7 +116,7 @@ def test_stored_audio_real_http_bytes_and_headers(
         assert response.getheader("Content-Range") == content_range
         assert response.getheader("Accept-Ranges") == "bytes"
         assert response.getheader("Content-Length") == str(stop - start)
-        assert response.getheader("Cache-Control") == "public, max-age=3600"
+        assert response.getheader("Cache-Control") == "public, no-cache"
         if status != 416:
             assert response.getheader("Content-Type") == "audio/mpeg"
         assert response.read() == (b"" if method == "HEAD" else PAYLOAD[start:stop])

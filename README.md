@@ -36,6 +36,16 @@ Public endpoints:
   caller policies. Successful public delivery retains its one-hour cache lifetime.
   Seek failures log one fixed `stored_media_range_seek_failed` event without backend
   exception text, traceback, object key or signed URL; acquired handles close once.
+  Before any length, range or body is committed, a known recorded size is compared
+  with the opened object's own length (`fstat` of a real descriptor, otherwise the
+  backend file's integer `size`, such as the S3 object length). A disagreement, from
+  truncation or replacement outside the publication protocol, answers GET, HEAD and
+  range requests with a `no-store` 502, logs the fixed `stored_media_length_mismatch`
+  event and closes the handle once. Backends without usable length evidence keep the
+  recorded size, and an unknown recorded size (0) keeps whole-file delivery. Changes
+  after the response has started streaming are not detected. HEAD keeps the GET
+  headers without reading the body and closes the handle once, when the server
+  closes the response.
 - `/feeds/podcast.xml` podcast-style feed for items with stable local audio enclosures
 - `/feeds/podcast/page/<n>.xml` older podcast feed pages when more than 50 eligible items exist
 - `/api/health/` unauthenticated JSON processing health for monitoring (step counts and timestamps

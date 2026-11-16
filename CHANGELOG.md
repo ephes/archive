@@ -13,6 +13,10 @@
   (migration 0021). New `reconcile_archive_media_reservations` reports and, with
   `--apply`, releases reservations whose attempt is provably retired, deleting only
   their unreferenced objects. Live and legacy (unowned) reservations stay protected.
+- Validate a stored object's opened length against its recorded size before
+  committing stored-audio lengths or ranges; mismatches get a `no-store` 502 for
+  GET/HEAD/range and close the handle once. HEAD no longer closes the file twice.
+
 - Fence summary/transcript success against source inputs and processing attempts;
   requeue changed inputs without settling newer work, preserving manual edits.
 - Bind metadata success and failure to the fetched URL/current attempt, preserving

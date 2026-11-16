@@ -9,9 +9,11 @@ which RFC 9110 always permits.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import IO
 
+from django.db.models.fields.files import FieldFile
 from django.http import FileResponse, HttpRequest, HttpResponse
 
 logger = logging.getLogger(__name__)
@@ -84,15 +86,23 @@ def ranged_file_response(
     """Answer GET/HEAD for an open file of ``size`` bytes; the response owns and closes the file.
 
     ``size`` is the recorded length of the file. When it is unknown (0), the
-    file is served whole and ranges are not offered.
+    file is served whole and ranges are not offered. When the opened object
+    reports its own length (see ``opened_object_length``) and it disagrees with
+    a known recorded size, no length, range or body is committed: the request
+    gets a non-cacheable 502 and the handle is closed.
     """
 
     def finalize(response: HttpResponse) -> HttpResponse:
         response["Cache-Control"] = "no-store" if response.status_code >= 500 else cache_control
         return response
 
-    transferred = file_closed = False
+    transferred = False
     try:
+        if size > 0:
+            available = opened_object_length(file_handle)
+            if available is not None and available != size:
+                logger.warning("stored_media_length_mismatch")
+                return finalize(HttpResponse("Audio is temporarily unavailable.", status=502))
         byte_range = None
         # Without a validator (ETag/Last-Modified) an If-Range can never match, so
         # such a request gets the whole file (RFC 9110 section 13.1.5).
@@ -128,15 +138,14 @@ def ranged_file_response(
             response["Content-Length"] = str(length)
             response["Accept-Ranges"] = "bytes"
         if request.method == "HEAD":
-            # Keep GET headers, release the file without iterating its body.
-            file_closed = True
-            file_handle.close()
+            # Keep GET headers without iterating the body. The response already
+            # owns the file and closes it exactly once when the server closes it.
             response.streaming_content = ()
         finalize(response)
         transferred = True
         return response
     finally:
-        if not transferred and not file_closed:
+        if not transferred:
             try:
                 file_handle.close()
             except Exception as exc:
@@ -145,3 +154,31 @@ def ranged_file_response(
                     "Closing stored media during response preparation failed (%s)",
                     type(exc).__name__,
                 )
+
+
+def opened_object_length(file_handle: object) -> int | None:
+    """Length of the opened stored object from supported file APIs, or ``None``.
+
+    A real descriptor is measured with ``fstat`` (the opened file, even if the
+    path was replaced afterwards). Otherwise a backend file's own ``size``
+    (for example django-storages' S3 object length) is used. Missing, failing or
+    non-integer evidence returns ``None`` so the recorded size stays authoritative.
+    """
+    if isinstance(file_handle, FieldFile):
+        file_handle = file_handle.file
+    try:
+        descriptor = file_handle.fileno()  # type: ignore[attr-defined]
+    except Exception:
+        descriptor = None
+    if isinstance(descriptor, int) and not isinstance(descriptor, bool) and descriptor >= 0:
+        try:
+            return os.fstat(descriptor).st_size
+        except OSError:
+            return None
+    try:
+        reported = file_handle.size  # type: ignore[attr-defined]
+    except Exception:
+        return None
+    if isinstance(reported, bool) or not isinstance(reported, int) or reported < 0:
+        return None
+    return reported

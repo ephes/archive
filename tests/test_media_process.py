@@ -194,3 +194,111 @@ def test_exit_observation_does_not_reap_child(status):
         if process.returncode is None:
             process.kill()
             process.wait(timeout=1)
+
+
+@pytest.mark.parametrize("stage", ["term", "grace", "kill", "wait"])
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit, OSError])
+def test_retirement_attempts_remaining_actions_after_cleanup_error(stage, error_type, monkeypatch):
+    from archive import media_process
+
+    events = []
+    error = error_type("synthetic-private-marker")
+
+    class Process:
+        pid = 12345
+        returncode = None
+
+        def wait(self, timeout):
+            events.append(("wait", timeout))
+            if stage == "wait":
+                raise error
+            self.returncode = 0
+
+    def signal_group(pid, sig):
+        assert pid == Process.pid
+        events.append(sig)
+        if (stage, sig) in (("term", signal.SIGTERM), ("kill", signal.SIGKILL)):
+            raise error
+
+    def pause(_):
+        events.append("grace")
+        if stage == "grace":
+            raise error
+
+    monkeypatch.setattr(media_process.os, "killpg", signal_group)
+    monkeypatch.setattr(media_process, "sleep", pause)
+    with pytest.raises(error_type) as caught:
+        media_process._retire_process_group(Process())
+    assert caught.value is error
+    assert events[0] == signal.SIGTERM
+    assert events[-2:] == [signal.SIGKILL, ("wait", 1)]
+
+
+@pytest.mark.parametrize("primary", [None, "failure", "interrupt"])
+@pytest.mark.parametrize("close_error", [RuntimeError, KeyboardInterrupt])
+def test_cleanup_closes_both_streams_and_preserves_primary(primary, close_error, monkeypatch):
+    from archive import media_process
+
+    events = []
+    error = (
+        KeyboardInterrupt("primary")
+        if primary == "interrupt"
+        else media_process.MediaProcessError("output limit")
+    )
+
+    class Stream:
+        def __init__(self, name):
+            self.name = name
+            reader, writer = os.pipe()
+            os.close(writer)
+            self.file = os.fdopen(reader, "rb")
+
+        def fileno(self):
+            return self.file.fileno()
+
+        def close(self):
+            events.append(self.name)
+            self.file.close()
+            # Even another interruption must not skip the other stream.
+            raise close_error("synthetic-private-marker")
+
+    class Process:
+        pid = 12345
+        returncode = None
+
+        def __init__(self, *args, **kwargs):
+            self.stdout = Stream("stdout")
+            self.stderr = Stream("stderr")
+
+        def wait(self, timeout):
+            events.append(("wait", timeout))
+            self.returncode = 0
+
+    def check_size(*args):
+        if primary:
+            raise error
+
+    def pause(_):
+        # A second interruption while handling the primary failure.
+        raise KeyboardInterrupt("cleanup")
+
+    monkeypatch.setattr(media_process.subprocess, "Popen", Process)
+    monkeypatch.setattr(media_process, "_leader_has_exited", lambda _: primary is None)
+    monkeypatch.setattr(media_process, "_check_output_size", check_size)
+    monkeypatch.setattr(media_process.os, "killpg", lambda pid, sig: events.append(sig))
+    if primary:
+        monkeypatch.setattr(media_process, "sleep", pause)
+    expected = (
+        type(error)
+        if primary
+        else (close_error if close_error is KeyboardInterrupt else media_process.MediaProcessError)
+    )
+    with pytest.raises(BaseException) as caught:
+        media_process.run_media_command(["synthetic"], timeout=2)
+    assert isinstance(caught.value, expected)
+    if primary:
+        assert caught.value is error
+        assert caught.value.__notes__ == ["Media process cleanup failed"]
+    elif close_error is RuntimeError:
+        assert str(caught.value) == "process cleanup failed"
+    assert events == [signal.SIGTERM, signal.SIGKILL, ("wait", 1), "stdout", "stderr"]

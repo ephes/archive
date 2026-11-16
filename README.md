@@ -1096,8 +1096,16 @@ preventing signals from reaching a recycled group. This uses POSIX `waitid` with
 Wrappers and their children must remain in that session; deliberately
 detached processes are not supported. Cleanup escalation can add up to 0.2 seconds
 plus up to one second for reaping to the execution deadline. Both commands discard
-diagnostic text under the same stream budgets. YouTube download failures remain retryable under the existing
-media retry policy and do not replace previously archived media.
+diagnostic text under the same stream budgets. YouTube download failures remain
+retryable under the existing media retry policy and do not replace previously
+archived media.
+
+An interruption or error during TERM/grace still attempts KILL and the bounded
+reap. Both diagnostic streams are closed independently, including when another
+cleanup action is interrupted. Cleanup failures retain the original execution
+error or cancellation, adding only a fixed cleanup-failure note; without a prior
+error they report a fixed cleanup error or propagate the cleanup cancellation.
+Failed cleanup cannot guarantee that every owned process has exited.
 
 Invariant: an archive media object is deleted only after it has been verified,
 in its own durable database transaction, that no committed item references it.

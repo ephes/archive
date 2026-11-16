@@ -130,6 +130,7 @@ class Command(BaseCommand):
         mode = "apply" if options["apply"] else "dry-run"
         changed = 0
         unchanged = 0
+        skipped = 0
         for item_id in self._matching_items(options):
             # Decide from the current row, holding the lock through normalization
             # and publication. SQLite rejects a competing write during this read
@@ -141,22 +142,29 @@ class Command(BaseCommand):
                 item = current.first()
                 if item is None:
                     continue
-                did_change, lines = self._process_item(item, options)
-            if changed + unchanged == 0:
+                if self._matches_current_selectors(item, options):
+                    did_change, lines = self._process_item(item, options)
+                else:
+                    did_change = None
+                    lines = [f"SKIPPED item {item.pk}: selector changed"]
+            if changed + unchanged + skipped == 0:
                 self.stdout.write(self._mode_banner(options))
             for line in lines:
                 self.stdout.write(line)
-            if did_change:
+            if did_change is None:
+                skipped += 1
+            elif did_change:
                 changed += 1
             else:
                 unchanged += 1
 
         inspected = changed + unchanged
-        if not inspected:
+        if not inspected and not skipped:
             self.stdout.write(f"No items matched ({mode}).")
             return
         self.stdout.write(
-            f"Summary: inspected={inspected} changed={changed} unchanged={unchanged} mode={mode}"
+            f"Summary: inspected={inspected} changed={changed} unchanged={unchanged} mode={mode} "
+            f"skipped={skipped}"
         )
 
     def _process_item(self, item: Item, options: dict[str, Any]) -> tuple[bool, list[str]]:
@@ -202,6 +210,30 @@ class Command(BaseCommand):
 
         return bool(change_descriptions), lines
 
+    def _matches_current_selectors(self, item: Item, options: dict[str, Any]) -> bool:
+        # Called after the apply-mode row lock; selection is only a starting set.
+        if options["rule"] and item.classification_rule not in options["rule"]:
+            return False
+        if options["empty_rule"] and item.classification_rule != "":
+            return False
+        if options["empty_evidence"] and item.classification_evidence != {}:
+            return False
+        if options["stale_only"] and (
+            item.classification_engine_version >= CURRENT_CLASSIFICATION_ENGINE_VERSION
+        ):
+            return False
+        return self._matches_host(item.pk, item.original_url, options)
+
+    def _matches_host(self, item_id: int, original_url: str, options: dict[str, Any]) -> bool:
+        allowed_hosts = {host.strip().lower() for host in options["host"] if host.strip()}
+        if not allowed_hosts:
+            return True
+        try:
+            host = urlparse(original_url).netloc.lower()
+        except ValueError:
+            raise CommandError(f"Cannot select item {item_id}: invalid URL.") from None
+        return host in allowed_hosts
+
     def _matching_items(self, options: dict[str, Any]) -> Iterator[int]:
         queryset = Item.objects.order_by("id")
         if options["item_ids"]:
@@ -221,7 +253,6 @@ class Command(BaseCommand):
         if horizon is None:
             return
         queryset = queryset.filter(pk__lte=horizon)
-        allowed_hosts = {host.strip().lower() for host in options["host"] if host.strip()}
         limit = options["limit"]
         matched = 0
         last_id = 0
@@ -232,13 +263,8 @@ class Command(BaseCommand):
             if not batch:
                 return
             for item_id, original_url in batch:
-                if allowed_hosts:
-                    try:
-                        host = urlparse(original_url).netloc.lower()
-                    except ValueError:
-                        raise CommandError(f"Cannot select item {item_id}: invalid URL.") from None
-                    if host not in allowed_hosts:
-                        continue
+                if not self._matches_host(item_id, original_url, options):
+                    continue
                 yield item_id
                 matched += 1
                 if limit is not None and matched >= limit:

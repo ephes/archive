@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Recheck mutable reclassification selectors under the current row lock; report
+  changed selections as skipped without normalizing or counting them as applied.
+- Treat malformed classification URLs as unknown sources, retaining explicit kind
+  overrides and independent usable media instead of leaking parser exceptions.
+
+- Normalize supported adapter authorities by hostname and scheme-default port,
+  refusing userinfo and non-equivalent authorities; media archival and processing
+  health share the same YouTube page check. Skip damaged restored media
+  candidates with bounded, typed fields and validated URL/provenance semantics.
+
+- Select usable video evidence beyond weak earlier discoveries, accept explicit
+  HTTP(S) audio endpoints without file suffixes, and bind cached classification
+  candidates/signals to all current source URLs. Legacy unbound discoveries are
+  discarded until metadata enrichment records their source identity.
+
 - Drop extracted media references whose HTTP(S) authority is unusable (empty host,
   invalid/zero/out-of-range port, malformed bracketed host or IPv6 zone, host
   delimiters/whitespace, URL controls), keeping other metadata and valid relative,

@@ -4,17 +4,33 @@ import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import ParseResult, parse_qs, urlparse
 
 from django.utils import timezone
 
-from archive.metadata import AUDIO_SUFFIXES, VIDEO_SUFFIXES
+from archive.metadata import AUDIO_SUFFIXES, VIDEO_SUFFIXES, _normalize_url
 from archive.models import Item, ItemKind, PodcastFeedPolicy
+from archive.safe_fetch import BlockedFetchError, require_http_url
 
 VIDEO_HOSTS = {"youtube.com", "www.youtube.com", "youtu.be", "vimeo.com", "www.vimeo.com"}
 YOUTUBE_PAGE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
 OVERRIDE_CLASSIFICATION_RULES = {"explicit_kind", "operator_override"}
 CURRENT_CLASSIFICATION_ENGINE_VERSION = 2
+MAX_MEDIA_CANDIDATE_URL_LENGTH = 8192
+_MEDIA_CANDIDATE_SOURCE_TYPES = {
+    "explicit_audio_url": {"audio"},
+    "html_audio": {"audio"},
+    "og_audio": {"audio"},
+    "twitter_player_stream": {"audio"},
+    "json_ld_audio": {"audio"},
+    "ard_media_object": {"audio"},
+    "html_video": {"video"},
+    "og_video": {"video", "page_video"},
+    "twitter_player": {"video", "page_video"},
+    "json_ld_video": {"video", "page_video"},
+    "media_url": {"audio", "video", "page_video"},
+    "original_url": {"audio", "video", "page_video"},
+}
 
 
 @dataclass(frozen=True)
@@ -63,6 +79,7 @@ def classify_item(
     media_url: str = "",
     kind_hint: str = "",
     metadata_candidates: Sequence[MediaCandidate] = (),
+    metadata_signals: dict[str, Any] | None = None,
     existing_rule: str = "",
     existing_evidence: dict[str, Any] | None = None,
     preserve_override: bool = True,
@@ -125,11 +142,15 @@ def classify_item(
             media_url=media_url,
             kind_hint=kind_hint,
             matched_adapter=adapter_name,
+            metadata_signals=metadata_signals,
             media_candidates=media_candidates,
             selected_audio=selected_audio_candidate.url if selected_audio_candidate else None,
-            selected_video=_resolved_video_candidate_url(
-                selected_video_candidate,
-                item_kind=kind,
+            selected_video=(
+                selected_video_candidate.url
+                if selected_video_candidate
+                else select_video_archive_source_url_from_candidates(
+                    media_candidates, item_kind=kind
+                )
             ),
             existing_evidence=existing_evidence,
         ),
@@ -149,7 +170,7 @@ def build_media_candidates(
 
     def add_candidate(candidate: MediaCandidate, *, priority: int) -> None:
         key = (candidate.url, candidate.candidate_type)
-        if not candidate.url:
+        if not candidate.url or not _is_http_url(candidate.url):
             return
         existing_index = candidate_indexes.get(key)
         if existing_index is None:
@@ -164,25 +185,24 @@ def build_media_candidates(
         candidates[existing_index] = candidate
 
     explicit_audio_url = audio_url.strip()
-    if explicit_audio_url:
-        candidate_type = "audio" if _looks_like_audio_url(explicit_audio_url) else ""
-        if not candidate_type and _looks_like_ambiguous_audio_url(explicit_audio_url):
-            candidate_type = "audio"
-        if candidate_type:
-            add_candidate(
-                MediaCandidate(
-                    url=explicit_audio_url,
-                    candidate_type=candidate_type,
-                    detection_source="explicit_audio_url",
-                ),
-                priority=_candidate_source_priority("explicit_audio_url"),
-            )
+    if explicit_audio_url and _is_http_url(explicit_audio_url):
+        add_candidate(
+            MediaCandidate(
+                url=explicit_audio_url,
+                candidate_type="audio",
+                detection_source="explicit_audio_url",
+            ),
+            priority=_candidate_source_priority("explicit_audio_url"),
+        )
 
     for candidate in metadata_candidates:
         add_candidate(candidate, priority=_candidate_source_priority(candidate.detection_source))
 
-    for candidate in _media_candidates_from_evidence(existing_evidence):
-        add_candidate(candidate, priority=_candidate_source_priority(candidate.detection_source))
+    if _evidence_matches_sources(existing_evidence, original_url, audio_url, media_url):
+        for candidate in _media_candidates_from_evidence(existing_evidence):
+            add_candidate(
+                candidate, priority=_candidate_source_priority(candidate.detection_source)
+            )
 
     for url, detection_source in (
         (media_url.strip(), "media_url"),
@@ -212,7 +232,9 @@ def resolve_media_sources_for_item(item: Item) -> tuple[str | None, str | None]:
         existing_evidence=item.classification_evidence,
     )
     selected_audio_candidate = select_audio_archive_source_candidate_from_candidates(candidates)
-    selected_video_candidate = select_video_archive_source_candidate_from_candidates(candidates)
+    selected_video_candidate = select_video_archive_source_candidate_from_candidates(
+        candidates
+    ) or select_video_archive_source_candidate_from_candidates(candidates, item_kind=item.kind)
     return (
         selected_audio_candidate.url if selected_audio_candidate else None,
         _resolved_video_candidate_url(
@@ -243,11 +265,7 @@ def classification_is_stale(item: Item) -> bool:
 def normalized_classification_evidence(evidence: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(evidence, dict):
         return {}
-    return {
-        key: value
-        for key, value in evidence.items()
-        if key != "classified_at"
-    }
+    return {key: value for key, value in evidence.items() if key != "classified_at"}
 
 
 def select_audio_archive_source_url_from_candidates(
@@ -259,8 +277,12 @@ def select_audio_archive_source_url_from_candidates(
 
 def select_video_archive_source_url_from_candidates(
     candidates: Iterable[MediaCandidate],
+    *,
+    item_kind: str = "",
 ) -> str | None:
-    candidate = select_video_archive_source_candidate_from_candidates(candidates)
+    candidate = select_video_archive_source_candidate_from_candidates(
+        candidates, item_kind=item_kind
+    )
     return candidate.url if candidate else None
 
 
@@ -275,9 +297,13 @@ def select_audio_archive_source_candidate_from_candidates(
 
 def select_video_archive_source_candidate_from_candidates(
     candidates: Iterable[MediaCandidate],
+    *,
+    item_kind: str = "",
 ) -> MediaCandidate | None:
     for candidate in candidates:
-        if candidate.candidate_type in {"video", "page_video"}:
+        if candidate.candidate_type in {"video", "page_video"} and _resolved_video_candidate_url(
+            candidate, item_kind=item_kind
+        ):
             return candidate
     return None
 
@@ -367,9 +393,7 @@ def _article_audio_is_feed_worthy(item: Item) -> bool:
     list_like_lines = sum(
         1
         for line in nonempty_lines
-        if line.startswith(("-", "*", "•"))
-        or line[:3].isdigit()
-        or line.count(":") >= 2
+        if line.startswith(("-", "*", "•")) or line[:3].isdigit() or line.count(":") >= 2
     )
     url_count = body.count("http://") + body.count("https://")
     separator_count = body.count(" / ") + body.count(" | ") + body.count(" - ")
@@ -381,11 +405,13 @@ def _article_audio_is_feed_worthy(item: Item) -> bool:
 
 
 def _generic_url_rule(*, original_url: str, audio_url: str) -> tuple[str, str]:
-    if audio_url.strip():
+    if audio_url.strip() and _is_http_url(audio_url.strip()):
         return str(ItemKind.PODCAST_EPISODE), "audio_url_signal"
 
-    parsed = urlparse(original_url)
-    host = parsed.netloc.lower()
+    parsed = _parse_http_url(original_url)
+    if parsed is None:
+        return str(ItemKind.LINK), "default_link"
+    host = _adapter_hostname(original_url)
     path = parsed.path.lower()
 
     if host in VIDEO_HOSTS:
@@ -396,8 +422,10 @@ def _generic_url_rule(*, original_url: str, audio_url: str) -> tuple[str, str]:
 
 
 def _match_source_adapter(url: str) -> tuple[str, str]:
-    parsed = urlparse(url)
-    host = parsed.netloc.lower()
+    parsed = _parse_http_url(url)
+    if parsed is None:
+        return "", ""
+    host = _adapter_hostname(url)
     path = parsed.path
 
     if host in {"castro.fm", "www.castro.fm"} and path.startswith("/episode/"):
@@ -409,21 +437,50 @@ def _match_source_adapter(url: str) -> tuple[str, str]:
     return "", ""
 
 
+def _adapter_hostname(url: str) -> str:
+    parsed = _parse_http_url(url)
+    if parsed is None:
+        return ""
+    if parsed.username is not None or parsed.password is not None:
+        return ""
+    try:
+        if parsed.port not in {None, 443 if parsed.scheme == "https" else 80}:
+            return ""
+    except ValueError:
+        return ""
+    return parsed.hostname or ""
+
+
+def _parse_http_url(url: str) -> ParseResult | None:
+    try:
+        require_http_url(url)
+        # Share extracted-media authority/control admission. No DNS or I/O.
+        if _normalize_url(url, "") != url:
+            return None
+        return urlparse(url)
+    except (BlockedFetchError, ValueError):
+        return None
+
+
+def _is_http_url(url: str) -> bool:
+    return _parse_http_url(url) is not None
+
+
 def _looks_like_audio_url(url: str) -> bool:
-    return urlparse(url).path.lower().endswith(AUDIO_SUFFIXES)
-
-
-def _looks_like_ambiguous_audio_url(url: str) -> bool:
-    return urlparse(url).path.lower().endswith(".webm")
+    parsed = _parse_http_url(url)
+    return parsed is not None and parsed.path.lower().endswith(AUDIO_SUFFIXES)
 
 
 def _looks_like_direct_video_url(url: str) -> bool:
-    return urlparse(url).path.lower().endswith(VIDEO_SUFFIXES)
+    parsed = _parse_http_url(url)
+    return parsed is not None and parsed.path.lower().endswith(VIDEO_SUFFIXES)
 
 
 def _looks_like_supported_video_page_url(url: str) -> bool:
-    parsed = urlparse(url)
-    host = parsed.netloc.lower()
+    parsed = _parse_http_url(url)
+    if parsed is None:
+        return False
+    host = _adapter_hostname(url)
     if parsed.scheme not in {"http", "https"} or host not in YOUTUBE_PAGE_HOSTS:
         return False
     if _looks_like_direct_video_url(url):
@@ -465,6 +522,19 @@ def _candidate_source_priority(detection_source: str) -> int:
     }.get(detection_source, 30)
 
 
+def _evidence_matches_sources(evidence, original_url: str, audio_url: str, media_url: str) -> bool:
+    if not isinstance(evidence, dict):
+        return False
+    return all(
+        isinstance(evidence.get(key), str) and evidence[key].strip() == current.strip()
+        for key, current in (
+            ("original_url", original_url),
+            ("audio_url", audio_url),
+            ("media_url", media_url),
+        )
+    )
+
+
 def _media_candidates_from_evidence(
     evidence: dict[str, Any] | None,
 ) -> list[MediaCandidate]:
@@ -479,11 +549,37 @@ def _media_candidates_from_evidence(
     for value in values:
         if not isinstance(value, dict):
             continue
-        url = str(value.get("url", "")).strip()
-        candidate_type = str(value.get("candidate_type", "")).strip()
-        detection_source = str(value.get("detection_source", "")).strip()
-        if not url or not candidate_type or not detection_source:
+        fields = [
+            ("url", MAX_MEDIA_CANDIDATE_URL_LENGTH),
+            ("candidate_type", 16),
+            ("detection_source", 64),
+        ]
+        if any(
+            not isinstance(value.get(key), str) or len(value[key]) > limit for key, limit in fields
+        ):
             continue
+        url = value["url"].strip()
+        candidate_type = value["candidate_type"].strip()
+        detection_source = value["detection_source"].strip()
+        if candidate_type not in _MEDIA_CANDIDATE_SOURCE_TYPES.get(detection_source, set()):
+            continue
+        if not _is_http_url(url):
+            continue
+        if candidate_type == "page_video" and not _looks_like_supported_video_page_url(url):
+            continue
+        input_key = {
+            "explicit_audio_url": "audio_url",
+            "original_url": "original_url",
+            "media_url": "media_url",
+        }.get(detection_source)
+        if input_key:
+            if url != evidence.get(input_key):
+                continue
+            if (
+                detection_source != "explicit_audio_url"
+                and candidate_type != _candidate_type_for_url(url)
+            ):
+                continue
         candidates.append(
             MediaCandidate(
                 url=url,
@@ -501,16 +597,20 @@ def _build_evidence(
     media_url: str,
     kind_hint: str,
     matched_adapter: str,
+    metadata_signals: dict[str, Any] | None,
     media_candidates: Sequence[MediaCandidate],
     selected_audio: str | None,
     selected_video: str | None,
     existing_evidence: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    metadata_signals: dict[str, Any] = {}
-    if isinstance(existing_evidence, dict):
-        raw_signals = existing_evidence.get("metadata_signals")
-        if isinstance(raw_signals, dict):
-            metadata_signals = dict(raw_signals)
+    if metadata_signals is None:
+        metadata_signals = {}
+        if isinstance(existing_evidence, dict) and _evidence_matches_sources(
+            existing_evidence, original_url, audio_url, media_url
+        ):
+            raw_signals = existing_evidence.get("metadata_signals")
+            if isinstance(raw_signals, dict):
+                metadata_signals = dict(raw_signals)
     evidence = {
         "source_adapter": matched_adapter,
         "original_url": original_url,

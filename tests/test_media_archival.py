@@ -12,9 +12,11 @@ from archive.media_archival import (
     _looks_like_supported_video_page_url,
     archive_item_audio,
     can_archive_audio,
+    uses_supported_video_page_source,
 )
 from archive.media_storage import iter_archive_media_object_names
-from archive.models import Item, ItemKind, PendingArchiveMediaUpload
+from archive.models import Item, ItemKind, PendingArchiveMediaUpload, ProcessingStep
+from archive.processing_health import media_archive_step
 
 
 @pytest.fixture(autouse=True)
@@ -155,10 +157,27 @@ def test_can_archive_audio_accepts_supported_youtube_page_url() -> None:
         "https://www.youtube.com/live/demo123",
         "https://www.youtube.com/embed/demo123",
         "https://youtu.be/demo123",
+        "https://www.youtube.com:443/watch?v=demo123",
+        "http://youtube.com:80/watch?v=demo123",
     ],
 )
 def test_supported_video_page_url_matcher_accepts_documented_youtube_shapes(url: str) -> None:
     assert _looks_like_supported_video_page_url(url) is True
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.youtube.com:443/watch?v=demo123",
+        "http://youtube.com:80/watch?v=demo123",
+    ],
+)
+def test_default_port_youtube_page_uses_supported_page_archival(url: str) -> None:
+    item = Item(original_url=url, kind=ItemKind.VIDEO)
+
+    assert uses_supported_video_page_source(item) is True
+    assert media_archive_step(item) == ProcessingStep.MEDIA_ARCHIVE_YOUTUBE
 
 
 @pytest.mark.parametrize(

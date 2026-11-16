@@ -75,7 +75,7 @@ def _run_media_command(
                 # A successful wrapper can leave a child holding these pipes.
                 if not retired and _leader_has_exited(process.pid):
                     # Retirement owns all remaining signals and the final reap.
-                    retired = True
+                    # Until it reaps the leader, the finally block retries it.
                     retirement_started = monotonic()
                     try:
                         _retire_process_group(process)
@@ -85,6 +85,7 @@ def _run_media_command(
                             error.add_note("Media process cleanup failed")
                             raise error from None
                         raise MediaProcessError("process cleanup failed") from None
+                    retired = True
                     if process.returncode:
                         raise MediaProcessError("failed")
                     # The fixed TERM grace and bounded reap are cleanup, not
@@ -113,7 +114,8 @@ def _run_media_command(
     finally:
         cleanup_error: BaseException | None = None
         try:
-            if not retired:
+            # Skipped once the leader is reaped; until then the group is still ours.
+            if process.returncode is None:
                 _retire_process_group(process)
         except BaseException as exc:
             cleanup_error = exc
@@ -122,8 +124,7 @@ def _run_media_command(
                 if owned_stream is not None:
                     owned_stream.close()
             except BaseException as exc:
-                if cleanup_error is None:
-                    cleanup_error = exc
+                cleanup_error = _keep_cancellation(cleanup_error, exc)
         if cleanup_error is not None:
             if primary_error is None:
                 if not isinstance(cleanup_error, Exception):
@@ -185,15 +186,21 @@ def _retire_process_group(process: subprocess.Popen[bytes]) -> None:
     try:
         _signal_owned_group(process.pid, signal.SIGKILL)
     except BaseException as exc:
-        if cleanup_error is None:
-            cleanup_error = exc
+        cleanup_error = _keep_cancellation(cleanup_error, exc)
     try:
         process.wait(timeout=1)
     except BaseException as exc:
-        if cleanup_error is None:
-            cleanup_error = exc
+        cleanup_error = _keep_cancellation(cleanup_error, exc)
     if cleanup_error is not None:
         raise cleanup_error
+
+
+def _keep_cancellation(recorded: BaseException | None, new: BaseException) -> BaseException:
+    # Keep the first cleanup error, except that a later cancellation (such as the
+    # worker stall alarm) replaces an ordinary one so it still reaches its handler.
+    if recorded is None or (isinstance(recorded, Exception) and not isinstance(new, Exception)):
+        return new
+    return recorded
 
 
 def _signal_owned_group(pgid: int, sig: int) -> None:

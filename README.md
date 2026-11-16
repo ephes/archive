@@ -1107,7 +1107,9 @@ cleanup action is interrupted. Cleanup failures retain the original execution
 error or cancellation, adding only a fixed cleanup-failure note; without a prior
 error they report a fixed cleanup error or propagate the cleanup cancellation.
 A cancellation during cleanup (such as the worker's stall alarm) also propagates
-after an ordinary execution error, which then carries the cleanup-failure note.
+after an ordinary execution error, which then carries the cleanup-failure note,
+and it replaces an earlier ordinary cleanup error. An interruption between exit
+observation and retirement still retires and reaps the group during cleanup.
 Failed cleanup cannot guarantee that every owned process has exited.
 On macOS, signalling a group whose only remaining member is the unreaped leader
 reports EPERM rather than ESRCH; retirement treats that as an already-empty

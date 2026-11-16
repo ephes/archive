@@ -5,7 +5,8 @@
 - Attempt media-command KILL, bounded reap and both pipe closes independently
   after cleanup errors or interruptions, preserving the primary error/cancellation
   without exposing raw cleanup diagnostics. A cleanup cancellation still
-  propagates after an ordinary execution error, and retirement time after an
+  propagates after an ordinary execution error or an earlier cleanup error,
+  an interruption just before retirement still retires the group, and retirement time after an
   observed exit no longer turns a success near the deadline into a timeout.
 
 - Keep owned media-command leaders unreaped until the final process-group signal,

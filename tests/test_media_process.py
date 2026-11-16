@@ -379,3 +379,125 @@ def test_success_near_deadline_is_not_reported_as_timeout(monkeypatch):
     monkeypatch.setattr(media_process, "sleep", pause)
     media_process.run_media_command(["synthetic"], timeout=2)
     assert clock > 2  # retirement grace ran past the original deadline
+
+
+@pytest.mark.parametrize("cancel_at", ["kill", "wait"])
+def test_later_cleanup_cancellation_replaces_ordinary_cleanup_error(cancel_at, monkeypatch):
+    from archive import media_process
+
+    events = []
+
+    class Process:
+        pid = 12345
+        returncode = None
+
+        def wait(self, timeout):
+            events.append("wait")
+            if cancel_at == "wait":
+                raise KeyboardInterrupt("stall")
+            self.returncode = 0
+
+    def signal_group(pid, sig):
+        events.append(sig)
+        if sig == signal.SIGTERM:
+            raise OSError("synthetic-private-marker")
+        if sig == signal.SIGKILL and cancel_at == "kill":
+            raise KeyboardInterrupt("stall")
+
+    monkeypatch.setattr(media_process.os, "killpg", signal_group)
+    monkeypatch.setattr(media_process, "sleep", lambda _: None)
+    with pytest.raises(KeyboardInterrupt, match="stall"):
+        media_process._retire_process_group(Process())
+    assert events == [signal.SIGTERM, signal.SIGKILL, "wait"]
+
+
+def test_stream_close_cancellation_replaces_ordinary_retirement_error(monkeypatch):
+    from archive import media_process
+
+    events = []
+
+    class Stream:
+        def __init__(self, name):
+            self.name = name
+            reader, writer = os.pipe()
+            os.close(writer)
+            self.file = os.fdopen(reader, "rb")
+
+        def fileno(self):
+            return self.file.fileno()
+
+        def close(self):
+            events.append(self.name)
+            self.file.close()
+            if self.name == "stderr":
+                raise KeyboardInterrupt("stall")
+
+    class Process:
+        pid = 12345
+        returncode = None
+
+        def __init__(self, *args, **kwargs):
+            self.stdout = Stream("stdout")
+            self.stderr = Stream("stderr")
+
+    def failing_retirement(process):
+        events.append("retire")
+        raise OSError("synthetic-private-marker")
+
+    def output_limit(*args):
+        raise media_process.MediaProcessError("output limit")
+
+    monkeypatch.setattr(media_process.subprocess, "Popen", Process)
+    monkeypatch.setattr(media_process, "_leader_has_exited", lambda _: False)
+    monkeypatch.setattr(media_process, "_check_output_size", output_limit)
+    monkeypatch.setattr(media_process, "_retire_process_group", failing_retirement)
+    with pytest.raises(KeyboardInterrupt, match="stall"):
+        media_process.run_media_command(["synthetic"], timeout=2)
+    assert events == ["retire", "stdout", "stderr"]
+
+
+def test_interruption_before_retirement_still_retires_in_cleanup(monkeypatch):
+    from archive import media_process
+
+    events = []
+    clock = 0.0
+    interrupt_next_clock = False
+
+    def now():
+        nonlocal clock, interrupt_next_clock
+        if interrupt_next_clock:
+            interrupt_next_clock = False
+            raise KeyboardInterrupt("stall")
+        clock += 0.01
+        return clock
+
+    class Process:
+        pid = 12345
+        returncode = None
+
+        def __init__(self, *args, **kwargs):
+            streams = []
+            for _ in range(2):
+                reader, writer = os.pipe()
+                os.close(writer)
+                streams.append(os.fdopen(reader, "rb"))
+            self.stdout, self.stderr = streams
+
+        def wait(self, timeout):
+            events.append("wait")
+            self.returncode = 0
+
+    def exited(_):
+        nonlocal interrupt_next_clock
+        # The stall alarm fires right after exit observation, before retirement.
+        interrupt_next_clock = True
+        return True
+
+    monkeypatch.setattr(media_process.subprocess, "Popen", Process)
+    monkeypatch.setattr(media_process, "_leader_has_exited", exited)
+    monkeypatch.setattr(media_process.os, "killpg", lambda pid, sig: events.append(sig))
+    monkeypatch.setattr(media_process, "monotonic", now)
+    monkeypatch.setattr(media_process, "sleep", lambda _: None)
+    with pytest.raises(KeyboardInterrupt, match="stall"):
+        media_process.run_media_command(["synthetic"], timeout=2)
+    assert events == [signal.SIGTERM, signal.SIGKILL, "wait"]

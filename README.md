@@ -1106,6 +1106,9 @@ cleanup action is interrupted. Cleanup failures retain the original execution
 error or cancellation, adding only a fixed cleanup-failure note; without a prior
 error they report a fixed cleanup error or propagate the cleanup cancellation.
 Failed cleanup cannot guarantee that every owned process has exited.
+On macOS, signalling a group whose only remaining member is the unreaped leader
+reports EPERM rather than ESRCH; retirement treats that as an already-empty
+group there, while EPERM remains a cleanup error on Linux.
 
 Invariant: an archive media object is deleted only after it has been verified,
 in its own durable database transaction, that no committed item references it.

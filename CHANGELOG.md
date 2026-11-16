@@ -8,6 +8,7 @@
 
 - Keep owned media-command leaders unreaped until the final process-group signal,
   preventing PID/group reuse during retirement; bound every final reap wait.
+  On macOS, EPERM from a group holding only the unreaped leader counts as empty.
 
 - Batch migration `0018` rollback membership lookups and missing representative
   event inserts, preserving active distinct failure counts, existing events and

@@ -164,10 +164,7 @@ def _retire_process_group(process: subprocess.Popen[bytes]) -> None:
         return  # No signal is safe after the leader has been reaped.
     cleanup_error: BaseException | None = None
     try:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        _signal_owned_group(process.pid, signal.SIGTERM)
         deadline = monotonic() + 0.2
         while monotonic() < deadline:
             sleep(0.01)
@@ -176,10 +173,7 @@ def _retire_process_group(process: subprocess.Popen[bytes]) -> None:
     # Independent final attempts: interruption of TERM/grace must not skip KILL,
     # and a signal error must not skip the bounded direct-child reap.
     try:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        _signal_owned_group(process.pid, signal.SIGKILL)
     except BaseException as exc:
         if cleanup_error is None:
             cleanup_error = exc
@@ -190,6 +184,20 @@ def _retire_process_group(process: subprocess.Popen[bytes]) -> None:
             cleanup_error = exc
     if cleanup_error is not None:
         raise cleanup_error
+
+
+def _signal_owned_group(pgid: int, sig: int) -> None:
+    # Callers keep the leader unreaped, so the group identity is still ours.
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # Darwin reports EPERM, not ESRCH, when only zombies (such as the
+        # unreaped leader) remain in the group: no live member is left to signal.
+        # Linux signals zombie-only groups successfully, so EPERM stays an error.
+        if sys.platform != "darwin":
+            raise
 
 
 def _check_output_size(path: Path | None, limit: int | None) -> None:

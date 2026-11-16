@@ -302,3 +302,30 @@ def test_cleanup_closes_both_streams_and_preserves_primary(primary, close_error,
     elif close_error is RuntimeError:
         assert str(caught.value) == "process cleanup failed"
     assert events == [signal.SIGTERM, signal.SIGKILL, ("wait", 1), "stdout", "stderr"]
+
+
+@pytest.mark.parametrize(
+    ("platform", "error_type", "propagates"),
+    [
+        ("darwin", ProcessLookupError, False),
+        ("darwin", PermissionError, False),
+        ("linux", ProcessLookupError, False),
+        ("linux", PermissionError, True),
+        ("darwin", OSError, True),
+    ],
+)
+def test_group_signal_tolerates_only_vanished_members(
+    platform, error_type, propagates, monkeypatch
+):
+    from archive import media_process
+
+    def signal_group(pid, sig):
+        raise error_type("synthetic")
+
+    monkeypatch.setattr(media_process.sys, "platform", platform)
+    monkeypatch.setattr(media_process.os, "killpg", signal_group)
+    if propagates:
+        with pytest.raises(error_type):
+            media_process._signal_owned_group(12345, signal.SIGTERM)
+    else:
+        media_process._signal_owned_group(12345, signal.SIGTERM)

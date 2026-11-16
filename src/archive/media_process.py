@@ -36,7 +36,8 @@ def run_media_command(
     with TemporaryFile() as request:
         request.write(input_data)
         request.seek(0)
-        _run_media_command(
+        # Retirement time after an observed exit extends the execution deadline.
+        deadline = _run_media_command(
             command,
             request=request,
             deadline=deadline,
@@ -54,7 +55,7 @@ def _run_media_command(
     deadline: float,
     output_path: Path | None,
     max_output_bytes: int | None,
-) -> None:
+) -> float:
     process = subprocess.Popen(
         command,
         stdin=request,
@@ -75,6 +76,7 @@ def _run_media_command(
                 if not retired and _leader_has_exited(process.pid):
                     # Retirement owns all remaining signals and the final reap.
                     retired = True
+                    retirement_started = monotonic()
                     try:
                         _retire_process_group(process)
                     except (OSError, subprocess.TimeoutExpired):
@@ -85,6 +87,9 @@ def _run_media_command(
                         raise MediaProcessError("process cleanup failed") from None
                     if process.returncode:
                         raise MediaProcessError("failed")
+                    # The fixed TERM grace and bounded reap are cleanup, not
+                    # command runtime: a success near the deadline stays a success.
+                    deadline += monotonic() - retirement_started
                 remaining = deadline - monotonic()
                 if remaining <= 0:
                     raise MediaProcessError("timed out")
@@ -101,6 +106,7 @@ def _run_media_command(
             _check_output_size(output_path, max_output_bytes)
             if process.returncode:
                 raise MediaProcessError("failed")
+            return deadline
     except BaseException as exc:
         primary_error = exc
         raise
@@ -124,6 +130,10 @@ def _run_media_command(
                     raise cleanup_error
                 raise MediaProcessError("process cleanup failed") from None
             primary_error.add_note("Media process cleanup failed")
+            if isinstance(primary_error, Exception) and not isinstance(cleanup_error, Exception):
+                # A cancellation (for example a worker stall alarm) during cleanup
+                # must still reach its handler instead of becoming a note.
+                raise cleanup_error
 
 
 def _leader_has_exited(pid: int) -> bool:

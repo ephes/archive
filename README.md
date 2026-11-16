@@ -1095,7 +1095,8 @@ preventing signals from reaching a recycled group. This uses POSIX `waitid` with
 `WNOWAIT`, or process `kqueue` events on macOS Python versions without `waitid`.
 Wrappers and their children must remain in that session; deliberately
 detached processes are not supported. Cleanup escalation can add up to 0.2 seconds
-plus up to one second for reaping to the execution deadline. Both commands discard
+plus up to one second for reaping to the execution deadline; that retirement time
+does not turn a command that exited before its deadline into a timeout. Both commands discard
 diagnostic text under the same stream budgets. YouTube download failures remain
 retryable under the existing media retry policy and do not replace previously
 archived media.
@@ -1105,6 +1106,8 @@ reap. Both diagnostic streams are closed independently, including when another
 cleanup action is interrupted. Cleanup failures retain the original execution
 error or cancellation, adding only a fixed cleanup-failure note; without a prior
 error they report a fixed cleanup error or propagate the cleanup cancellation.
+A cancellation during cleanup (such as the worker's stall alarm) also propagates
+after an ordinary execution error, which then carries the cleanup-failure note.
 Failed cleanup cannot guarantee that every owned process has exited.
 On macOS, signalling a group whose only remaining member is the unreaped leader
 reports EPERM rather than ESRCH; retirement treats that as an already-empty

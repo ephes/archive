@@ -288,17 +288,24 @@ def test_cleanup_closes_both_streams_and_preserves_primary(primary, close_error,
     monkeypatch.setattr(media_process.os, "killpg", lambda pid, sig: events.append(sig))
     if primary:
         monkeypatch.setattr(media_process, "sleep", pause)
-    expected = (
-        type(error)
-        if primary
-        else (close_error if close_error is KeyboardInterrupt else media_process.MediaProcessError)
-    )
+    if primary == "interrupt":
+        expected = type(error)
+    elif primary == "failure":
+        # The cleanup cancellation wins over an ordinary primary failure.
+        expected = KeyboardInterrupt
+    else:
+        expected = (
+            close_error if close_error is KeyboardInterrupt else media_process.MediaProcessError
+        )
     with pytest.raises(BaseException) as caught:
         media_process.run_media_command(["synthetic"], timeout=2)
     assert isinstance(caught.value, expected)
-    if primary:
+    if primary == "interrupt":
         assert caught.value is error
         assert caught.value.__notes__ == ["Media process cleanup failed"]
+    elif primary == "failure":
+        assert str(caught.value) == "cleanup"
+        assert error.__notes__ == ["Media process cleanup failed"]
     elif close_error is RuntimeError:
         assert str(caught.value) == "process cleanup failed"
     assert events == [signal.SIGTERM, signal.SIGKILL, ("wait", 1), "stdout", "stderr"]
@@ -329,3 +336,46 @@ def test_group_signal_tolerates_only_vanished_members(
             media_process._signal_owned_group(12345, signal.SIGTERM)
     else:
         media_process._signal_owned_group(12345, signal.SIGTERM)
+
+
+def test_success_near_deadline_is_not_reported_as_timeout(monkeypatch):
+    from archive import media_process
+
+    clock = 0.0
+
+    def now():
+        return clock
+
+    def pause(seconds):
+        nonlocal clock
+        clock += seconds
+
+    class Process:
+        pid = 12345
+        returncode = None
+
+        def __init__(self, *args, **kwargs):
+            streams = []
+            for _ in range(2):
+                reader, writer = os.pipe()
+                os.close(writer)
+                streams.append(os.fdopen(reader, "rb"))
+            self.stdout, self.stderr = streams
+
+        def wait(self, timeout):
+            self.returncode = 0
+            return 0
+
+    def exited(_):
+        nonlocal clock
+        # The command itself finishes just before its deadline.
+        clock = 1.95
+        return True
+
+    monkeypatch.setattr(media_process.subprocess, "Popen", Process)
+    monkeypatch.setattr(media_process, "_leader_has_exited", exited)
+    monkeypatch.setattr(media_process.os, "killpg", lambda pid, sig: None)
+    monkeypatch.setattr(media_process, "monotonic", now)
+    monkeypatch.setattr(media_process, "sleep", pause)
+    media_process.run_media_command(["synthetic"], timeout=2)
+    assert clock > 2  # retirement grace ran past the original deadline

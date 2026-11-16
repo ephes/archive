@@ -8,6 +8,14 @@ VIDEO_SUFFIXES = (".mp4", ".m4v", ".mov", ".webm")
 BATCH_SIZE = 200
 
 
+def is_video_url(url):
+    try:
+        return bool(url) and urlparse(url).path.lower().endswith(VIDEO_SUFFIXES)
+    except ValueError:
+        # Legacy stored evidence can predate URL validation. Try other evidence.
+        return False
+
+
 def queue_existing_archivable_video(apps, schema_editor) -> None:
     alias = schema_editor.connection.alias
     Item = apps.get_model("archive", "Item")
@@ -25,8 +33,7 @@ def queue_existing_archivable_video(apps, schema_editor) -> None:
             break
         candidate_ids = [
             pk for pk, original_url, media_url in rows
-            if any(urlparse(url).path.lower().endswith(VIDEO_SUFFIXES)
-                   for url in (original_url, media_url) if url)
+            if any(is_video_url(url) for url in (original_url, media_url))
         ]
         if candidate_ids:
             Item.objects.using(alias).filter(pk__in=candidate_ids).update(

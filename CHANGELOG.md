@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Isolate malformed stored URLs during migration `0008`, checking the other URL
+  and remaining rows without rewriting evidence or logging private URLs.
+
 - Bound migration `0008` legacy video scanning and requeue updates to 200-row
   primary-key batches on the selected database, preserving its atomic upgrade
   and original suffix rules for future/replayed migrations.

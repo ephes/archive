@@ -320,3 +320,40 @@ for row in rows:
 assert list(Item.objects.using("default").values()) == before
 connections.close_all()
 ''')
+
+
+def test_legacy_video_migration_isolates_malformed_urls(tmp_path):
+    run_journey(tmp_path, r'''
+import contextlib
+import io
+import django
+from django.db import connection, connections
+from django.db.migrations.executor import MigrationExecutor
+
+django.setup()
+pre = [("archive", "0007_item_archived_audio_content_type_and_more")]
+target = [("archive", "0008_item_archived_video_content_type_and_more")]
+executor = MigrationExecutor(connection)
+executor.migrate(pre)
+Item = executor.loader.project_state(pre).apps.get_model("archive", "Item")
+cases = [
+    ("http://[private-sentinel", "https://example.test/clip.MOV?x=1", "pending"),
+    ("http://[private-sentinel", "", "complete"),
+    ("http://[private-sentinel", "http://[also-broken", "complete"),
+    ("https://example.test/clip.webm", "http://[private-sentinel", "pending"),
+    ("https://example.test/story", "http://[private-sentinel", "complete"),
+    ("https://example.test/clip.mp4", "", "pending"),
+    ("https://example.test/story", "", "complete"),
+]
+for original, media, status in cases:
+    Item.objects.create(original_url=original, media_url=media,
+                        media_archive_status="complete", notes="synthetic evidence", kind="link")
+output = io.StringIO()
+with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+    MigrationExecutor(connection).migrate(target)
+assert "private-sentinel" not in output.getvalue()
+for row, (original, media, status) in zip(Item.objects.order_by("pk"), cases, strict=True):
+    assert (row.original_url, row.media_url, row.media_archive_status, row.notes, row.kind) == (
+        original, media, status, "synthetic evidence", "link")
+connections.close_all()
+''')

@@ -118,6 +118,9 @@ and only requeues completed rows without archived audio. This correction applies
 to future/replayed upgrades; an already-applied `0008` is not rerun. A failed
 atomic upgrade leaves no partial requeue: resolve the failure and retry `migrate`
 on the same database, without faking or unapplying migrations.
+Malformed legacy URLs are treated as nonmatching evidence, without logging or
+rewriting their stored values. The other URL is still checked, so a valid media
+URL can requeue a row whose original URL cannot be parsed.
 
 FTS UPDATE triggers compare indexed text and row identity with null-safe equality;
 status/retry/publication-only writes do no index work. Migration 0019 reversibly

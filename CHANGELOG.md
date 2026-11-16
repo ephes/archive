@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Recheck mutable reclassification selectors under the current row lock; report
+  changed selections as skipped without normalizing or counting them as applied.
+- Treat malformed classification URLs as unknown sources, retaining explicit kind
+  overrides and independent usable media instead of leaking parser exceptions.
+
 - Normalize supported adapter authorities by hostname and scheme-default port,
   refusing userinfo and non-equivalent authorities. Skip damaged restored media
   candidates with bounded, typed fields and validated URL/provenance semantics.

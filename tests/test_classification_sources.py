@@ -200,3 +200,55 @@ def test_stored_typed_audio_can_be_suffixless(source):
         },
     )
     assert decision.evidence["selected_media"]["audio"] == candidate.url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://[",
+        "https://[private-token]/private-path?signature=synthetic",
+        "https://example.test:bad/audio.mp3",
+        "https://example.test:99999/audio.mp3",
+        "file:///tmp/audio.mp3",
+        "https:///audio.mp3",
+    ],
+)
+@pytest.mark.parametrize("override", [False, True])
+def test_damaged_original_is_unknown_without_losing_independent_audio_or_override(url, override):
+    decision = classify_item(
+        original_url=url,
+        current_kind=ItemKind.ARTICLE if override else "",
+        existing_rule="operator_override" if override else "",
+        audio_url="https://example.test/download?id=123",
+    )
+    assert decision.kind == (ItemKind.ARTICLE if override else ItemKind.PODCAST_EPISODE)
+    assert decision.evidence["source_adapter"] == ""
+    assert decision.evidence["selected_media"] == {
+        "audio": "https://example.test/download?id=123",
+        "video": "",
+    }
+    without_audio = classify_item(original_url=url)
+    assert without_audio.kind == ItemKind.LINK
+    assert without_audio.evidence["media_candidates"] == []
+
+
+@pytest.mark.parametrize("field", ["audio_url", "media_url", "cached", "fresh"])
+def test_one_malformed_source_does_not_hide_a_valid_candidate(field):
+    original = "https://example.test/story"
+    malformed = MediaCandidate("http://[", "audio", "html_audio")
+    valid = MediaCandidate("https://example.test/valid.mp3", "audio", "html_audio")
+    inputs = dict(original_url=original)
+    if field in {"audio_url", "media_url"}:
+        inputs[field] = malformed.url
+    elif field == "cached":
+        inputs["existing_evidence"] = {
+            "original_url": original,
+            "audio_url": "",
+            "media_url": "",
+            "media_candidates": [malformed.as_dict(), valid.as_dict()],
+        }
+    decision = classify_item(
+        **inputs, metadata_candidates=[malformed, valid] if field == "fresh" else [valid]
+    )
+    assert decision.evidence["selected_media"]["audio"] == valid.url
+    assert [c["url"] for c in decision.evidence["media_candidates"]] == [valid.url]

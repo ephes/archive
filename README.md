@@ -905,7 +905,9 @@ Media-resolution policy in this slice:
   (at most 16 characters) and supported provenance (at most 64 characters). Corrupt fields,
   unsupported combinations and invalid HTTP(S) authorities are skipped independently. Page-video
   evidence must name a supported page, and explicit/input provenance must match its recorded input.
-  Typed discovered audio may use extensionless endpoints
+  Typed discovered audio may use extensionless endpoints. Malformed original/current/cached
+  URLs contribute no source evidence; one corrupt candidate cannot hide independent valid media
+  or prevent preservation of an explicit kind override
 - Castro episode pages rely on generic HTML audio discovery unless a future Castro-specific extractor becomes
   necessary
 
@@ -970,14 +972,21 @@ Historical replay workflow:
 Replay diagnostics identify items by ID and HTTP(S) origin only. Credentials, paths,
 queries and fragments are redacted, including selected-media changes. Use the item
 ID in the authenticated editor to inspect the original stored URL. Malformed legacy
-URLs fail with a fixed item-ID diagnostic, without raw parser details.
+URLs are treated as unknown classification sources, preserving valid independent media and
+explicit kind overrides. A `--host` selector that cannot parse a damaged authority still
+fails with a fixed item-ID diagnostic, without raw parser details.
 
 Selection captures an initial maximum matching ID and streams only IDs and URLs
 up to that horizon in bounded batches, in ID order. Captures inserted after that
 horizon belong to the next invocation, so a busy archive cannot extend a run forever.
 Each item is re-read under a transaction/row lock before deciding and applying classification
 and normalization, so edits and completed worker results since selection are used.
-Deleted rows are skipped. Each selection batch is fully fetched before processing,
+Mutable host/rule/empty-evidence/engine-version selectors are rechecked on that current
+row under the apply-mode lock before normalization. Rows that left the requested scope
+are reported as `SKIPPED ...: selector changed` and counted separately as `skipped`, never
+as inspected or changed. The selection limit still caps initial matches; skipped rows do
+not cause replacement selection beyond that cap. Deleted rows are skipped.
+Each selection batch is fully fetched before processing,
 so no live selection cursor pins a stale SQLite snapshot. Dry-runs use current rows
 without write transactions; apply-mode output is emitted after each row commits.
 The command does not delete stored media.

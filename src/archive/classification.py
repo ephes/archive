@@ -4,7 +4,7 @@ import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import ParseResult, parse_qs, urlparse
 
 from django.utils import timezone
 
@@ -170,7 +170,7 @@ def build_media_candidates(
 
     def add_candidate(candidate: MediaCandidate, *, priority: int) -> None:
         key = (candidate.url, candidate.candidate_type)
-        if not candidate.url:
+        if not candidate.url or not _is_http_url(candidate.url):
             return
         existing_index = candidate_indexes.get(key)
         if existing_index is None:
@@ -408,7 +408,9 @@ def _generic_url_rule(*, original_url: str, audio_url: str) -> tuple[str, str]:
     if audio_url.strip() and _is_http_url(audio_url.strip()):
         return str(ItemKind.PODCAST_EPISODE), "audio_url_signal"
 
-    parsed = urlparse(original_url)
+    parsed = _parse_http_url(original_url)
+    if parsed is None:
+        return str(ItemKind.LINK), "default_link"
     host = _adapter_hostname(original_url)
     path = parsed.path.lower()
 
@@ -420,7 +422,9 @@ def _generic_url_rule(*, original_url: str, audio_url: str) -> tuple[str, str]:
 
 
 def _match_source_adapter(url: str) -> tuple[str, str]:
-    parsed = urlparse(url)
+    parsed = _parse_http_url(url)
+    if parsed is None:
+        return "", ""
     host = _adapter_hostname(url)
     path = parsed.path
 
@@ -434,9 +438,9 @@ def _match_source_adapter(url: str) -> tuple[str, str]:
 
 
 def _adapter_hostname(url: str) -> str:
-    if not _is_http_url(url):
+    parsed = _parse_http_url(url)
+    if parsed is None:
         return ""
-    parsed = urlparse(url)
     if parsed.username is not None or parsed.password is not None:
         return ""
     try:
@@ -447,30 +451,35 @@ def _adapter_hostname(url: str) -> str:
     return parsed.hostname or ""
 
 
-def _is_http_url(url: str) -> bool:
+def _parse_http_url(url: str) -> ParseResult | None:
     try:
         require_http_url(url)
-    except BlockedFetchError:
-        return False
-    # Use the same syntactic authority/control admission as extracted media;
-    # this performs no DNS lookup or network request.
-    return _normalize_url(url, "") == url
+        # Share extracted-media authority/control admission. No DNS or I/O.
+        if _normalize_url(url, "") != url:
+            return None
+        return urlparse(url)
+    except (BlockedFetchError, ValueError):
+        return None
+
+
+def _is_http_url(url: str) -> bool:
+    return _parse_http_url(url) is not None
 
 
 def _looks_like_audio_url(url: str) -> bool:
-    return urlparse(url).path.lower().endswith(AUDIO_SUFFIXES)
-
-
-def _looks_like_ambiguous_audio_url(url: str) -> bool:
-    return urlparse(url).path.lower().endswith(".webm")
+    parsed = _parse_http_url(url)
+    return parsed is not None and parsed.path.lower().endswith(AUDIO_SUFFIXES)
 
 
 def _looks_like_direct_video_url(url: str) -> bool:
-    return urlparse(url).path.lower().endswith(VIDEO_SUFFIXES)
+    parsed = _parse_http_url(url)
+    return parsed is not None and parsed.path.lower().endswith(VIDEO_SUFFIXES)
 
 
 def _looks_like_supported_video_page_url(url: str) -> bool:
-    parsed = urlparse(url)
+    parsed = _parse_http_url(url)
+    if parsed is None:
+        return False
     host = _adapter_hostname(url)
     if parsed.scheme not in {"http", "https"} or host not in YOUTUBE_PAGE_HOSTS:
         return False

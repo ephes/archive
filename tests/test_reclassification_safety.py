@@ -251,9 +251,128 @@ def test_replay_malformed_legacy_url_has_fixed_diagnostic(apply, host_filter):
         *(["--apply"] if apply else []),
         *(["--host", "example.com"] if host_filter else []),
     ]
+    if not host_filter:
+        output = StringIO()
+        call_command("reclassify_items", *args, stdout=output)
+        assert "private" not in output.getvalue()
+        assert "secret" not in output.getvalue()
+        if apply:
+            item.refresh_from_db()
+            assert item.classification_rule == "default_link"
+            assert item.classification_evidence["media_candidates"] == []
+        return
     with pytest.raises(CommandError) as error:
         call_command("reclassify_items", *args, stdout=StringIO())
     assert f"item {item.pk}" in str(error.value)
     assert "private" not in str(error.value)
     assert "secret" not in str(error.value)
     assert error.value.__suppress_context__
+
+
+@pytest.mark.parametrize("journal", ["DELETE", "WAL"])
+def test_replay_rechecks_mutable_selectors_after_independent_commit(tmp_path, journal):
+    script = r"""
+import django
+from concurrent.futures import ThreadPoolExecutor
+from io import StringIO
+from django.db import connections
+from django.core.management import call_command
+
+django.setup()
+from archive.classification import CURRENT_CLASSIFICATION_ENGINE_VERSION
+from archive.management.commands.reclassify_items import Command
+from archive.models import Item
+call_command("migrate", verbosity=0)
+with connections["default"].cursor() as cursor:
+    cursor.execute("PRAGMA journal_mode=" + JOURNAL)
+original = Command._matching_items
+scenarios = [
+    (["--host", "example.test"], {"original_url": "https://other.test/story"}),
+    (["--rule", "old"], {"classification_rule": "new"}),
+    (["--empty-rule"], {"classification_rule": "new"}),
+    (["--empty-evidence"], {"classification_evidence": {"manual": True}}),
+    (["--stale-only"], {"classification_engine_version": CURRENT_CLASSIFICATION_ENGINE_VERSION}),
+]
+for args, edit in scenarios:
+    Item.objects.all().delete()
+    initial = dict(original_url="https://example.test/story", classification_engine_version=1,
+                   classification_rule="old" if "--rule" in args else "")
+    target = Item.objects.create(**initial)
+    sibling = Item.objects.create(**initial)
+
+    def commit_edit():
+        try:
+            Item.objects.filter(pk=target.pk).update(**edit)
+        finally:
+            connections.close_all()
+
+    def selected(self, options):
+        ids = list(original(self, options))
+        assert ids == [target.pk, sibling.pk]
+        # A separate SQLite connection commits between selection and the row lock.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(commit_edit).result(timeout=10)
+        return iter(ids)
+
+    Command._matching_items = selected
+    output = StringIO()
+    call_command("reclassify_items", *args, "--apply", "--normalize-downstream", stdout=output)
+    target.refresh_from_db()
+    for key, value in {**initial, **edit}.items():
+        assert getattr(target, key) == value, (args, key, output.getvalue())
+    sibling.refresh_from_db()
+    assert sibling.classification_engine_version == CURRENT_CLASSIFICATION_ENGINE_VERSION
+    assert "inspected=1 changed=1" in output.getvalue(), output.getvalue()
+    assert "skipped=1" in output.getvalue(), output.getvalue()
+    assert f"SKIPPED item {target.pk}: selector changed" in output.getvalue()
+Command._matching_items = original
+connections.close_all()
+"""
+    env = {
+        **os.environ,
+        "DJANGO_SETTINGS_MODULE": "config.settings.test",
+        "DJANGO_DB_PATH": str(tmp_path / "selectors.sqlite3"),
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", "JOURNAL = " + repr(journal) + "\n" + script],
+        env=env,
+        cwd=Path(__file__).resolve().parents[1] / "src" / "django",
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_replay_checks_selectors_inside_row_transaction(monkeypatch):
+    item = Item.objects.create(original_url="https://example.test/story")
+    match = reclassify_items.Command._matches_current_selectors
+    depth = len(transaction.get_connection().atomic_blocks)
+    checked = []
+
+    def check(self, current, options):
+        checked.append(current.pk)
+        assert len(transaction.get_connection().atomic_blocks) == depth + 1
+        return match(self, current, options)
+
+    monkeypatch.setattr(reclassify_items.Command, "_matches_current_selectors", check)
+    call_command("reclassify_items", "--all", "--apply", stdout=StringIO())
+    assert checked == [item.pk]
+
+
+def test_replay_damaged_url_preserves_override_and_valid_independent_audio():
+    item = Item.objects.create(
+        original_url="https://[synthetic-secret]/private-path",
+        kind=ItemKind.ARTICLE,
+        classification_rule="operator_override",
+        audio_url="https://example.test/download?id=123",
+    )
+    output = StringIO()
+    call_command("reclassify_items", "--item-id", str(item.pk), "--apply", stdout=output)
+    item.refresh_from_db()
+    assert item.kind == ItemKind.ARTICLE
+    assert item.classification_rule == "operator_override"
+    assert item.classification_evidence["selected_media"] == {"audio": item.audio_url, "video": ""}
+    assert "synthetic-secret" not in output.getvalue()
+    assert "private-path" not in output.getvalue()
+    assert "inspected=1 changed=1" in output.getvalue()

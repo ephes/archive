@@ -130,7 +130,11 @@ def _run_media_command(
                 if not isinstance(cleanup_error, Exception):
                     raise cleanup_error
                 raise MediaProcessError("process cleanup failed") from None
-            primary_error.add_note("Media process cleanup failed")
+            already_cleanup_failure = isinstance(primary_error, MediaProcessError) and (
+                str(primary_error) == "process cleanup failed"
+            )
+            if not already_cleanup_failure:
+                primary_error.add_note("Media process cleanup failed")
             if isinstance(primary_error, Exception) and not isinstance(cleanup_error, Exception):
                 # A cancellation (for example a worker stall alarm) during cleanup
                 # must still reach its handler instead of becoming a note.

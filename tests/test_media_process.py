@@ -501,3 +501,38 @@ def test_interruption_before_retirement_still_retires_in_cleanup(monkeypatch):
     with pytest.raises(KeyboardInterrupt, match="stall"):
         media_process.run_media_command(["synthetic"], timeout=2)
     assert events == [signal.SIGTERM, signal.SIGKILL, "wait"]
+
+
+@pytest.mark.parametrize("retry_fails", [False, True])
+def test_failed_retirement_is_retried_once_in_cleanup(retry_fails, monkeypatch):
+    from archive import media_process
+
+    events = []
+
+    class Process:
+        pid = 12345
+        returncode = None
+
+        def __init__(self, *args, **kwargs):
+            streams = []
+            for _ in range(2):
+                reader, writer = os.pipe()
+                os.close(writer)
+                streams.append(os.fdopen(reader, "rb"))
+            self.stdout, self.stderr = streams
+
+        def wait(self, timeout):
+            events.append("wait")
+            if events.count("wait") == 1 or retry_fails:
+                raise subprocess.TimeoutExpired("synthetic", timeout)
+            self.returncode = 0
+
+    monkeypatch.setattr(media_process.subprocess, "Popen", Process)
+    monkeypatch.setattr(media_process, "_leader_has_exited", lambda _: True)
+    monkeypatch.setattr(media_process.os, "killpg", lambda pid, sig: events.append(sig))
+    monkeypatch.setattr(media_process, "sleep", lambda _: None)
+    with pytest.raises(media_process.MediaProcessError) as caught:
+        media_process.run_media_command(["synthetic"], timeout=2)
+    assert str(caught.value) == "process cleanup failed"
+    assert not getattr(caught.value, "__notes__", [])
+    assert events == [signal.SIGTERM, signal.SIGKILL, "wait"] * 2

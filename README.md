@@ -1110,6 +1110,9 @@ A cancellation during cleanup (such as the worker's stall alarm) also propagates
 after an ordinary execution error, which then carries the cleanup-failure note,
 and it replaces an earlier ordinary cleanup error. An interruption between exit
 observation and retirement still retires and reaps the group during cleanup.
+If retirement after an observed exit fails before the leader is reaped, cleanup
+retries the full TERM/grace/KILL/reap sequence once more, which can add another
+1.2 seconds; the leader is still unreaped then, so the group identity is still owned.
 Failed cleanup cannot guarantee that every owned process has exited.
 On macOS, signalling a group whose only remaining member is the unreaped leader
 reports EPERM rather than ESRCH; retirement treats that as an already-empty

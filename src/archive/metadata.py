@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import codecs
+import ipaddress
 import json
 import re
 import subprocess
@@ -675,7 +676,42 @@ def _normalize_url(value: str, base_url: str) -> str:
         return ""
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         return ""
+    if _has_forbidden_url_control(normalized) or not _is_valid_http_authority(parsed):
+        return ""
     return normalized
+
+
+# Characters that never appear in a usable host, whether reg-name or IDN.
+_FORBIDDEN_HOST_CHARACTERS = frozenset(" \"<>\\^`{|}%")
+
+
+def _has_forbidden_url_control(url: str) -> bool:
+    return any(ord(char) < 0x20 or ord(char) == 0x7F for char in url)
+
+
+def _is_valid_http_authority(parsed) -> bool:
+    """Hostname and port usable for an HTTP(S) request, via urllib's public API."""
+    try:
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        # Out-of-range or non-numeric port, or a malformed bracketed host.
+        return False
+    if not hostname or port == 0:
+        return False
+    if ":" in hostname:
+        # urllib only yields a colon for a bracketed IPv6 literal; zone IDs are
+        # link-local and never a public media host.
+        if "%" in hostname:
+            return False
+        try:
+            ipaddress.IPv6Address(hostname)
+        except ValueError:
+            return False
+        return True
+    return not any(
+        char in _FORBIDDEN_HOST_CHARACTERS or char.isspace() for char in hostname
+    )
 
 
 def _first_nonempty(*values: str | None) -> str:

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Drop extracted media references whose HTTP(S) authority is unusable (empty host,
+  invalid/zero/out-of-range port, malformed bracketed host or IPv6 zone, host
+  delimiters/whitespace, URL controls), keeping other metadata and valid relative,
+  IPv6 and internationalized references.
 - Treat impossible optional publication dates (for example `2026-02-31`) as
   absent instead of aborting metadata extraction; try the next HTML/JSON-LD date
   candidate and keep title, media and other extracted metadata.

@@ -474,6 +474,13 @@ media URLs are decoded once as JSON strings, then restricted to HTTP(S) using th
 same relative-URL normalization as other media candidates. Malformed strings, including unpaired Unicode surrogate escapes, are skipped.
 URL/candidate deduplication uses sets while preserving first-seen order. The same
 URL may retain distinct candidate types or detection sources.
+Normalized media references also need a usable HTTP(S) authority, checked through
+urllib's parsed `hostname`/`port`: an empty host (`http://:80/a`), a non-numeric,
+zero or out-of-range port, malformed or non-IPv6 bracketed hosts, IPv6 zone IDs,
+whitespace or URL-delimiter characters in the host, and any C0 control or DEL in the
+URL drop only that reference. Relative and protocol-relative references, explicit
+valid ports, bracketed IPv6 literals and internationalized hostnames are kept, and
+the remaining metadata (title, dates, other candidates) is unaffected.
 
 Credential-bearing summary, transcription and article-audio requests only follow
 redirects on the initial HTTP(S) origin (scheme, host and effective port).

@@ -13,7 +13,7 @@ from pathlib import Path
 from subprocess import run as run_download
 from tempfile import SpooledTemporaryFile, TemporaryDirectory
 from time import monotonic
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 from urllib.request import Request
 from urllib.response import addinfourl
 from uuid import uuid4
@@ -23,6 +23,9 @@ from django.core.files.base import File
 from django.core.files.storage import storages
 from django.db import transaction
 
+from archive.classification import (
+    _looks_like_supported_video_page_url as _classified_supported_video_page_url,
+)
 from archive.classification import resolve_media_sources_for_item
 from archive.media_process import MediaProcessError, run_media_command
 from archive.media_storage import (
@@ -38,7 +41,6 @@ CHUNK_SIZE = 1024 * 1024
 DEFAULT_AUDIO_CONTENT_TYPE = "audio/mpeg"
 DEFAULT_EXTRACTED_AUDIO_SUFFIX = ".mp3"
 AMBIGUOUS_AUDIO_SUFFIXES = {".webm"}
-YOUTUBE_PAGE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
 YTDLP_AUDIO_ONLY_FORMAT = "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio[ext=mp4]/bestaudio"
 AUDIO_CONTENT_TYPE_SUFFIXES = {
     "audio/aac": ".aac",
@@ -639,17 +641,9 @@ def _looks_like_direct_video_url(url: str) -> bool:
 
 
 def _looks_like_supported_video_page_url(url: str) -> bool:
-    parsed = urlparse(url)
-    host = parsed.netloc.lower()
-    if parsed.scheme not in {"http", "https"} or host not in YOUTUBE_PAGE_HOSTS:
-        return False
-    if _looks_like_direct_video_url(url):
-        return False
-    if host == "youtu.be":
-        return bool(parsed.path.strip("/"))
-    if parsed.path == "/watch":
-        return bool(parse_qs(parsed.query).get("v"))
-    return parsed.path.startswith(("/embed/", "/live/", "/shorts/"))
+    # Archival must recognize exactly the pages classification selected, including
+    # default-port and mixed-case adapter authorities.
+    return _classified_supported_video_page_url(url)
 
 
 def _detect_audio_suffix(url: str, content_type: str) -> str:

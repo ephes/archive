@@ -8,7 +8,8 @@
   overrides and independent usable media instead of leaking parser exceptions.
 
 - Normalize supported adapter authorities by hostname and scheme-default port,
-  refusing userinfo and non-equivalent authorities. Skip damaged restored media
+  refusing userinfo and non-equivalent authorities; media archival and processing
+  health share the same YouTube page check. Skip damaged restored media
   candidates with bounded, typed fields and validated URL/provenance semantics.
 
 - Select usable video evidence beyond weak earlier discoveries, accept explicit

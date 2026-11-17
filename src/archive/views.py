@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 from django.conf import settings
 from django.contrib.auth.views import LoginView, LogoutView
 from django.core import signing
+from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.paginator import EmptyPage, Paginator
 from django.core.validators import URLValidator
@@ -604,6 +605,31 @@ def item_detail(request: HttpRequest, pk: int) -> HttpResponse:
     )
 
 
+# Anonymous requests start at most one upstream copy per item artifact and window
+# (per server process); the copy holds a thread for up to 30 s and uses the API key.
+ARTICLE_AUDIO_COPY_WINDOW_S = 60
+
+
+class _ArticleAudioCopyDeferred(Exception):
+    """A public copy of this artifact was already attempted within the window."""
+
+
+def _admit_public_article_audio_copy(item: Item) -> bool:
+    artifact = hashlib.sha256(item.article_audio_artifact_path.encode()).hexdigest()[:32]
+    key = f"archive:article-audio-copy:{item.pk}:{artifact}"
+    return cache.add(key, True, timeout=ARTICLE_AUDIO_COPY_WINDOW_S)
+
+
+def _article_audio_unavailable() -> HttpResponse:
+    response = HttpResponse(
+        "Article audio is temporarily unavailable.",
+        status=503,
+        headers={"Cache-Control": "no-store"},
+    )
+    response["Retry-After"] = str(ARTICLE_AUDIO_COPY_WINDOW_S)
+    return response
+
+
 @_uncacheable_public_audio_errors
 @require_http_methods(["GET", "HEAD"])
 def item_article_audio(request: HttpRequest, pk: int) -> HttpResponse:
@@ -617,13 +643,29 @@ def item_article_audio(request: HttpRequest, pk: int) -> HttpResponse:
         pk=pk, is_public=True, article_audio_artifact_path=item.article_audio_artifact_path
     )
     try:
-        store_generated_article_audio(item=item)
+        if item.article_audio_file or _admit_public_article_audio_copy(item):
+            store_generated_article_audio(item=item)
+        else:
+            # Another request copied or is copying this artifact; use a finished copy.
+            item.refresh_from_db(
+                fields=[
+                    "article_audio_file",
+                    "article_audio_size_bytes",
+                    "article_audio_content_type",
+                ]
+            )
+            if not item.article_audio_file:
+                raise _ArticleAudioCopyDeferred
         current_copy = eligible.filter(article_audio_file=item.article_audio_file.name)
         if not item.article_audio_file or not current_copy.exists():
             raise Http404("Article audio is not available")
         audio_file = item.article_audio_file.open("rb")
     except Http404:
         raise
+    except _ArticleAudioCopyDeferred:
+        if not eligible.exists():
+            raise Http404("Article audio is not available") from None
+        return _article_audio_unavailable()
     except Exception as exc:
         if not eligible.exists():
             raise Http404("Article audio is not available") from None
@@ -633,13 +675,7 @@ def item_article_audio(request: HttpRequest, pk: int) -> HttpResponse:
             item.pk,
             type(exc).__name__,
         )
-        response = HttpResponse(
-            "Article audio is temporarily unavailable.",
-            status=503,
-            headers={"Cache-Control": "no-store"},
-        )
-        response["Retry-After"] = "60"
-        return response
+        return _article_audio_unavailable()
 
     # Storage open may also block. Reauthorize immediately before handing the
     # acquired handle to the response, and close it on every refusal/error path.

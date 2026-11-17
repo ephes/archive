@@ -37,3 +37,11 @@ def isolated_media_storage(settings, tmp_path, monkeypatch):
     monkeypatch.setattr(
         Item._meta.get_field("article_audio_file"), "storage", storages["archive_media"]
     )
+
+
+@pytest.fixture(autouse=True)
+def clear_default_cache():
+    """The default local-memory cache outlives a test; start each one empty."""
+    from django.core.cache import cache
+
+    cache.clear()

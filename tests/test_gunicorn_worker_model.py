@@ -117,6 +117,19 @@ def test_slow_response_neither_blocks_other_requests_nor_is_cut_at_worker_timeou
     assert len(slow_body) == 10 * 1024
 
 
+def test_connections_close_after_each_response_like_the_sync_worker(server):
+    # The proxy may keep idle backend connections longer than gunicorn's keep-alive and
+    # reuse one gunicorn already closed (a 502, not retried for POST). Never keep them.
+    connection = http.client.HTTPConnection("127.0.0.1", server, timeout=10)
+    try:
+        connection.request("GET", "/fast")
+        response = connection.getresponse()
+        assert response.read() == b"ok"
+        assert response.getheader("Connection", "").lower() == "close"
+    finally:
+        connection.close()
+
+
 def test_client_that_stops_reading_releases_its_thread():
     # One thread only: without a send timeout the stalled client would hold it forever.
     with _gunicorn("--threads", "1", env={"PROBE_SEND_TIMEOUT_S": "1"}) as port:

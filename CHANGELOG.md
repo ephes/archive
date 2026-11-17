@@ -8,7 +8,8 @@
   than the 30-second worker timeout was killed mid-download. The WSGI entry point sets
   a 30-second timeout on each client socket write and read, so a client that stops
   reading frees its thread; steadily slow readers of audio can still hold up to
-  workers × threads connections.
+  workers × threads connections. Connections still close after each response
+  (`keepalive = 0`), as before.
 
 - Admit at most one anonymous on-demand article-audio copy per item artifact and
   60-second window. Requests during a running copy or after a failed one get `503`

@@ -12,3 +12,6 @@ still take precedence over this file.
 
 worker_class = "gthread"
 threads = 8
+# Close every connection after its response, as the sync worker did: the reverse proxy
+# keeps idle backend connections longer than gunicorn would and could reuse a closed one.
+keepalive = 0

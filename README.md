@@ -392,7 +392,9 @@ the same thing.
 
 The deployed server command (`gunicorn config.wsgi:application --bind ... --workers N`)
 runs in `src/django`, so gunicorn reads `src/django/gunicorn.conf.py`: threaded
-(`gthread`) workers with 8 threads each. A slow client streaming a public audio file
+(`gthread`) workers with 8 threads each and no keep-alive (every connection closes after
+its response, as with the former sync worker, so the reverse proxy never reuses a backend
+connection gunicorn has already closed). A slow client streaming a public audio file
 then occupies one thread instead of the whole process, and downloads that take longer
 than gunicorn's 30-second worker timeout complete instead of being cut off. Options on
 the command line override the file; the journal line `Using worker: gthread` confirms

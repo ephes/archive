@@ -645,6 +645,15 @@ budget by resetting socket timeouts. Failed or timed-out downloads remove their
 temporary files before any storage upload. Only HTTP/HTTPS sources and redirects
 are accepted; the configured byte limit still applies. Video extraction has its
 own timeout; the download budget does not include extraction or storage writes.
+Full direct-media downloads require HTTP 200 without `Content-Range`, a nonempty
+body and, when supplied, one valid nonnegative `Content-Length` matching the bytes
+read through EOF. Unrequested partial responses, ambiguous lengths and premature
+EOF fail before extraction or storage upload. Previously archived objects remain
+intact; the normal worker failure/backoff and re-queue procedure applies. Without
+a declared length, a nonempty EOF within the byte limit is accepted; transport
+checks cannot detect a server that sends a semantically incomplete media file.
+Metadata fetching keeps its separate bounded-prefix contract and does not require
+the complete representation or a matching full-body length.
 YouTube page downloads have a separate disposable process whose elapsed budget
 also covers retries and postprocessing, in addition to the existing socket timeout.
 

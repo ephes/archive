@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Refuse incomplete public media downloads before extraction or publication:
+  require HTTP 200 without Content-Range, nonempty bytes and a matching valid
+  Content-Length when declared. Preserve existing media and normal worker retries;
+  bounded metadata-prefix reads remain unchanged.
+
 - Index open HTML text/list containers for linear extraction stack work while
   preserving nested text and omitted-tag recovery. Refuse more than 4,096 open
   containers without publishing partial source text or metadata.

@@ -40,6 +40,21 @@ def _safe_error(exc: BaseException, blocked: type[BaseException] | None) -> str:
     return f"transport error ({type(exc).__name__})"
 
 
+def _full_media_length(response) -> int | None:
+    if response.getcode() != 200 or "Content-Range" in response.headers:
+        raise ValueError("Media source did not return a complete HTTP 200 representation")
+    lengths = response.headers.get_all("Content-Length", [])
+    if not lengths:
+        return None
+    raw = lengths[0].strip()
+    if len(lengths) != 1 or not raw.isascii() or not raw.isdecimal():
+        raise ValueError("Media source has an invalid Content-Length")
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError("Media source has an invalid Content-Length") from None
+
+
 def main() -> int:
     blocked: type[BaseException] | None = None
     try:
@@ -49,6 +64,7 @@ def main() -> int:
         blocked = getattr(safe_fetch, "BlockedFetchError", None)
         with safe_fetch.open_public_url(request, timeout=options["timeout"]) as response:
             metadata_mode = options.get("metadata", False)
+            expected_size = None if metadata_mode else _full_media_length(response)
             content_type = response.headers.get_content_type()
             if (
                 metadata_mode
@@ -72,6 +88,11 @@ def main() -> int:
                             f"{options['max_bytes']}-byte archive limit"
                         )
                     output.write(chunk)
+            if not metadata_mode:
+                if not size:
+                    raise ValueError("Media source is empty")
+                if expected_size is not None and size != expected_size:
+                    raise ValueError("Media source download was incomplete")
             print(
                 json.dumps(
                     {

@@ -977,7 +977,17 @@ Current automatic policy:
   wins for the feed enclosure
 
 Both RSS feeds keep exact 50-item archive pages ordered by newest `published_at`, then highest
-id. Podcast feed selection applies public/published, basic title/summary/audio and operator-exclude
+id. Migration `0023` adds a partial publication-time/id index for public rows with a
+non-null publication time, matching Django's SQLite boolean predicate. On the supported
+SQLite backend this avoids a temporary ordering sort for the general feed's page selection;
+blank-title and podcast policy filters still apply. Exact counts and Python policy scans
+still visit eligible/candidate history; the index does not make those constant-time.
+Apply migrations before starting the updated app. The index can be rolled back without
+changing item content or eligibility. The populated upgrade/rollback test in
+`tests/test_historical_migrations.py` checks actual feed SQL, tie order, filtering and
+SQLite VM work with 1,000 and 10,000 historical rows.
+
+Podcast feed selection applies public/published, basic title/summary/audio and operator-exclude
 filters in SQL, then streams policy fields in batches of 100 to preserve Python whitespace and
 generated-summary eligibility rules. It retains only the exact eligible count and the requested
 page's ids, then loads full items for that page and rechecks eligibility so edits made during

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add a reversible partial public publication-time/id index (migration `0023`) for
+  RSS selection without a history-wide ordering sort. Preserve eligibility, exact
+  counts and descending id order for publication-time ties; counts and podcast
+  policy scans still depend on history size.
+
 - Apply complete-response admission in the authenticated article-audio transport:
   refuse unrequested partial responses, empty bodies and inconsistent declared
   lengths before storage publication. Keep prior audio copies, backfill retries

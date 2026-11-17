@@ -32,6 +32,7 @@ from archive.media_archival import (
 )
 from archive.metadata import REQUEST_HEADERS
 from archive.models import Item
+from archive.transcription_config import transcription_max_gap_seconds
 from archive.upstream_http import api_url
 from archive.upstream_http import open_authenticated_url as urlopen
 from archive.upstream_jobs import artifact_path, wire_id, wire_state
@@ -142,6 +143,7 @@ def generate_item_transcript(
     pass. That pass makes one status request. A job made for an older source is
     ignored and the current source is transcribed afresh.
     """
+    transcription_max_gap_seconds(settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS)
     deadline = monotonic() + timeout
     api_key = settings.ARCHIVE_TRANSCRIPTION_API_KEY.strip()
     if not api_key:
@@ -432,7 +434,7 @@ def _check_batch_transcript_coverage(
     whisper.cpp splits long audio across processors and ignores a failing worker thread:
     the job still succeeds, but whole parts of the audio are missing from the text.
     """
-    max_gap_seconds = settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS
+    max_gap_seconds = transcription_max_gap_seconds(settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS)
     if max_gap_seconds <= 0:
         return
     if not completed.json_artifact_path:
@@ -477,6 +479,9 @@ def find_transcript_gaps(
 
     Reject malformed evidence; measure coverage from the union without reordering text.
     """
+    max_gap_seconds = transcription_max_gap_seconds(max_gap_seconds)
+    if max_gap_seconds <= 0:
+        return []
     if not isinstance(segments, list) or not segments:
         raise TranscriptionGenerationError("Batch transcription segment list was unreadable")
     intervals: list[tuple[float, float]] = []

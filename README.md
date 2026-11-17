@@ -452,9 +452,13 @@ Important values:
 - `ARCHIVE_TRANSCRIPTION_POLL_SECONDS` defaults to `60`: how long the worker waits before it asks
   Voxhelm again about a running batch transcription job
 - `ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS` defaults to `7200`: a batch job that is still
-  unfinished (or whose status cannot be read) this long after submission fails the transcript step
+  unfinished (or whose status cannot be read) this long after submission fails the transcript step.
+  This limit must be finite and strictly positive.
 - `ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS` defaults to `600`: a Voxhelm batch transcript whose
-  segments leave a longer stretch of audio uncovered is rejected as incomplete; `0` disables the check.
+  segments leave a longer stretch of audio uncovered is rejected as incomplete; any finite
+  nonpositive value disables the check. Both loss-guard settings reject NaN, infinities,
+  nonnumeric values and boolean overrides with a fixed `ImproperlyConfigured` message,
+  at startup and before transcription I/O when settings are overridden directly.
   Coverage uses the sorted union of intervals without changing transcript order. Segment times
   must be finite, representable, nonnegative numbers with start <= end; malformed evidence
   fails transcription, including a missing/null segment list or non-object entries in a JSON

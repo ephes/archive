@@ -24,6 +24,80 @@ def run_journey(tmp_path, script):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_public_feed_index_populated_upgrade_rollback_and_work(tmp_path):
+    run_journey(tmp_path, r'''
+import django
+from datetime import UTC, datetime, timedelta
+from django.db import connection, connections
+from django.db.migrations.executor import MigrationExecutor
+
+django.setup()
+from archive.models import Item
+from archive.views import _public_feed_items
+
+pre = [("archive", "0022_item_transcript_job")]
+executor = MigrationExecutor(connection)
+latest = executor.loader.graph.leaf_nodes("archive")
+executor.migrate(pre)
+now = datetime(2026, 11, 1, tzinfo=UTC)
+# Deliberately tie publication times, with ineligible rows among the newest ids.
+rows = [Item(original_url=f"https://example.test/recent/{n}", title=f"Synthetic {n}",
+             published_at=now, is_public=n != 58) for n in range(63)]
+rows[59].title = "   "
+rows[60].published_at = None
+Item.objects.bulk_create(rows)
+expected = [row.pk for row in reversed(rows)
+            if row.is_public and row.published_at is not None and row.title.strip()][:50]
+
+def selection():
+    query = _public_feed_items()[:50]
+    sql, params = query.query.sql_with_params()
+    with connection.cursor() as cursor:
+        cursor.execute("EXPLAIN QUERY PLAN " + sql, params)
+        plan = str(cursor.fetchall())
+    ticks = 0
+    def progress():
+        nonlocal ticks
+        ticks += 1
+        return 0
+    connection.connection.set_progress_handler(progress, 1)
+    try:
+        ids = [row.pk for row in query]
+    finally:
+        connection.connection.set_progress_handler(None, 0)
+    assert ids == expected
+    return plan, ticks
+
+indexed_work = []
+for start, stop in ((0, 1000), (1000, 10000)):
+    Item.objects.bulk_create([
+        Item(original_url=f"https://example.test/history/{n}", title="Old synthetic",
+             published_at=now - timedelta(days=1), shared_at=now - timedelta(days=1))
+        for n in range(start, stop)
+    ])
+    total = _public_feed_items().count()
+    baseline_plan, baseline_work = selection()
+    assert "USE TEMP B-TREE FOR ORDER BY" in baseline_plan, baseline_plan
+    MigrationExecutor(connection).migrate(latest)
+    plan, work = selection()
+    assert "archive_public_feed_order" in plan, plan
+    assert "USE TEMP B-TREE" not in plan, plan
+    assert work < baseline_work / 3, (work, baseline_work)
+    indexed_work.append(work)
+    assert _public_feed_items().count() == total
+    MigrationExecutor(connection).migrate(pre)
+    assert selection()[0] == baseline_plan
+    assert _public_feed_items().count() == total
+assert indexed_work[1] <= indexed_work[0] * 1.1, indexed_work
+MigrationExecutor(connection).migrate(latest)
+# Adding/removing the index must leave the populated FTS installation working.
+with connection.cursor() as cursor:
+    cursor.execute("SELECT count(*) FROM archive_item_fts WHERE archive_item_fts MATCH 'Synthetic'")
+    assert cursor.fetchone()[0] == Item.objects.count() - 1
+connections.close_all()
+''')
+
+
 @pytest.mark.parametrize("number", [5, 6, 7, 8, 17])
 def test_historical_data_migrations_use_selected_database(tmp_path, number):
     run_journey(tmp_path, r'''

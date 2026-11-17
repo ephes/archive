@@ -49,6 +49,7 @@ from archive.media_archival import MediaArchivalError, open_archived_audio
 from archive.media_responses import ranged_file_response
 from archive.models import Item, ItemKind, PodcastFeedPolicy
 from archive.processing_health import processing_health_snapshot
+from archive.read_snapshot import snapshot_read_transaction
 from archive.services import (
     apply_operator_kind_override,
     normalize_item_kind_dependent_statuses,
@@ -419,30 +420,34 @@ def robots_txt(request: HttpRequest) -> HttpResponse:
 
 @require_GET
 def rss_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
-    return _render_feed(
-        request,
-        page_obj=_feed_page(_public_feed_items(), page),
-        canonical_view_name="archive:rss-feed",
-        paged_view_name="archive:rss-feed-page",
-        feed_title="Archive",
-        feed_description="Public archive feed for links, episodes, videos, and articles.",
-        page_description="Archive feed page {page}.",
-    )
+    with snapshot_read_transaction():
+        return _render_feed(
+            request,
+            page_obj=_feed_page(_public_feed_items(), page),
+            canonical_view_name="archive:rss-feed",
+            paged_view_name="archive:rss-feed-page",
+            feed_title="Archive",
+            feed_description="Public archive feed for links, episodes, videos, and articles.",
+            page_description="Archive feed page {page}.",
+        )
 
 
 @require_GET
 def podcast_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
-    return _render_feed(
-        request,
-        page_obj=_public_podcast_feed_page(page),
-        canonical_view_name="archive:podcast-feed",
-        paged_view_name="archive:podcast-feed-page",
-        feed_title="Archive Podcast",
-        feed_description="Podcast-style archive feed for items with stable local audio enclosures.",
-        page_description="Archive podcast feed page {page}.",
-        include_enclosures=True,
-        feed_image_path="archive/podcast-cover.png",
-    )
+    with snapshot_read_transaction():
+        return _render_feed(
+            request,
+            page_obj=_public_podcast_feed_page(page),
+            canonical_view_name="archive:podcast-feed",
+            paged_view_name="archive:podcast-feed-page",
+            feed_title="Archive Podcast",
+            feed_description=(
+                "Podcast-style archive feed for items with stable local audio enclosures."
+            ),
+            page_description="Archive podcast feed page {page}.",
+            include_enclosures=True,
+            feed_image_path="archive/podcast-cover.png",
+        )
 
 
 @require_GET

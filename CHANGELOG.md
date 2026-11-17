@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Bound the FFmpeg/ffprobe output that yt-dlp captures itself during video-page
+  downloads (audio conversion and fixups). Each stream now has its own 1 MiB budget
+  inside the download child; past it the command is killed and the download fails
+  as `Video page download failed` instead of buffering manipulated media's
+  diagnostics without limit.
+
 - Serve requests with threaded gunicorn workers (`src/django/gunicorn.conf.py`, read
   from the server's working directory). With the default sync worker a single slow
   client of a public audio file blocked every other request, and any response longer

@@ -1173,7 +1173,11 @@ Wrappers and their children must remain in that session; deliberately
 detached processes are not supported. Cleanup escalation can add up to 0.2 seconds
 plus up to one second for reaping to the execution deadline; that retirement time
 does not turn a command that exited before its deadline into a timeout. Both commands discard
-diagnostic text under the same stream budgets. YouTube download failures remain
+diagnostic text under the same stream budgets. Inside a video-page download, yt-dlp runs
+FFmpeg/ffprobe itself for audio conversion and fixups and would buffer their
+whole stdout/stderr in memory; the download child replaces that capture with one
+that reads each stream under its own 1 MiB budget and, past it, kills the command
+and fails the download (persisted as `Video page download failed`). YouTube download failures remain
 retryable under the existing media retry policy and do not replace previously
 archived media.
 

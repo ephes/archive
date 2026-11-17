@@ -2,6 +2,10 @@ import os
 from pathlib import Path
 
 from archive.capture_config import capture_dedupe_seconds
+from archive.transcription_config import (
+    transcription_max_gap_seconds,
+    transcription_max_job_age_seconds,
+)
 
 DJANGO_DIR = Path(__file__).resolve().parents[2]
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -142,10 +146,10 @@ ARCHIVE_TRANSCRIPTION_POLL_SECONDS = float(
     os.getenv("ARCHIVE_TRANSCRIPTION_POLL_SECONDS", "60")
 )
 # A batch job still unfinished this long after submission fails the transcript step.
-ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS = float(
+ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS = transcription_max_job_age_seconds(
     os.getenv("ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS", "7200")
 )
-ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = float(
+ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = transcription_max_gap_seconds(
     os.getenv("ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS", "600")
 )
 ARCHIVE_ARTICLE_AUDIO_API_KEY = os.getenv(

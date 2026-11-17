@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Bind batch transcription coverage evidence to the normalized published text and
+  any supplied artifact job identity. Fail immutable missing/mismatched bindings
+  without publishing text; keep artifact transport failures pending for retry.
+
+- Validate transcription loss-guard settings at startup and direct-override boundaries:
+  require finite gap thresholds and finite positive batch job ages, reject booleans,
+  and preserve the explicit finite nonpositive coverage opt-out.
+
 - Render each general/podcast RSS response from one SQLite read snapshot, including
   counts, policy selection, item hydration and XML serialization. Reuse the health
   snapshot scope without taking an IMMEDIATE writer lock; concurrent edits appear

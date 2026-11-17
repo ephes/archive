@@ -32,6 +32,7 @@ from archive.media_archival import (
 )
 from archive.metadata import REQUEST_HEADERS
 from archive.models import Item
+from archive.transcription_config import transcription_max_gap_seconds
 from archive.upstream_http import api_url
 from archive.upstream_http import open_authenticated_url as urlopen
 from archive.upstream_jobs import artifact_path, wire_id, wire_state
@@ -142,6 +143,7 @@ def generate_item_transcript(
     pass. That pass makes one status request. A job made for an older source is
     ignored and the current source is transcribed afresh.
     """
+    transcription_max_gap_seconds(settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS)
     deadline = monotonic() + timeout
     api_key = settings.ARCHIVE_TRANSCRIPTION_API_KEY.strip()
     if not api_key:
@@ -432,7 +434,7 @@ def _check_batch_transcript_coverage(
     whisper.cpp splits long audio across processors and ignores a failing worker thread:
     the job still succeeds, but whole parts of the audio are missing from the text.
     """
-    max_gap_seconds = settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS
+    max_gap_seconds = transcription_max_gap_seconds(settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS)
     if max_gap_seconds <= 0:
         return
     if not completed.json_artifact_path:
@@ -454,6 +456,25 @@ def _check_batch_transcript_coverage(
         # A finished job's artifact does not change; only transport errors may pass.
         invalid_payload_error=TranscriptionJobFailed,
     )
+    artifact_text = payload.get("text")
+    if (
+        not isinstance(artifact_text, str)
+        or not _normalize_transcript(artifact_text)
+        or _normalize_transcript(artifact_text) != _normalize_transcript(completed.transcript)
+    ):
+        raise TranscriptionJobFailed("Batch transcription artifact text does not match its result")
+    # Verbose JSON need not carry an ID, but supplied job identity must agree.
+    for key in ("job_id", "id"):
+        if key not in payload:
+            continue
+        try:
+            artifact_job_id = wire_id(payload[key])
+        except ValueError:
+            raise TranscriptionJobFailed(
+                "Batch transcription artifact job identity is invalid"
+            ) from None
+        if artifact_job_id != completed.job_id:
+            raise TranscriptionJobFailed("Batch transcription artifact job identity does not match")
     try:
         gaps = find_transcript_gaps(payload.get("segments"), max_gap_seconds=max_gap_seconds)
     except TranscriptionGenerationError as exc:
@@ -477,6 +498,9 @@ def find_transcript_gaps(
 
     Reject malformed evidence; measure coverage from the union without reordering text.
     """
+    max_gap_seconds = transcription_max_gap_seconds(max_gap_seconds)
+    if max_gap_seconds <= 0:
+        return []
     if not isinstance(segments, list) or not segments:
         raise TranscriptionGenerationError("Batch transcription segment list was unreadable")
     intervals: list[tuple[float, float]] = []

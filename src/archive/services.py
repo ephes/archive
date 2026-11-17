@@ -36,6 +36,10 @@ from archive.metadata import extract_metadata_from_url
 from archive.models import EnrichmentStatus, Item, ItemKind, ProcessingStep
 from archive.processing_health import media_archive_step, record_step_outcome
 from archive.summaries import generate_item_summaries
+from archive.transcription_config import (
+    transcription_max_gap_seconds,
+    transcription_max_job_age_seconds,
+)
 from archive.transcriptions import (
     BatchTranscriptionJob,
     TranscriptionJobFailed,
@@ -421,6 +425,8 @@ def enrich_item_summaries(item: Item, timeout: int = 60) -> bool:
 
 
 def enrich_item_transcript(item: Item, timeout: int = 300) -> bool:
+    transcription_max_gap_seconds(settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS)
+    transcription_max_job_age_seconds(settings.ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS)
     using = item._state.db or router.db_for_write(Item, instance=item)
     if item.has_transcript or not can_transcribe_item(item):
         captured_skip = _failure_state(item, "transcript")
@@ -516,6 +522,7 @@ def _clear_transcript_job(item: Item) -> None:
 
 def _mark_transcript_pending(item: Item, pending: TranscriptionPending, *, expected: dict) -> bool:
     """Store a running batch job and when to poll it; fail it once it is too old."""
+    max_age = transcription_max_job_age_seconds(settings.ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS)
     using = item._state.db or router.db_for_write(Item, instance=item)
     now = timezone.now()
     job = pending.job
@@ -531,7 +538,6 @@ def _mark_transcript_pending(item: Item, pending: TranscriptionPending, *, expec
             item.transcript_job_submitted_at = now
         item.transcript_job_id = job.job_id
         item.transcript_job_ref = job.job_ref
-        max_age = settings.ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS
         if (now - item.transcript_job_submitted_at).total_seconds() >= max_age:
             message = f"Batch transcription job {job.job_id} did not finish within {max_age:g} s"
             if pending.poll_error:

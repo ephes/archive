@@ -452,16 +452,28 @@ Important values:
 - `ARCHIVE_TRANSCRIPTION_POLL_SECONDS` defaults to `60`: how long the worker waits before it asks
   Voxhelm again about a running batch transcription job
 - `ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS` defaults to `7200`: a batch job that is still
-  unfinished (or whose status cannot be read) this long after submission fails the transcript step
+  unfinished (or whose status cannot be read) this long after submission fails the transcript step.
+  This limit must be finite and strictly positive.
 - `ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS` defaults to `600`: a Voxhelm batch transcript whose
-  segments leave a longer stretch of audio uncovered is rejected as incomplete; `0` disables the check.
+  segments leave a longer stretch of audio uncovered is rejected as incomplete; any finite
+  nonpositive value disables the check. Both loss-guard settings reject NaN, infinities,
+  nonnumeric values and boolean overrides with a fixed `ImproperlyConfigured` message,
+  at startup and before transcription I/O when settings are overridden directly.
   Coverage uses the sorted union of intervals without changing transcript order. Segment times
   must be finite, representable, nonnegative numbers with start <= end; malformed evidence
   fails transcription, including a missing/null segment list or non-object entries in a JSON
   artifact. Successful batch results must contain nonblank string text; other JSON
   types are rejected instead of converted to text. With a positive threshold, successful batch
   jobs must also return a nonblank string JSON artifact path and a readable, nonempty
-  segment list. An explicit `null` artifact container or `json` entry counts as no
+  segment list. The artifact's top-level `text` must be a nonblank string matching
+  the result text after Archive's publication normalization (CRLF/CR to LF, horizontal
+  whitespace collapsed and lines trimmed; paragraph breaks retained). When present,
+  top-level `job_id` or `id` must be a valid upstream identifier matching the completed
+  job; both must agree if supplied together. Missing/mismatched text or malformed/
+  mismatched identity is an immutable failed result: the stored job is forgotten,
+  existing content is preserved and a retry submits a new job. A transport failure
+  fetching the artifact keeps the stored job pending until its age limit instead.
+  An explicit `null` artifact container or `json` entry counts as no
   artifact (accepted when the check is disabled); other non-string values are rejected. Missing evidence fails with a retryable transcription error and preserves
   existing stored content. Older services without segment artifacts require an explicit
   nonpositive threshold opt-out; coverage checking cannot verify their output.

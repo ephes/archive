@@ -546,8 +546,9 @@ lookup and insert across connections, preventing simultaneous shares from insert
 Lock waits exceeding five seconds still raise `database is locked`; callers may retry.
 Ordinary autocommit reads remain reads; `ATOMIC_REQUESTS` is not enabled.
 
-The transaction audit found no reliance on deferred transactions or long explicit read
-transactions. Worker claims, upload reservations, and media publication use short database
+Public RSS and processing-health responses explicitly use `BEGIN DEFERRED` read
+snapshots instead of acquiring the IMMEDIATE writer lock. Worker claims, upload
+reservations, and media publication use short database
 transactions; fetching, paid enrichment, and uploads run outside them. Management commands
 do not wrap processing loops in transactions. Media cleanup deliberately holds a transaction
 across each storage deletion to preserve its reference/reservation safety check: slow storage
@@ -990,10 +991,26 @@ SQLite VM work with 1,000 and 10,000 historical rows.
 Podcast feed selection applies public/published, basic title/summary/audio and operator-exclude
 filters in SQL, then streams policy fields in batches of 100 to preserve Python whitespace and
 generated-summary eligibility rules. It retains only the exact eligible count and the requested
-page's ids, then loads full items for that page and rechecks eligibility so edits made during
-the scan cannot expose newly private or excluded items. Notes and transcripts are excluded from the scan;
+page's ids, then loads full items for that page and rechecks eligibility within the same
+read snapshot. Notes and transcripts are excluded from the scan;
 summary text remains necessary for generated-audio policy. Counting still scans candidate history,
 but memory no longer grows with that history and no eligible history is truncated.
+
+Each general/podcast RSS response uses one SQLite read snapshot from the first
+count/policy query through page selection, hydration, enclosure metadata and complete
+XML rendering. It shares the processing-health snapshot scope: an existing transaction
+keeps ownership of its lifecycle, otherwise a deferred read transaction is committed
+or rolled back and autocommit restored before returning the buffered response. Feed
+rendering performs no remote fetch or audio generation. Concurrent WAL writers can
+commit while a response reads its original generation; publication, unpublication and
+summary/policy edits appear in the next response's snapshot. A response already being
+built can still contain an item unpublished meanwhile. Different page requests remain
+a live view and can shift after edits. The exact podcast policy scan can prolong the
+read snapshot (and WAL retention); the index does not eliminate that history scan.
+With rollback journaling, writers may wait for the response's read transaction to end.
+`uv run pytest tests/test_feed_snapshots.py` interleaves real independent WAL-connection
+commits and checks response bytes, counts, navigation and transaction cleanup after
+query/render failures.
 
 Operator workflow in Django admin:
 

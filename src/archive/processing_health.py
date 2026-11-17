@@ -13,12 +13,10 @@ never item titles, URLs or error messages.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any
 
-from django.db import connection, router, transaction
+from django.db import router, transaction
 from django.db.models import Count
 from django.utils import timezone
 
@@ -30,6 +28,7 @@ from archive.models import (
     ProcessingStep,
     ProcessingStepState,
 )
+from archive.read_snapshot import snapshot_read_transaction
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +120,7 @@ def _prune_events(*, cutoff: datetime, using: str = "default") -> None:
 def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:
     now = now or timezone.now()
     window_start = now - HEALTH_WINDOW
-    with _snapshot_read_transaction():
+    with snapshot_read_transaction():
         states = {state.step: state for state in ProcessingStepState.objects.all()}
         counts: dict[tuple[str, bool], int] = {
             (row["step"], row["succeeded"]): row["total"]
@@ -163,31 +162,6 @@ def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:
         "window_hours": int(HEALTH_WINDOW.total_seconds() // 3600),
         "steps": steps,
     }
-
-
-@contextmanager
-def _snapshot_read_transaction() -> Iterator[None]:
-    """Use a SQLite read snapshot without the configured IMMEDIATE writer lock."""
-    if connection.in_atomic_block:
-        # An existing transaction owns its snapshot and its commit/rollback lifecycle.
-        yield
-        return
-    if not connection.get_autocommit():
-        with transaction.atomic():
-            yield
-        return
-    connection.set_autocommit(False)
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("BEGIN DEFERRED")
-        yield
-    except BaseException:
-        connection.rollback()
-        raise
-    else:
-        connection.commit()
-    finally:
-        connection.set_autocommit(True)
 
 
 def _isoformat(value: datetime | None) -> str | None:

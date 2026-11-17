@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Render each general/podcast RSS response from one SQLite read snapshot, including
+  counts, policy selection, item hydration and XML serialization. Reuse the health
+  snapshot scope without taking an IMMEDIATE writer lock; concurrent edits appear
+  on the next request, and failures restore the connection's transaction state.
+
 - Add a reversible partial public publication-time/id index (migration `0023`) for
   RSS selection without a history-wide ordering sort. Preserve eligibility, exact
   counts and descending id order for publication-time ties; counts and podcast

@@ -390,6 +390,22 @@ checkout at `$PROJECTS_ROOT/archive` (default `~/projects/archive`), not the cur
 so update that checkout first; running `just deploy-one archive` from ops-control directly is
 the same thing.
 
+The deployed server command (`gunicorn config.wsgi:application --bind ... --workers N`)
+runs in `src/django`, so gunicorn reads `src/django/gunicorn.conf.py`: threaded
+(`gthread`) workers with 8 threads each. A slow client streaming a public audio file
+then occupies one thread instead of the whole process, and downloads that take longer
+than gunicorn's 30-second worker timeout complete instead of being cut off. Options on
+the command line override the file; the journal line `Using worker: gthread` confirms
+the active worker class. Threaded workers no longer recycle a busy worker, so
+`config/wsgi.py` sets a 30-second timeout on the client socket of every request: each
+write of one response chunk (and each request-body read) must finish within 30 seconds,
+otherwise the connection is closed and its thread freed. Audio is written in small
+blocks, so a slow but steady podcast client is not cut off; a large single-chunk
+response such as a big page must reach the client within 30 seconds, as under the former
+sync worker. Request duration as a whole is not bounded: workers × threads (8 in production)
+deliberately slow readers can still occupy the server until they disconnect. Limit
+concurrent connections per client address at the proxy if that matters.
+
 CI (`.github/workflows/ci.yml`) runs the dependency audit, `ruff check .`, `mypy`, a missing-migration check
 (`makemigrations --check --dry-run`) and the test suite on Python 3.12 (the deployed
 version) for every push and pull request. It uses the locked dependencies (`UV_FROZEN`),
@@ -1399,10 +1415,16 @@ temporary downloads and preserves any previously published copy. Without a decla
 length, a nonempty EOF within the cap is accepted. JSON responses and HTTP error
 diagnostics retain their separate 8 MiB and 64 KiB bounds. Expiry closes the upstream
 and removes temporary downloads. Backfill failure returns `503` with
-`Retry-After: 60`; retrying can create the copy later. Generation is complete once
+`Retry-After: 60`; retrying can create the copy later. Anonymous requests start at
+most one copy per item and artifact in a 60-second window (tracked in the default
+cache, so per server process): while a copy runs, and for the rest of the window
+after a failed one, other GET/HEAD requests get the same `no-store` `503` with
+`Retry-After: 60` without contacting Voxhelm, or the finished copy once it exists.
+A hidden or deleted item still answers `404`. A new artifact path starts a new
+window. Generation is complete once
 the Voxhelm artifact exists. Worker copy failures are logged; the completed artifact
-and generated flag are retained, and the next GET/HEAD retries the copy. No new
-synthesis job is submitted.
+and generated flag are retained, and the first GET/HEAD after the window retries the
+copy. No new synthesis job is submitted.
 
 Podcast feed eligibility is unchanged: older generated items remain in the feed with
 length 0 until their stored copy exists. Feed rendering never fetches Voxhelm. After

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Serve requests with threaded gunicorn workers (`src/django/gunicorn.conf.py`, read
+  from the server's working directory). With the default sync worker a single slow
+  client of a public audio file blocked every other request, and any response longer
+  than the 30-second worker timeout was killed mid-download. The WSGI entry point sets
+  a 30-second timeout on each client socket write and read, so a client that stops
+  reading frees its thread; steadily slow readers of audio can still hold up to
+  workers × threads connections.
+
+- Admit at most one anonymous on-demand article-audio copy per item artifact and
+  60-second window. Requests during a running copy or after a failed one get `503`
+  with `Retry-After: 60` instead of each starting an authenticated Voxhelm download.
+
 - Bind batch transcription coverage evidence to the normalized published text and
   any supplied artifact job identity. Fail immutable missing/mismatched bindings
   without publishing text; keep artifact transport failures pending for retry.

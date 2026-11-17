@@ -355,7 +355,7 @@ def _batch_job_urlopen(*, segments: list[dict[str, object]], requested: list[str
                 == "https://voxhelm.example.test/v1/jobs/job-123/artifacts/transcript.json"
             )
             assert request.get_header("Authorization") == "Bearer key"
-            payload = {"language": "de", "segments": segments, "text": "..."}
+            payload = {"language": "de", "segments": segments, "text": "Batch staged transcript"}
         return _FakeResponse(
             json.dumps(payload).encode("utf-8"),
             content_type="application/json",
@@ -765,6 +765,8 @@ class _FakeVoxhelm:
         self.state = "queued"
         self.poll_error: Exception | None = None
         self.segments = _segments((0, 3000))
+        self.artifact: dict[str, object] = {"text": "Async batch transcript"}
+        self.artifact_error: Exception | None = None
         self.jobs = 0
 
     def __call__(self, request, timeout):
@@ -778,7 +780,9 @@ class _FakeVoxhelm:
             self.jobs += 1
             payload = {"id": f"job-{self.jobs}", "state": "queued"}
         elif url.endswith("/artifacts/transcript.json"):
-            payload = {"segments": self.segments}
+            if self.artifact_error is not None:
+                raise self.artifact_error
+            payload = {"segments": self.segments, **self.artifact}
         else:
             assert url.startswith(f"{self.BASE}/jobs/job-")
             if self.poll_error is not None:
@@ -931,6 +935,99 @@ def test_incomplete_batch_transcript_fails_after_polling(voxhelm) -> None:
     assert item.transcript_status == EnrichmentStatus.FAILED
     assert "job-1 is incomplete" in item.transcript_error
     assert item.transcript_job_id == ""
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        {},
+        {"text": None},
+        {"text": True},
+        {"text": ["Async batch transcript"]},
+        {"text": " \t\r\n "},
+        {"text": "Complete text of a different recording"},
+        {"text": "Async batch\ntranscript"},
+        {"text": "Async batch transcript", "job_id": "job-other"},
+        {"text": "Async batch transcript", "job_id": None},
+        {"text": "Async batch transcript", "job_id": True},
+        {"text": "Async batch transcript", "id": "job-other"},
+        {"text": "Async batch transcript", "job_id": "job-1", "id": "job-other"},
+    ],
+)
+def test_unbound_batch_artifact_is_immutable_failure(voxhelm, artifact):
+    from archive.models import EnrichmentStatus
+    from archive.services import enrich_item_transcript
+
+    item = _claimed_batch_item()
+    assert enrich_item_transcript(item) is True
+    item.refresh_from_db()
+    _make_poll_due(item)
+    voxhelm.state = "succeeded"
+    voxhelm.artifact = artifact
+
+    assert enrich_item_transcript(item) is False
+
+    item.refresh_from_db()
+    assert item.transcript == ""
+    assert item.short_summary == "Summary from metadata"
+    assert item.transcript_status == EnrichmentStatus.FAILED
+    assert item.transcript_job_id == ""
+    assert "artifact" in item.transcript_error
+    assert voxhelm.uploads() == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "identity", [{}, {"job_id": "job-1"}, {"id": "job-1"}, {"job_id": "job-1", "id": "job-1"}]
+)
+def test_batch_artifact_binding_uses_publication_normalization(voxhelm, identity):
+    from archive.services import enrich_item_transcript
+
+    item = _claimed_batch_item()
+    assert enrich_item_transcript(item) is True
+    item.refresh_from_db()
+    _make_poll_due(item)
+    voxhelm.state = "succeeded"
+    voxhelm.artifact = {"text": " \tAsync  batch\ttranscript\r\n", **identity}
+
+    assert enrich_item_transcript(item) is True
+
+    item.refresh_from_db()
+    assert item.transcript == "Async batch transcript"
+    assert item.transcript_job_id == ""
+
+
+@pytest.mark.django_db
+def test_artifact_transport_error_keeps_job_for_matching_retry(voxhelm):
+    from urllib.error import URLError
+
+    from archive.models import EnrichmentStatus
+    from archive.services import enrich_item_transcript
+
+    item = _claimed_batch_item()
+    assert enrich_item_transcript(item) is True
+    item.refresh_from_db()
+    submitted_at = item.transcript_job_submitted_at
+    _make_poll_due(item)
+    voxhelm.state = "succeeded"
+    voxhelm.artifact_error = URLError("synthetic unavailable artifact")
+
+    assert enrich_item_transcript(item) is False
+
+    item.refresh_from_db()
+    assert item.transcript_status == EnrichmentStatus.PENDING
+    assert item.transcript_job_id == "job-1"
+    assert item.transcript_job_submitted_at == submitted_at
+    assert item.transcript == ""
+    assert item.short_summary == "Summary from metadata"
+    _make_poll_due(item)
+    voxhelm.artifact_error = None
+    assert enrich_item_transcript(item) is True
+    item.refresh_from_db()
+    assert item.transcript == "Async batch transcript"
+    assert item.transcript_job_id == ""
+    assert voxhelm.uploads() == 1
 
 
 @pytest.mark.django_db

@@ -193,7 +193,7 @@ def test_real_batch_boundaries_share_deadline(clock, monkeypatch, settings, expi
         else:
             assert name == "segments.json"
             clock[0] = 9.5
-            payload = {"segments": [{"start": 0, "end": 1}]}
+            payload = {"text": "words", "segments": [{"start": 0, "end": 1}]}
         if name == expire_at:
             clock[0] = 10
         return Response(payload)

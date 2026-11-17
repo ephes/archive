@@ -465,7 +465,15 @@ Important values:
   artifact. Successful batch results must contain nonblank string text; other JSON
   types are rejected instead of converted to text. With a positive threshold, successful batch
   jobs must also return a nonblank string JSON artifact path and a readable, nonempty
-  segment list. An explicit `null` artifact container or `json` entry counts as no
+  segment list. The artifact's top-level `text` must be a nonblank string matching
+  the result text after Archive's publication normalization (CRLF/CR to LF, horizontal
+  whitespace collapsed and lines trimmed; paragraph breaks retained). When present,
+  top-level `job_id` or `id` must be a valid upstream identifier matching the completed
+  job; both must agree if supplied together. Missing/mismatched text or malformed/
+  mismatched identity is an immutable failed result: the stored job is forgotten,
+  existing content is preserved and a retry submits a new job. A transport failure
+  fetching the artifact keeps the stored job pending until its age limit instead.
+  An explicit `null` artifact container or `json` entry counts as no
   artifact (accepted when the check is disabled); other non-string values are rejected. Missing evidence fails with a retryable transcription error and preserves
   existing stored content. Older services without segment artifacts require an explicit
   nonpositive threshold opt-out; coverage checking cannot verify their output.

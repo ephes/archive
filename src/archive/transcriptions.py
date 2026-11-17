@@ -456,6 +456,25 @@ def _check_batch_transcript_coverage(
         # A finished job's artifact does not change; only transport errors may pass.
         invalid_payload_error=TranscriptionJobFailed,
     )
+    artifact_text = payload.get("text")
+    if (
+        not isinstance(artifact_text, str)
+        or not _normalize_transcript(artifact_text)
+        or _normalize_transcript(artifact_text) != _normalize_transcript(completed.transcript)
+    ):
+        raise TranscriptionJobFailed("Batch transcription artifact text does not match its result")
+    # Verbose JSON need not carry an ID, but supplied job identity must agree.
+    for key in ("job_id", "id"):
+        if key not in payload:
+            continue
+        try:
+            artifact_job_id = wire_id(payload[key])
+        except ValueError:
+            raise TranscriptionJobFailed(
+                "Batch transcription artifact job identity is invalid"
+            ) from None
+        if artifact_job_id != completed.job_id:
+            raise TranscriptionJobFailed("Batch transcription artifact job identity does not match")
     try:
         gaps = find_transcript_gaps(payload.get("segments"), max_gap_seconds=max_gap_seconds)
     except TranscriptionGenerationError as exc:

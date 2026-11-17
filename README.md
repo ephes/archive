@@ -1350,10 +1350,16 @@ A deleted/hidden row, changed artifact or replaced copy returns 404; any acquire
 is closed on refusal. This cannot revoke bytes after response handoff. Worker downloads
 remain independent of public visibility. Downloads use a 30-second
 whole-transfer elapsed budget (the worker uses its article-audio timeout) and the existing
-`ARCHIVE_ARTICLE_AUDIO_MAX_BYTES` cap. Empty, oversized, truncated or non-MP3 responses
-are rejected without publishing a partial copy. Content type and declared oversized
-length are rejected before reading the body; the byte cap also applies when length
-is absent or inaccurate. Expiry closes the upstream and removes temporary downloads. Backfill failure returns `503` with
+`ARCHIVE_ARTICLE_AUDIO_MAX_BYTES` cap. Successful audio downloads require HTTP 200
+without `Content-Range`, a nonempty MP3 response and one valid nonnegative
+`Content-Length` matching observed bytes when declared. Status, partial-response
+headers, invalid/ambiguous lengths, content type and declared oversized length are
+rejected before reading the body; empty or mismatched bodies fail at EOF. The
+transport refuses incomplete staging before the parent can upload it, removes
+temporary downloads and preserves any previously published copy. Without a declared
+length, a nonempty EOF within the cap is accepted. JSON responses and HTTP error
+diagnostics retain their separate 8 MiB and 64 KiB bounds. Expiry closes the upstream
+and removes temporary downloads. Backfill failure returns `503` with
 `Retry-After: 60`; retrying can create the copy later. Generation is complete once
 the Voxhelm artifact exists. Worker copy failures are logged; the completed artifact
 and generated flag are retained, and the next GET/HEAD retries the copy. No new

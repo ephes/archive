@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Apply complete-response admission in the authenticated article-audio transport:
+  refuse unrequested partial responses, empty bodies and inconsistent declared
+  lengths before storage publication. Keep prior audio copies, backfill retries
+  and the separate bounded JSON/error response handling.
+
 - Refuse incomplete public media downloads before extraction or publication:
   require HTTP 200 without Content-Range, nonempty bytes and a matching valid
   Content-Length when declared. Preserve existing media and normal worker retries;

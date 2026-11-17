@@ -24,6 +24,25 @@ def _load_transport():
     return module
 
 
+def _audio_length(response) -> int | None:
+    if response.code != 200 or "Content-Range" in response.headers:
+        raise UpstreamResponseError(
+            "Article audio artifact did not return a complete HTTP 200 representation"
+        )
+    lengths = response.headers.get_all("Content-Length", [])
+    if not lengths:
+        return None
+    raw = lengths[0].strip()
+    if len(lengths) != 1 or not raw.isascii() or not raw.isdecimal():
+        raise UpstreamResponseError("Article audio artifact has an invalid Content-Length")
+    try:
+        return int(raw)
+    except ValueError:
+        raise UpstreamResponseError(
+            "Article audio artifact has an invalid Content-Length"
+        ) from None
+
+
 def main() -> int:
     with ExitStack() as stack:
         return _exchange(stack)
@@ -55,11 +74,13 @@ def _exchange(stack) -> int:
         with response:
             status = response.code
             limit = 64 * 1024 if is_error else options["max_bytes"]
-            if options.get("audio") and not is_error:
+            audio_mode = options.get("audio") and not is_error
+            expected_size = None
+            if audio_mode:
+                expected_size = _audio_length(response)
                 if response.headers.get_content_type().lower() not in {"audio/mpeg", "audio/mp3"}:
                     raise UpstreamResponseError("Article audio artifact is not MP3 audio")
-                declared = response.headers.get("Content-Length")
-                if declared is not None and int(declared) > limit:
+                if expected_size is not None and expected_size > limit:
                     raise UpstreamResponseError("Article audio artifact exceeded download limit")
             size = 0
             with Path(options["path"]).open("wb") as output:
@@ -80,6 +101,11 @@ def _exchange(stack) -> int:
                     output.write(chunk)
                     if is_error and size == limit:
                         break
+            if audio_mode:
+                if not size:
+                    raise UpstreamResponseError("Article audio artifact is empty")
+                if expected_size is not None and size != expected_size:
+                    raise UpstreamResponseError("Article audio artifact download was incomplete")
             info = {
                 "status": status,
                 "is_error": is_error,

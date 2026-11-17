@@ -4,13 +4,15 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request
 
 import pytest
 from django.core.files.base import ContentFile
 from django.core.files.storage import storages
 from test_media_archival import _fake_ffmpeg_run
 
-from archive import media_archival, metadata
+from archive import article_audio, media_archival, metadata, upstream_http
 from archive.media_storage import iter_archive_media_object_names
 from archive.models import EnrichmentStatus, Item, ItemKind, PendingArchiveMediaUpload
 from archive.services import enrich_item_media_archive
@@ -20,6 +22,7 @@ import json, runpy, sys
 from email.message import Message
 from io import BytesIO
 from types import SimpleNamespace
+from urllib.error import HTTPError
 ns = runpy.run_path(sys.argv[1])
 config = json.loads(sys.argv[2])
 class Response(BytesIO):
@@ -36,8 +39,16 @@ class Response(BytesIO):
         super().__exit__(*args)
         assert self.closed
 def open_url(*args, **kwargs):
-    return Response(config.get('body', 'abc').encode())
-ns['main'].__globals__['_load_safe_fetch'] = lambda: SimpleNamespace(open_public_url=open_url)
+    response = Response(config.get('body', 'abc').encode())
+    if config.get('http_error'):
+        raise HTTPError('https://example.test/media', response.code, 'Synthetic',
+                        response.headers, response)
+    return response
+if sys.argv[1].endswith('upstream_download.py'):
+    ns['main'].__globals__['_load_transport'] = lambda: SimpleNamespace(
+        _open_authenticated_url=open_url)
+else:
+    ns['main'].__globals__['_load_safe_fetch'] = lambda: SimpleNamespace(open_public_url=open_url)
 raise SystemExit(ns['main']())
 """
 
@@ -59,6 +70,30 @@ def synthetic_public_response(monkeypatch):
 
         monkeypatch.setattr(media_archival, "run_download", download)
         monkeypatch.setattr(metadata, "run_download", download)
+        return exchanges
+
+    return install
+
+
+@pytest.fixture
+def synthetic_authenticated_response(monkeypatch, settings):
+    settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = "SYNTHETIC"
+    settings.ARCHIVE_ARTICLE_AUDIO_API_BASE = "https://example.test/v1"
+    run = subprocess.run
+    exchanges = []
+
+    def install(config, before_download=lambda: None):
+        def download(command, **kwargs):
+            before_download()
+            path = Path(json.loads(kwargs["input"])["path"])
+            result = run(
+                [sys.executable, "-I", "-c", RESPONSE_SCRIPT, command[-1], json.dumps(config)],
+                **kwargs,
+            )
+            exchanges.append((result, path))
+            return result
+
+        monkeypatch.setattr(upstream_http.subprocess, "run", download)
         return exchanges
 
     return install
@@ -146,4 +181,125 @@ def test_metadata_keeps_bounded_prefix_contract(synthetic_public_response, monke
 
     assert metadata.extract_metadata_from_url("https://example.test/page").title == "Prefix"
     assert exchanges[0][0].returncode == 0
+    assert not exchanges[0][1].parent.exists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("response", INVALID_RESPONSES)
+@pytest.mark.parametrize("previous_copy", [False, True])
+def test_article_incomplete_response_never_publishes(
+    synthetic_authenticated_response, response, previous_copy
+):
+    item = Item.objects.create(
+        original_url="https://example.test/article",
+        kind=ItemKind.ARTICLE,
+        article_audio_artifact_path="/v1/artifacts/speech.mp3",
+    )
+    old_path = "article-audio/previous/speech.mp3"
+    storage = storages["archive_media"]
+
+    def concurrent_copy():
+        # A copy published after the caller's initial refresh must survive refusal.
+        if previous_copy:
+            storage.save(old_path, ContentFile(b"previous audio"))
+            Item.objects.filter(pk=item.pk).update(
+                article_audio_file=old_path,
+                article_audio_size_bytes=14,
+                article_audio_content_type="audio/mpeg",
+            )
+
+    exchanges = synthetic_authenticated_response(response, before_download=concurrent_copy)
+
+    with pytest.raises(article_audio.ArticleAudioGenerationError):
+        article_audio.store_generated_article_audio(item=item)
+
+    item.refresh_from_db()
+    assert item.article_audio_artifact_path == "/v1/artifacts/speech.mp3"
+    assert not PendingArchiveMediaUpload.objects.exists()
+    assert len(exchanges) == 1
+    result, path = exchanges[0]
+    assert result.returncode == 1
+    assert not path.parent.exists()
+    if previous_copy:
+        assert item.article_audio_file.name == old_path
+        assert item.article_audio_size_bytes == 14
+        assert item.article_audio_content_type == "audio/mpeg"
+        with storage.open(old_path) as stored:
+            assert stored.read() == b"previous audio"
+        assert set(iter_archive_media_object_names()) == {old_path}
+    else:
+        assert not item.article_audio_file
+        assert not list(iter_archive_media_object_names())
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("headers", [[], [("Content-Length", "3")]])
+def test_article_complete_response_is_published(synthetic_authenticated_response, headers):
+    exchanges = synthetic_authenticated_response({"headers": headers})
+    item = Item.objects.create(
+        original_url="https://example.test/article",
+        kind=ItemKind.ARTICLE,
+        article_audio_artifact_path="/v1/artifacts/speech.mp3",
+    )
+
+    article_audio.store_generated_article_audio(item=item)
+
+    item.refresh_from_db()
+    assert item.article_audio_status == EnrichmentStatus.COMPLETE
+    assert item.article_audio_size_bytes == 3
+    with item.article_audio_file.open("rb") as stored:
+        assert stored.read() == b"abc"
+    assert exchanges[0][0].returncode == 0
+    assert not exchanges[0][1].parent.exists()
+
+
+@pytest.mark.parametrize("http_error", [False, True])
+def test_non_audio_and_error_responses_keep_separate_limits(
+    synthetic_authenticated_response, http_error
+):
+    exchanges = synthetic_authenticated_response(
+        {
+            "status": 500 if http_error else 206,
+            "http_error": http_error,
+            "content_type": "application/json",
+            "headers": [("Content-Range", "bytes 0-2/100"), ("Content-Length", "100")],
+            "body": "e" * 70000 if http_error else "{}",
+        }
+    )
+    request = Request("https://example.test/v1/artifact")
+    if http_error:
+        with pytest.raises(HTTPError) as caught:
+            with upstream_http.open_authenticated_url(request, timeout=5, audio=True):
+                pytest.fail("HTTP error admitted")
+        with caught.value as response:
+            assert response.code == 500
+            assert response.read() == b"e" * 65536
+    else:
+        with upstream_http.open_authenticated_url(request, timeout=5) as response:
+            assert response.read() == b"{}"
+    assert exchanges[0][0].returncode == 0
+    assert not exchanges[0][1].parent.exists()
+
+
+@pytest.mark.parametrize("authenticated", [False, True])
+@pytest.mark.parametrize(
+    "partial", [{"status": 206}, {"headers": [("Content-Range", "bytes 0-2/100")]}]
+)
+def test_partial_response_refused_before_body(
+    synthetic_public_response, synthetic_authenticated_response, authenticated, partial
+):
+    config = {**partial, "no_read": True}
+    request = Request("https://example.test/media.mp3")
+    if authenticated:
+        exchanges = synthetic_authenticated_response(config)
+        response = upstream_http.open_authenticated_url(request, timeout=5, audio=True)
+        error = OSError
+    else:
+        exchanges = synthetic_public_response(config)
+        response = media_archival._open_direct_media(request, timeout=5)
+        error = media_archival.MediaArchivalError
+    with pytest.raises(error, match="complete HTTP 200 representation"):
+        with response:
+            pytest.fail("partial response admitted")
+    assert exchanges[0][0].returncode == 1
     assert not exchanges[0][1].parent.exists()

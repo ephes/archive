@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+from django.utils.csp import CSP
+
 from archive.capture_config import capture_dedupe_seconds
 from archive.transcription_config import (
     transcription_max_gap_seconds,
@@ -46,7 +48,20 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "django.middleware.csp.ContentSecurityPolicyMiddleware",
 ]
+
+# Content-Security-Policy: everything same-origin. Page CSS/JS live in static files
+# (no inline code). media-src also allows https: because an item without a stored
+# copy plays its original audio_url from the source host.
+SECURE_CSP = {
+    "default-src": [CSP.SELF],
+    "media-src": [CSP.SELF, "https:"],
+    "object-src": [CSP.NONE],
+    "base-uri": [CSP.SELF],
+    "frame-ancestors": [CSP.NONE],
+    "form-action": [CSP.SELF],
+}
 
 ROOT_URLCONF = "config.urls"
 

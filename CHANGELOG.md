@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Send a Content-Security-Policy on every response (`default-src 'self'`, no inline
+  code; `media-src` also allows `https:` for items that play their original audio URL).
+  The inline CSS and JS of `base.html` moved to the static files `archive/base.css` and
+  `archive/base.js`.
+
 - Bound the FFmpeg/ffprobe output that yt-dlp captures itself during video-page
   downloads (audio conversion and fixups). Each stream now has its own 1 MiB budget
   inside the download child; past it the command is killed and the download fails

@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+from django.utils.csp import CSP
+
 from archive.capture_config import capture_dedupe_seconds
 from archive.transcription_config import (
     transcription_max_gap_seconds,
@@ -39,6 +41,9 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # Outside WhiteNoise and CommonMiddleware, so static files and slash redirects
+    # carry the policy too.
+    "django.middleware.csp.ContentSecurityPolicyMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -47,6 +52,18 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
+
+# Content-Security-Policy: everything same-origin. Page CSS/JS live in static files
+# (no inline code). media-src also allows https: because an item without a stored
+# copy plays its original audio_url from the source host.
+SECURE_CSP = {
+    "default-src": [CSP.SELF],
+    "media-src": [CSP.SELF, "https:"],
+    "object-src": [CSP.NONE],
+    "base-uri": [CSP.SELF],
+    "frame-ancestors": [CSP.NONE],
+    "form-action": [CSP.SELF],
+}
 
 ROOT_URLCONF = "config.urls"
 

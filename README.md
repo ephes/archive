@@ -450,6 +450,19 @@ serve a small positive value (such as `1`) over HTTPS, or have the proxy serve
 `max-age=0`. Subdomains and preload are excluded. Local/test settings keep HSTS
 disabled. Django uses the trusted proxy's `X-Forwarded-Proto: https` to emit HSTS.
 
+Every response carries a Content-Security-Policy (Django's
+`ContentSecurityPolicyMiddleware`, `SECURE_CSP` in `config/settings/base.py`):
+`default-src 'self'`, `object-src 'none'`, `base-uri 'self'`, `frame-ancestors 'none'`,
+`form-action 'self'`, and `media-src 'self' https:` so an item without a stored copy can
+still play its original audio URL inline. Cross-origin original audio must be HTTPS
+to play inline; whenever the player uses the original audio URL, the item page also
+shows an "Open original audio" link outside the player. The header is added by middleware outside WhiteNoise, so in
+production it also covers static files and redirects; `runserver`'s own static handler
+in local development does not add it. Templates must not use inline `<script>`, `<style>`,
+`style=` attributes or `on*=` handlers; page CSS and JS live in
+`src/archive/static/archive/base.css` and `base.js`
+(`tests/test_content_security_policy.py` enforces this).
+
 Important values:
 
 - `DJANGO_SETTINGS_MODULE` defaults to `config.settings.local`

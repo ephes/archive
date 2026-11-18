@@ -7,6 +7,7 @@ from archive.capture_config import capture_dedupe_seconds
 from archive.transcription_config import (
     transcription_max_gap_seconds,
     transcription_max_job_age_seconds,
+    transcription_min_bytes_per_second,
 )
 
 DJANGO_DIR = Path(__file__).resolve().parents[2]
@@ -159,15 +160,23 @@ ARCHIVE_TRANSCRIPTION_MODEL = os.getenv(
     "gpt-4o-mini-transcribe",
 )
 # Seconds between status requests for a running Voxhelm batch transcription job.
-ARCHIVE_TRANSCRIPTION_POLL_SECONDS = float(
-    os.getenv("ARCHIVE_TRANSCRIPTION_POLL_SECONDS", "60")
-)
+ARCHIVE_TRANSCRIPTION_POLL_SECONDS = float(os.getenv("ARCHIVE_TRANSCRIPTION_POLL_SECONDS", "60"))
 # A batch job still unfinished this long after submission fails the transcript step.
 ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS = transcription_max_job_age_seconds(
     os.getenv("ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS", "7200")
 )
 ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = transcription_max_gap_seconds(
     os.getenv("ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS", "600")
+)
+# Staging a large archived file and waiting for its batch job get at least
+# size / rate seconds, so long recordings are not cut off by the fixed budgets.
+ARCHIVE_TRANSCRIPTION_UPLOAD_MIN_BYTES_PER_SECOND = transcription_min_bytes_per_second(
+    os.getenv("ARCHIVE_TRANSCRIPTION_UPLOAD_MIN_BYTES_PER_SECOND", str(4 * 1024 * 1024)),
+    name="ARCHIVE_TRANSCRIPTION_UPLOAD_MIN_BYTES_PER_SECOND",
+)
+ARCHIVE_TRANSCRIPTION_JOB_MIN_BYTES_PER_SECOND = transcription_min_bytes_per_second(
+    os.getenv("ARCHIVE_TRANSCRIPTION_JOB_MIN_BYTES_PER_SECOND", str(16 * 1024)),
+    name="ARCHIVE_TRANSCRIPTION_JOB_MIN_BYTES_PER_SECOND",
 )
 ARCHIVE_ARTICLE_AUDIO_API_KEY = os.getenv(
     "ARCHIVE_ARTICLE_AUDIO_API_KEY",
@@ -180,17 +189,27 @@ ARCHIVE_ARTICLE_AUDIO_API_BASE = os.getenv(
 ARCHIVE_ARTICLE_AUDIO_MODEL = os.getenv("ARCHIVE_ARTICLE_AUDIO_MODEL", "tts-1")
 ARCHIVE_ARTICLE_AUDIO_VOICE = os.getenv("ARCHIVE_ARTICLE_AUDIO_VOICE", "")
 ARCHIVE_ARTICLE_AUDIO_LANGUAGE = os.getenv("ARCHIVE_ARTICLE_AUDIO_LANGUAGE", "")
-ARCHIVE_ARTICLE_AUDIO_POLL_SECONDS = int(
-    os.getenv("ARCHIVE_ARTICLE_AUDIO_POLL_SECONDS", "30")
-)
+ARCHIVE_ARTICLE_AUDIO_POLL_SECONDS = int(os.getenv("ARCHIVE_ARTICLE_AUDIO_POLL_SECONDS", "30"))
 ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS = int(
     os.getenv("ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS", "5000")
 )
 ARCHIVE_ARTICLE_AUDIO_MAX_BYTES = int(
     os.getenv("ARCHIVE_ARTICLE_AUDIO_MAX_BYTES", str(50 * 1024 * 1024))
 )
+# Same ceiling as Voxhelm's staged uploads, so long recordings pass end to end.
 ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES = int(
-    os.getenv("ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES", str(250 * 1024 * 1024))
+    os.getenv("ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES", str(16 * 1024 * 1024 * 1024))
+)
+# Media work refuses to start unless this much temporary disk space stays free afterwards.
+ARCHIVE_MEDIA_TEMP_RESERVE_BYTES = int(
+    os.getenv("ARCHIVE_MEDIA_TEMP_RESERVE_BYTES", str(2 * 1024 * 1024 * 1024))
+)
+# Every worker of this Archive (it shares the database) takes this lock for as long as
+# its media step's temporary files exist. Next to the database by default, so a
+# private /tmp per service cannot split it and deploys keep it (db.sqlite3*).
+ARCHIVE_MEDIA_TEMP_LOCK_PATH = os.getenv(
+    "ARCHIVE_MEDIA_TEMP_LOCK_PATH",
+    f"{DATABASES['default']['NAME']}.media-temp-space.lock",
 )
 ARCHIVE_MEDIA_EXTRACTION_FFMPEG_BIN = os.getenv(
     "ARCHIVE_MEDIA_EXTRACTION_FFMPEG_BIN",

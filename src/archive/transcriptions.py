@@ -6,7 +6,7 @@ import math
 import mimetypes
 import re
 import uuid
-from contextlib import closing
+from contextlib import ExitStack, closing
 from dataclasses import dataclass
 from time import monotonic
 from urllib.error import HTTPError, URLError
@@ -29,10 +29,11 @@ from archive.media_archival import (
     _open_direct_media,
     open_archived_audio,
     open_archived_video,
+    temp_space_admission,
 )
 from archive.metadata import REQUEST_HEADERS
 from archive.models import Item
-from archive.transcription_config import transcription_max_gap_seconds
+from archive.transcription_config import size_scaled_seconds, transcription_max_gap_seconds
 from archive.upstream_http import api_url
 from archive.upstream_http import open_authenticated_url as urlopen
 from archive.upstream_jobs import artifact_path, wire_id, wire_state
@@ -144,7 +145,8 @@ def generate_item_transcript(
     ignored and the current source is transcribed afresh.
     """
     transcription_max_gap_seconds(settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS)
-    deadline = monotonic() + timeout
+    started = monotonic()
+    deadline = started + timeout
     api_key = settings.ARCHIVE_TRANSCRIPTION_API_KEY.strip()
     if not api_key:
         raise TranscriptionGenerationError("Transcription is not configured")
@@ -158,8 +160,12 @@ def generate_item_transcript(
     ):
         return _poll_stored_batch_transcription_job(job=batch_job, deadline=deadline)
 
+    # Only a staged upload of a long recording gets at least size / minimum rate.
+    staged_deadline = max(deadline, started + staging_allowance_seconds(source.size_bytes))
+
     prompt = _build_transcription_prompt(item=item)
     if source.kind == "archived_audio" and source.size_bytes > MAX_TRANSCRIPTION_BYTES:
+        deadline = staged_deadline
         raw_transcript = _request_staged_archived_audio_transcription(
             item=item,
             source=source,
@@ -174,6 +180,7 @@ def generate_item_transcript(
                 item=item, source=source, timeout=_remaining(deadline), deadline=deadline
             )
         except _ArchivedAudioRequiresBatchUpload:
+            deadline = staged_deadline
             raw_transcript = _request_staged_archived_audio_transcription(
                 item=item,
                 source=source,
@@ -190,6 +197,13 @@ def generate_item_transcript(
         raise TranscriptionGenerationError("Transcription response was empty")
     _remaining(deadline)
     return transcript
+
+
+def staging_allowance_seconds(size_bytes: int) -> int:
+    """Seconds a staged upload of ``size_bytes`` may take at the configured minimum rate."""
+    return size_scaled_seconds(
+        size_bytes, settings.ARCHIVE_TRANSCRIPTION_UPLOAD_MIN_BYTES_PER_SECOND
+    )
 
 
 def transcription_job_ref(item: Item) -> str:
@@ -551,6 +565,27 @@ def _stage_archived_audio_upload(
 
     if not 0 < source.size_bytes <= settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES:
         raise TranscriptionGenerationError("Archived audio staging length exceeds archive limit")
+    # The request body is spooled to one temporary file before it is sent; hold
+    # the temporary-space admission until that file is gone.
+    with ExitStack() as admission:
+        try:
+            admission.enter_context(
+                temp_space_admission(
+                    source.size_bytes,
+                    purpose="Archived audio staging",
+                    timeout=_remaining(deadline),
+                )
+            )
+        except MediaArchivalError as exc:
+            raise TranscriptionGenerationError(str(exc)) from None
+        return _send_staged_upload(
+            item=item, source=source, suffix=suffix, timeout=timeout, deadline=deadline
+        )
+
+
+def _send_staged_upload(
+    *, item: Item, source: TranscriptionSource, suffix: str, timeout: float, deadline: float
+) -> str:
     filename = _transcription_source_filename(source=source, default_suffix=suffix)
     content_type = source.content_type.lower() or SUPPORTED_SUFFIXES[suffix]
     boundary = f"archive-{uuid.uuid4().hex}"

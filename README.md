@@ -484,7 +484,14 @@ Important values:
   Voxhelm again about a running batch transcription job
 - `ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS` defaults to `7200`: a batch job that is still
   unfinished (or whose status cannot be read) this long after submission fails the transcript step.
-  This limit must be finite and strictly positive.
+  This limit must be finite and strictly positive. A long recording's job gets at least its archived
+  audio size divided by `ARCHIVE_TRANSCRIPTION_JOB_MIN_BYTES_PER_SECOND`.
+- `ARCHIVE_TRANSCRIPTION_JOB_MIN_BYTES_PER_SECOND` defaults to `16384` (16 KiB/s, roughly a 128 kbit/s
+  recording in real time): the age limit of a batch job grows to `size / rate` seconds, so a 12-hour
+  recording of about 675 MiB may run 12 hours before it is given up
+- `ARCHIVE_TRANSCRIPTION_UPLOAD_MIN_BYTES_PER_SECOND` defaults to `4194304` (4 MiB/s): the pass that
+  stages archived audio for a batch job gets at least `size / rate` seconds instead of only
+  `--transcription-timeout` (16 GiB: 4096 s). Both rates must be positive integers.
 - `ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS` defaults to `600`: a Voxhelm batch transcript whose
   segments leave a longer stretch of audio uncovered is rejected as incomplete; any finite
   nonpositive value disables the check. Both loss-guard settings reject NaN, infinities,
@@ -516,7 +523,13 @@ Important values:
 - `ARCHIVE_ARTICLE_AUDIO_POLL_SECONDS` defaults to `30`
 - `ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS` defaults to `5000` (matching the currently observed Voxhelm `synthesize` input limit)
 - `ARCHIVE_ARTICLE_AUDIO_MAX_BYTES` defaults to `52428800` (50 MiB)
-- `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` defaults to `262144000` (250 MiB); also bounds extracted MP3 output
+- `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` defaults to `17179869184` (16 GiB, the same ceiling as Voxhelm's
+  staged uploads, so long recordings pass end to end); it bounds downloaded audio and video sources,
+  extracted MP3 output and staged transcription uploads
+- `ARCHIVE_MEDIA_TEMP_RESERVE_BYTES` defaults to `2147483648` (2 GiB): media work does not start unless
+  the temporary directory keeps this much free space after its files (see "Long recordings")
+- `ARCHIVE_MEDIA_TEMP_LOCK_PATH` defaults to the database path plus `.media-temp-space.lock`: the lock
+  that admits one media step at a time across this Archive's workers (see "Long recordings")
 - `ARCHIVE_FETCH_PRIVATE_HOSTS` is an optional comma-separated list of hostnames that page,
   summary-source, and media fetches may reach on private or loopback addresses; empty by default
 - `ARCHIVE_MEDIA_EXTRACTION_FFMPEG_BIN` defaults to `ffmpeg`
@@ -677,11 +690,15 @@ just manage rebuild_search_index
 
 Optional worker flags for the Milestone 6 slice:
 
-- `--media-archive-timeout` gives each direct audio/video download one elapsed budget across
-  connection setup, redirects, and streaming; it is also used for video-to-audio extraction work
+- `--media-archive-timeout` (default 3600 s) gives each direct audio/video download one elapsed budget
+  across connection setup, redirects, and streaming; it is also used for video-to-audio extraction work
+- `--transcription-timeout` (default 1800 s) is the budget of one transcription pass; staging a large
+  archived file gets at least its size at `ARCHIVE_TRANSCRIPTION_UPLOAD_MIN_BYTES_PER_SECOND`
 - `--stale-processing-after` controls how old an in-flight `processing` lease must be before the worker
   re-queues it at startup and during normal runtime and also acts as the worker's hard cap for a single in-flight item;
-  by default Archive uses the larger of 1 hour or 2x the combined per-item stage timeouts
+  by default Archive uses the larger of 1 hour or 2x the combined per-item stage timeouts, counting the
+  transcript stage at least as long as staging a file of `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` may take
+  (defaults: 2 × (15 + 60 + 4096 + 3600 + 30) = 15602 s)
 
 Direct media downloads run urllib in a small isolated subprocess, which is killed
 and reaped when its elapsed budget runs out. Trickle responses cannot extend the
@@ -726,7 +743,8 @@ item (`transcript_job_id`, with the job's source fingerprint and submission time
 items. A later pass makes one `GET /v1/jobs/<id>` request: a running job is polled again later, a failed job
 fails the step and forgets the job, and a finished job is checked and stored. A stored job is never uploaded
 again; status requests that fail (HTTP errors, timeouts) keep the job and retry until
-`ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS` (2 hours) after submission, then the step fails. Because the job
+`ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS` (2 hours, longer for long recordings, see
+`ARCHIVE_TRANSCRIPTION_JOB_MIN_BYTES_PER_SECOND`) after submission, then the step fails. Because the job
 lives in the database, a worker restart or deploy picks the polling up again. A job made for an older source
 (the archived audio changed) is not resumed; the current audio is uploaded instead. Summaries generated while
 the job runs are refreshed from the transcript once it arrives. Archive then reads the job's segment JSON and rejects the
@@ -1342,7 +1360,7 @@ existing same-origin checks still apply when fetching them. Invalid envelopes
 fail the attempt before publishing generated content.
 
 Staged transcription uploads require positive saved source size no larger than
-`ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` (default 250 MiB). The owned temporary request
+`ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` (default 16 GiB). The owned temporary request
 body is fully written and its actual source length checked before authenticated
 network I/O starts. A short, replaced or growing source fails without submitting
 an upload/job; reads stop after at most one excess source byte. Read errors close
@@ -1360,7 +1378,8 @@ exchanges run in a disposable transport process with one elapsed timeout coverin
 DNS, connect, same-origin redirects, response reads (including errors), and
 transport teardown. Timeout kills and reaps that process; no timed-out request
 thread remains. Each transcription pass has one monotonic elapsed budget
-(the worker's `--transcription-timeout`, 300 seconds by default) shared across source
+(the worker's `--transcription-timeout`, 1800 seconds by default; a pass that stages archived
+audio gets at least the size-scaled staging allowance) shared across source
 loading, staging, job submission, the job status request, segment coverage evidence and
 final result admission. Submitting and polling a batch job are separate passes, each with
 its own budget; a poll pass that runs out of time keeps the job and polls again later. Remote (non-archived) media sources are fetched in the same disposable
@@ -1369,9 +1388,66 @@ redirects and drip-fed bodies cannot outlast it. Every network step receives onl
 the remaining time; expired attempts
 start no further request and reject late success. Local storage reads check the
 same deadline before and after each read; a blocking storage call itself remains
-subject to the storage backend's own timeout. The separate worker stale-processing
-recovery window is unchanged. A timed-out upstream job may still run remotely;
+subject to the storage backend's own timeout. The worker's default stale-processing
+window counts the transcript stage at least as long as the largest staging allowance
+(see `--stale-processing-after`). A timed-out upstream job may still run remotely;
 Archive does not retry ambiguous submissions within an attempt.
+
+## Long recordings
+
+Long recordings must pass: archival, staging and the batch job are sized for multi-gigabyte media.
+
+- **Limit.** `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` defaults to 16 GiB, matching Voxhelm's
+  `VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES` (Voxhelm adds its own multipart headroom on top). Media
+  over the limit still fails as before.
+- **Time.** Downloads and extraction get `--media-archive-timeout` (3600 s, the same as one Voxhelm
+  batch URL download attempt). A staging pass gets at least `size / ARCHIVE_TRANSCRIPTION_UPLOAD_MIN_BYTES_PER_SECOND`
+  (16 GiB at 4 MiB/s: 4096 s); Voxhelm itself accepts a declared upload at no less than 128 KiB/s
+  and cuts it after 120 s without data. A submitted job may run at least
+  `size / ARCHIVE_TRANSCRIPTION_JOB_MIN_BYTES_PER_SECOND` before Archive gives up on it.
+- **Memory.** Archived media on S3-compatible storage is read with ranged `GetObject` requests
+  (`S3RangeReader`): the public audio route, the sync transcription read and the staged upload
+  stream the bytes they need. An object without an ETag is refused. Every ranged request is
+  pinned to the object's ETag from the opening `HeadObject` (`IfMatch`) and must return the matching `Content-Range`, so a replaced
+  object fails the read instead of being stitched into the stream; the backend's download
+  parameters (for example SSE-C keys) are passed on. django-storages' own `S3File` would copy the whole object into
+  memory on first read (`AWS_S3_MAX_MEMORY_SIZE` is 0 by default), which a multi-gigabyte
+  recording cannot afford. A range request for a public player reads only the requested bytes.
+- **Disk.** Media work refuses to start unless the temporary directory
+  keeps `ARCHIVE_MEDIA_TEMP_RESERVE_BYTES` (2 GiB) free after its files: one limit-sized file for a
+  direct audio download (the downloaded file is uploaded to storage directly), two for video
+  sources (download plus extracted audio) and YouTube pages (download plus MP3 conversion), and the
+  archived size for staging (the request body is spooled once before it is sent). Local
+  filesystem storage on the same volume also counts the copies it stores: the audio for direct
+  audio and YouTube pages, the source and the audio for direct video. With the defaults
+  (16 GiB limit, 2 GiB reserve) a start needs this much free space:
+
+  | Step | Object storage or another volume | Local storage on the temporary volume |
+  |---|---|---|
+  | Direct audio | 18 GiB | 34 GiB |
+  | Direct video | 34 GiB | 66 GiB |
+  | YouTube page | 34 GiB | 50 GiB |
+  | Staging for Voxhelm | archived size + 2 GiB | archived size + 2 GiB |
+
+  One exclusive lock file, `ARCHIVE_MEDIA_TEMP_LOCK_PATH` (default: the database path plus
+  `.media-temp-space.lock`, so a service's private `/tmp` cannot split it and deploys keep it),
+  is held for as long as a step's temporary files exist. Every worker of the same Archive
+  therefore admits one media step at a time and never passes the check for the same capacity
+  twice; a step waits for it up to its own budget and does not start once that budget is spent.
+  Other software filling the same volume is not covered; the reserve is the margin for it.
+  yt-dlp does not enforce its size limit without a `Content-Length`. The download child adds a
+  progress hook that stops the download once the source passes the limit and measures the
+  finished file on disk, and a postprocessor hook measures every file in its output directory
+  before each fixup or conversion starts (downloaders that delegate to FFmpeg do not report
+  progress); either stops it with exit status 3, reported as the archive limit. The parent also watches the temporary directory while the child runs: it is
+  killed once one file exceeds the limit or all files exceed twice the limit, and yt-dlp keeps
+  the original next to its MP3 conversion (`keepvideo`) for the check after the run. A refused archival retries with the usual media-archive backoff; a refused staging fails
+  the transcript step like other transport failures (requeue it with
+  `reprocess_items --only transcript`). Temporary files are removed when a step ends, also on
+  failure.
+- **Segment evidence.** Voxhelm's segment JSON is read under the 8 MiB API response cap. It holds the
+  text twice plus segment times, about 170 KB per hour of speech, so the cap is reached only around
+  45–50 hours of continuous speech.
 
 ## Login protection
 

@@ -45,3 +45,13 @@ def clear_default_cache():
     from django.core.cache import cache
 
     cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def ample_temporary_space(monkeypatch, settings, tmp_path):
+    """Media tests use tiny fixtures; the host's real free disk must not decide them.
+
+    Tests of the temporary-space guard override ``_temp_free_bytes`` themselves.
+    """
+    monkeypatch.setattr("archive.media_archival._temp_free_bytes", lambda: 2**62)
+    settings.ARCHIVE_MEDIA_TEMP_LOCK_PATH = str(tmp_path / "media-temp-space.lock")

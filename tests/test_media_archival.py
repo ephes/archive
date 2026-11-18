@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,6 +40,8 @@ class _FakeHeaders:
 
 
 class _FakeResponse:
+    """File-backed like the real downloader result, which is an open temporary file."""
+
     def __init__(
         self,
         chunks: list[bytes],
@@ -46,7 +49,9 @@ class _FakeResponse:
         content_type: str = "audio/mpeg",
         final_url: str = "https://cdn.example.com/audio.mp3",
     ) -> None:
-        self._chunks = list(chunks)
+        self._file = tempfile.TemporaryFile()
+        self._file.write(b"".join(chunks))
+        self._file.seek(0)
         self.headers = _FakeHeaders(content_type)
         self._final_url = final_url
 
@@ -54,32 +59,22 @@ class _FakeResponse:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        return None
+        self._file.close()
 
     def geturl(self) -> str:
         return self._final_url
 
-    def read(self, _size: int) -> bytes:
-        if not self._chunks:
-            return b""
-        return self._chunks.pop(0)
+    def read(self, size: int = -1) -> bytes:
+        return self._file.read(size)
 
+    def fileno(self) -> int:
+        return self._file.fileno()
 
-class _TrackingSpool:
-    instances: list[_TrackingSpool] = []
+    def seek(self, offset: int, whence: int = 0) -> int:
+        return self._file.seek(offset, whence)
 
-    def __init__(self, *args, **kwargs) -> None:
-        self.closed = False
-        _TrackingSpool.instances.append(self)
-
-    def write(self, _chunk: bytes) -> None:
-        return None
-
-    def seek(self, _position: int) -> None:
-        return None
-
-    def close(self) -> None:
-        self.closed = True
+    def tell(self) -> int:
+        return self._file.tell()
 
 
 class _FakeYoutubeDL:
@@ -216,7 +211,7 @@ def test_can_archive_audio_accepts_explicit_audio_webm_url() -> None:
 
 
 @pytest.mark.django_db
-def test_archive_item_audio_closes_spool_when_download_exceeds_size_limit(
+def test_archive_item_audio_refuses_oversized_download_before_any_storage_write(
     monkeypatch,
     settings,
 ) -> None:
@@ -225,18 +220,16 @@ def test_archive_item_audio_closes_spool_when_download_exceeds_size_limit(
         kind=ItemKind.PODCAST_EPISODE,
     )
     settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES = 6
-    _TrackingSpool.instances.clear()
     monkeypatch.setattr(
         "archive.media_archival._open_direct_media",
         lambda request, timeout: _FakeResponse([b"1234", b"5678"]),
     )
-    monkeypatch.setattr("archive.media_archival.SpooledTemporaryFile", _TrackingSpool)
 
     with pytest.raises(MediaArchivalError, match="archive limit"):
         archive_item_audio(item=item)
 
-    assert len(_TrackingSpool.instances) == 1
-    assert _TrackingSpool.instances[0].closed is True
+    assert not PendingArchiveMediaUpload.objects.exists()
+    assert list(iter_archive_media_object_names()) == []
 
 
 @pytest.mark.django_db
@@ -345,7 +338,7 @@ def fake_ytdlp(monkeypatch):
 
     monkeypatch.setattr(video_page_download, "yt_dlp", SimpleNamespace(YoutubeDL=_FakeYoutubeDL))
 
-    def run(command, *, input_data, timeout):
+    def run(command, *, input_data, timeout, **_limits):
         try:
             video_page_download.download(json.loads(input_data))
         except Exception:

@@ -5,6 +5,7 @@ import signal
 from datetime import timedelta
 from threading import Event
 
+from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
@@ -15,6 +16,7 @@ from archive.services import (
     recover_processing_item,
     recover_stale_processing_items,
 )
+from archive.transcriptions import staging_allowance_seconds
 
 
 class ItemProcessingStalled(BaseException):
@@ -67,14 +69,18 @@ class Command(BaseCommand):
         parser.add_argument(
             "--transcription-timeout",
             type=int,
-            default=300,
-            help="Per-request timeout in seconds for media download and transcription.",
+            default=1800,
+            help=(
+                "Budget in seconds for media download and transcription; staging a large "
+                "archived file gets at least its size at "
+                "ARCHIVE_TRANSCRIPTION_UPLOAD_MIN_BYTES_PER_SECOND."
+            ),
         )
         parser.add_argument(
             "--media-archive-timeout",
             type=int,
-            default=300,
-            help="Per-request timeout in seconds for remote audio archival.",
+            default=3600,
+            help="Budget in seconds for remote audio archival (download and extraction).",
         )
         parser.add_argument(
             "--stale-processing-after",
@@ -83,7 +89,9 @@ class Command(BaseCommand):
             help=(
                 "Age in seconds after which startup and runtime recovery re-queues "
                 "stale processing items. "
-                "Defaults to the larger of 1 hour or twice the combined per-item stage timeouts."
+                "Defaults to the larger of 1 hour or twice the combined per-item stage "
+                "timeouts, counting the transcript stage at least as long as staging a "
+                "file of ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES takes."
             ),
         )
 
@@ -221,10 +229,15 @@ class Command(BaseCommand):
         if explicit is not None:
             return explicit
 
+        # A large staged upload extends the transcript stage past its timeout.
+        transcript_stage = max(
+            options["transcription_timeout"],
+            staging_allowance_seconds(settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES),
+        )
         combined_stage_timeouts = (
             options["timeout"]
             + options["summary_timeout"]
-            + options["transcription_timeout"]
+            + transcript_stage
             + options["media_archive_timeout"]
             + self.DEFAULT_ARTICLE_AUDIO_TIMEOUT
         )

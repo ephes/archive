@@ -37,6 +37,7 @@ from archive.models import EnrichmentStatus, Item, ItemKind, ProcessingStep
 from archive.processing_health import media_archive_step, record_step_outcome
 from archive.summaries import generate_item_summaries
 from archive.transcription_config import (
+    size_scaled_seconds,
     transcription_max_gap_seconds,
     transcription_max_job_age_seconds,
 )
@@ -522,7 +523,9 @@ def _clear_transcript_job(item: Item) -> None:
 
 def _mark_transcript_pending(item: Item, pending: TranscriptionPending, *, expected: dict) -> bool:
     """Store a running batch job and when to poll it; fail it once it is too old."""
-    max_age = transcription_max_job_age_seconds(settings.ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS)
+    configured_max_age = transcription_max_job_age_seconds(
+        settings.ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS
+    )
     using = item._state.db or router.db_for_write(Item, instance=item)
     now = timezone.now()
     job = pending.job
@@ -530,6 +533,15 @@ def _mark_transcript_pending(item: Item, pending: TranscriptionPending, *, expec
         item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
         if not _current_result(item, "transcript", expected):
             return True
+        # A long recording's job may run longer than the fixed age: allow at least
+        # its archived size at the configured minimum processing rate.
+        max_age = max(
+            configured_max_age,
+            size_scaled_seconds(
+                item.archived_audio_size_bytes,
+                settings.ARCHIVE_TRANSCRIPTION_JOB_MIN_BYTES_PER_SECOND,
+            ),
+        )
         if (
             job.job_id != item.transcript_job_id
             or job.job_ref != item.transcript_job_ref

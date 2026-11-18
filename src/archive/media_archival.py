@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import fcntl
+import io
 import json
 import logging
 import mimetypes
+import os
 import shutil
 import subprocess
 import sys
@@ -11,18 +14,22 @@ from dataclasses import dataclass
 from email.message import Message
 from pathlib import Path
 from subprocess import run as run_download
-from tempfile import SpooledTemporaryFile, TemporaryDirectory
-from time import monotonic
+from tempfile import TemporaryDirectory, gettempdir
+from time import monotonic, sleep
+from typing import Any
 from urllib.parse import urlparse
 from urllib.request import Request
 from urllib.response import addinfourl
 from uuid import uuid4
 
+from botocore.exceptions import BotoCoreError, ClientError
 from django.conf import settings
 from django.core.files.base import File
 from django.core.files.storage import storages
 from django.db import transaction
+from storages.backends.s3 import S3Storage, _filter_download_params
 
+from archive.api_responses import safe_api_error
 from archive.classification import (
     _looks_like_supported_video_page_url as _classified_supported_video_page_url,
 )
@@ -63,6 +70,9 @@ VIDEO_CONTENT_TYPE_SUFFIXES = {
 
 
 DIRECT_MEDIA_BUDGET_EXCEEDED = "Media source exceeded the elapsed download budget"
+# archive/video_page_download.py exits with this status when a downloaded source
+# passed max_source_bytes (it runs isolated and cannot share the constant).
+VIDEO_PAGE_SOURCE_LIMIT_EXIT_CODE = 3
 
 
 class MediaArchivalError(RuntimeError):
@@ -104,15 +114,117 @@ def uses_supported_video_page_source(item: Item) -> bool:
 
 
 def archive_item_audio(item: Item, timeout: int = 300) -> ArchivedAudio:
+    limit = settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES
     audio_source_url = _select_audio_archive_source_url(item)
     if audio_source_url is not None:
-        return _archive_direct_audio(item=item, source_url=audio_source_url, timeout=timeout)
+        # One temporary file (uploaded to storage directly) and one stored copy.
+        with temp_space_admission(
+            (1 + _stored_copies_on_temp_volume(1)) * limit,
+            purpose="Audio archival",
+            timeout=timeout,
+        ):
+            return _archive_direct_audio(item=item, source_url=audio_source_url, timeout=timeout)
 
     video_source_url = _select_video_archive_source_url(item)
     if video_source_url is not None:
-        return _archive_video_audio(item=item, source_url=video_source_url, timeout=timeout)
+        # Two temporary files: the downloaded source and the extracted audio (a
+        # YouTube page: the download and its MP3 conversion). A direct video
+        # stores both; a YouTube page stores only the audio.
+        stored = 1 if _looks_like_supported_video_page_url(video_source_url) else 2
+        with temp_space_admission(
+            (2 + _stored_copies_on_temp_volume(stored)) * limit,
+            purpose="Video archival",
+            timeout=timeout,
+        ):
+            return _archive_video_audio(item=item, source_url=video_source_url, timeout=timeout)
 
     raise MediaArchivalError("Item does not have an archivable audio source yet")
+
+
+TEMP_ADMISSION_POLL_SECONDS = 0.5
+
+
+@contextmanager
+def temp_space_admission(required_bytes: int, *, purpose: str, timeout: float):
+    """Hold the host's media temporary-space admission while temporary files exist.
+
+    One exclusive lock (``ARCHIVE_MEDIA_TEMP_LOCK_PATH``, next to the database by
+    default) serializes media work across all workers of this Archive, so two of
+    them cannot both pass the free-space check for the same capacity, even with
+    separate private temporary directories. Waiting for it ends after ``timeout``
+    seconds (the caller's remaining budget).
+    """
+    deadline = monotonic() + timeout
+    lock_path = Path(settings.ARCHIVE_MEDIA_TEMP_LOCK_PATH)
+    try:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise MediaArchivalError(f"{purpose} could not open the temporary-space lock") from exc
+    try:
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if monotonic() >= deadline:
+                    raise MediaArchivalError(
+                        f"{purpose} timed out waiting for other media work to release "
+                        "temporary disk space"
+                    ) from None
+                sleep(min(TEMP_ADMISSION_POLL_SECONDS, max(deadline - monotonic(), 0)))
+        if monotonic() >= deadline:
+            # Acquired only after the budget ran out: do not start late work.
+            raise MediaArchivalError(
+                f"{purpose} timed out waiting for other media work to release temporary disk space"
+            )
+        ensure_temp_space(required_bytes, purpose=purpose)
+        yield
+    finally:
+        # Closing the descriptor releases the lock.
+        os.close(descriptor)
+
+
+def ensure_temp_space(required_bytes: int, *, purpose: str) -> None:
+    """Refuse media work whose temporary files would leave less than the reserve free.
+
+    Multi-gigabyte recordings pass through the temporary directory; filling the
+    host's disk would also break the database and every other service there.
+    """
+    try:
+        free = _temp_free_bytes()
+    except OSError as exc:
+        raise MediaArchivalError(f"{purpose} could not check temporary disk space") from exc
+    needed = max(required_bytes, 0) + settings.ARCHIVE_MEDIA_TEMP_RESERVE_BYTES
+    if free < needed:
+        raise MediaArchivalError(
+            f"{purpose} needs {needed} bytes of free temporary disk space "
+            f"(including the {settings.ARCHIVE_MEDIA_TEMP_RESERVE_BYTES}-byte reserve), "
+            f"but only {free} are free"
+        )
+
+
+def _temp_free_bytes() -> int:
+    return shutil.disk_usage(gettempdir()).free
+
+
+def _stored_copies_on_temp_volume(copies: int) -> int:
+    """Stored copies that land on the temporary directory's volume (local storage only).
+
+    Filesystem storage copies each temporary file into its location while the
+    temporary file still exists; object storage writes elsewhere.
+    """
+    storage = storages[ARCHIVE_MEDIA_STORAGE_ALIAS]
+    location = getattr(storage, "location", None)
+    if isinstance(storage, S3Storage) or not isinstance(location, str):
+        return 0
+    probe = Path(location)
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    try:
+        same_volume = probe.stat().st_dev == Path(gettempdir()).stat().st_dev
+    except OSError:
+        same_volume = True
+    return copies if same_volume else 0
 
 
 def open_archived_audio(item: Item):
@@ -207,32 +319,22 @@ def _archive_direct_audio(item: Item, source_url: str, timeout: int) -> Archived
                 )
 
             normalized_content_type = content_type or _content_type_for_audio_suffix(suffix)
-            total_bytes = 0
-            spool = SpooledTemporaryFile(max_size=5 * CHUNK_SIZE)
-            try:
-                while True:
-                    chunk = response.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    total_bytes += len(chunk)
-                    if total_bytes > settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES:
-                        raise MediaArchivalError(
-                            "Audio source exceeded the configured "
-                            f"{settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES}-byte archive limit"
-                        )
-                    spool.write(chunk)
-
-                spool.seek(0)
-                object_name = f"items/{item.pk}/audio/source{suffix}"
-                saved_name = save_reserved_media_file(
-                    target_name=object_name,
-                    upload_name=f"source{suffix}",
-                    file_handle=spool,
-                    using=_item_database(item),
-                    owner=item,
+            # The downloader child already stopped at the byte limit; upload its
+            # file as it is instead of copying it to a second temporary file.
+            total_bytes = os.fstat(response.fileno()).st_size
+            if total_bytes > settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES:
+                raise MediaArchivalError(
+                    "Audio source exceeded the configured "
+                    f"{settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES}-byte archive limit"
                 )
-            finally:
-                spool.close()
+            object_name = f"items/{item.pk}/audio/source{suffix}"
+            saved_name = save_reserved_media_file(
+                target_name=object_name,
+                upload_name=f"source{suffix}",
+                file_handle=_BoundedFile(response, total_bytes),
+                using=_item_database(item),
+                owner=item,
+            )
     except OSError as exc:
         raise MediaArchivalError(f"Audio archival download failed: {exc}") from exc
 
@@ -411,6 +513,9 @@ def _download_supported_video_page_audio_source(
         "max_filesize": settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES,
         "noplaylist": True,
         "nopart": True,
+        # Keep the downloaded original next to its MP3 conversion, so the size
+        # check after the run also sees a source that was briefly over the limit.
+        "keepvideo": True,
         "no_warnings": True,
         "outtmpl": output_template,
         "postprocessors": [
@@ -437,9 +542,27 @@ def _download_supported_video_page_audio_source(
         run_media_command(
             _video_page_download_command(),
             timeout=timeout,
-            input_data=json.dumps({"url": source_url, "options": options}).encode("utf-8"),
+            input_data=json.dumps(
+                {
+                    "url": source_url,
+                    "options": options,
+                    # Checked on disk before any yt-dlp fixup or conversion runs.
+                    "max_source_bytes": settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES,
+                }
+            ).encode("utf-8"),
+            # yt-dlp does not enforce max_filesize without a Content-Length: each
+            # file (the source before conversion too) must stay within the limit,
+            # and the download plus its MP3 conversion within the reserved space.
+            output_dir=temp_dir,
+            max_output_dir_bytes=2 * settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES,
+            max_output_dir_file_bytes=settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES,
         )
     except MediaProcessError as exc:
+        if str(exc) == "output limit" or exc.returncode == VIDEO_PAGE_SOURCE_LIMIT_EXIT_CODE:
+            raise MediaArchivalError(
+                "Video source exceeded the configured "
+                f"{settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES}-byte archive limit"
+            ) from None
         raise MediaArchivalError(f"Video page download {exc}") from None
 
     source_path = _find_downloaded_audio_path(temp_dir)
@@ -477,6 +600,10 @@ def _youtube_dl_ffmpeg_location(ffmpeg_bin: str) -> str:
 
 
 def _find_downloaded_audio_path(temp_dir: Path) -> Path | None:
+    # yt-dlp keeps the original (keepvideo); the MP3 conversion is the result.
+    converted = temp_dir / f"source{DEFAULT_EXTRACTED_AUDIO_SUFFIX}"
+    if converted.is_file() and not converted.is_symlink():
+        return converted
     candidates = sorted(
         path
         for path in temp_dir.iterdir()
@@ -611,10 +738,153 @@ def _open_archived_file(path: str, *, label: str):
     normalized_path = path.strip()
     if not normalized_path:
         raise MediaArchivalError(f"Item does not have archived {label}")
+    storage = storages[ARCHIVE_MEDIA_STORAGE_ALIAS]
     try:
-        return storages[ARCHIVE_MEDIA_STORAGE_ALIAS].open(normalized_path, mode="rb")
+        opened = storage.open(normalized_path, mode="rb")
+        if isinstance(storage, S3Storage):
+            # django-storages would copy the whole object into memory on first
+            # read; stream it with ranged GETs instead.
+            return S3RangeReader(
+                opened.obj,
+                extra_args=_filter_download_params(storage.get_object_parameters(opened.name)),
+            )
+        return opened
     except OSError as exc:
         raise MediaArchivalError(f"Archived {label} open failed: {exc}") from exc
+    except (BotoCoreError, ClientError) as exc:
+        raise MediaArchivalError(f"Archived {label} open failed: {safe_api_error(exc)}") from None
+
+
+class S3RangeReader(io.RawIOBase):
+    """Seekable, read-only view of an S3 object that never buffers the whole object.
+
+    Each read continues one open ``GetObject`` stream from the current position;
+    a seek elsewhere closes it and the next read starts a new ranged request.
+    ``size`` is the object length from the ``HeadObject`` made when it was opened.
+    Every ranged request is pinned to that object's ETag (``IfMatch``) and its
+    ``Content-Range`` must name the same total length, so a replaced object can
+    never be stitched into the stream.
+    """
+
+    def __init__(self, s3_object, *, extra_args: dict[str, object] | None = None) -> None:
+        super().__init__()
+        self._body: Any = None
+        self._position = 0
+        self._object = s3_object
+        self.size = int(s3_object.content_length)
+        self._etag = s3_object.e_tag
+        if not self._etag:
+            # Without a validator a same-length replacement could be stitched in.
+            raise OSError("Archived media object has no ETag")
+        self._extra_args = dict(extra_args or {})
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        self._checkClosed()
+        return self._position
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        self._checkClosed()
+        if whence == io.SEEK_SET:
+            position = offset
+        elif whence == io.SEEK_CUR:
+            position = self._position + offset
+        elif whence == io.SEEK_END:
+            position = self.size + offset
+        else:
+            raise ValueError(f"invalid whence ({whence})")
+        if position < 0:
+            raise OSError("Negative seek position")
+        if position != self._position:
+            self._close_body()
+            self._position = position
+        return self._position
+
+    def readinto(self, buffer) -> int:
+        self._checkClosed()
+        wanted = min(len(buffer), self.size - self._position)
+        if wanted <= 0:
+            return 0
+        try:
+            body = self._body
+            if body is None:
+                body = self._body = self._open_range()
+            data = body.read(wanted)
+        except (BotoCoreError, ClientError) as exc:
+            self._close_body()
+            raise OSError(f"Archived media read failed: {safe_api_error(exc)}") from None
+        if not data:
+            self._close_body()
+            raise OSError("Archived media ended before its recorded length")
+        count = len(data)
+        buffer[:count] = data
+        self._position += count
+        return count
+
+    def close(self) -> None:
+        if not self.closed:
+            self._close_body()
+        super().close()
+
+    def _open_range(self):
+        kwargs: dict[str, object] = {
+            **self._extra_args,
+            "Range": f"bytes={self._position}-",
+            "IfMatch": self._etag,
+        }
+        response = self._object.get(**kwargs)
+        body = response["Body"]
+        expected = f"bytes {self._position}-{self.size - 1}/{self.size}"
+        if response.get("ContentRange") != expected:
+            try:
+                body.close()
+            except Exception:  # noqa: BLE001 - the mismatch is the error to report
+                pass
+            raise OSError("Archived media changed while it was read")
+        return body
+
+    def _close_body(self) -> None:
+        body, self._body = self._body, None
+        if body is not None:
+            try:
+                body.close()
+            except Exception:  # noqa: BLE001 - closing a dropped stream must not mask the caller
+                logger.warning("Closing an archived media stream failed")
+
+
+class _BoundedFile(io.RawIOBase):
+    """Read exactly ``size`` bytes of an open local file for a storage upload."""
+
+    def __init__(self, file_handle, size: int) -> None:
+        super().__init__()
+        self._file = file_handle
+        self.size = size
+        self._file.seek(0)
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._file.tell()
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        return self._file.seek(offset, whence)
+
+    def readinto(self, buffer) -> int:
+        remaining = self.size - self._file.tell()
+        if remaining <= 0:
+            return 0
+        data = self._file.read(min(len(buffer), remaining))
+        buffer[: len(data)] = data
+        return len(data)
 
 
 def _select_audio_archive_source_url(item: Item) -> str | None:

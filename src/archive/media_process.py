@@ -21,6 +21,9 @@ MAX_DIAGNOSTIC_BYTES = 1024 * 1024
 class MediaProcessError(RuntimeError):
     """Fixed categories suitable for persisted media failures."""
 
+    # The command's own exit status for a "failed" error, when it exited.
+    returncode: int | None = None
+
 
 def run_media_command(
     command: list[str],
@@ -29,7 +32,18 @@ def run_media_command(
     input_data: bytes = b"",
     output_path: Path | None = None,
     max_output_bytes: int | None = None,
+    output_dir: Path | None = None,
+    max_output_dir_bytes: int | None = None,
+    max_output_dir_file_bytes: int | None = None,
 ) -> None:
+    """Run a disposable media command under one deadline and diagnostic budget.
+
+    ``output_path``/``max_output_bytes`` bound one output file; ``output_dir`` and
+    ``max_output_dir_bytes`` bound the total size of the regular files directly in
+    a directory (a downloader that ignores its own size limit), and
+    ``max_output_dir_file_bytes`` each of those files. All are polled
+    while the command runs and checked once more after it exits.
+    """
     deadline = monotonic() + timeout
     if timeout <= 0:
         raise MediaProcessError("timed out")
@@ -43,6 +57,9 @@ def run_media_command(
             deadline=deadline,
             output_path=output_path,
             max_output_bytes=max_output_bytes,
+            output_dir=output_dir,
+            max_output_dir_bytes=max_output_dir_bytes,
+            max_output_dir_file_bytes=max_output_dir_file_bytes,
         )
         if monotonic() >= deadline:
             raise MediaProcessError("timed out")
@@ -55,6 +72,9 @@ def _run_media_command(
     deadline: float,
     output_path: Path | None,
     max_output_bytes: int | None,
+    output_dir: Path | None = None,
+    max_output_dir_bytes: int | None = None,
+    max_output_dir_file_bytes: int | None = None,
 ) -> float:
     process = subprocess.Popen(
         command,
@@ -87,7 +107,7 @@ def _run_media_command(
                         raise MediaProcessError("process cleanup failed") from None
                     retired = True
                     if process.returncode:
-                        raise MediaProcessError("failed")
+                        raise _failed(process.returncode)
                     # The fixed TERM grace and bounded reap are cleanup, not
                     # command runtime: a success near the deadline stays a success.
                     deadline += monotonic() - retirement_started
@@ -95,6 +115,7 @@ def _run_media_command(
                 if remaining <= 0:
                     raise MediaProcessError("timed out")
                 _check_output_size(output_path, max_output_bytes)
+                _check_output_dir_size(output_dir, max_output_dir_bytes, max_output_dir_file_bytes)
                 for key, _ in selector.select(min(remaining, 0.02)):
                     chunk = os.read(key.fd, 64 * 1024)
                     if not chunk:
@@ -105,8 +126,9 @@ def _run_media_command(
                         raise MediaProcessError("exceeded the diagnostic limit")
                     selector.modify(key.fileobj, selectors.EVENT_READ, total)
             _check_output_size(output_path, max_output_bytes)
+            _check_output_dir_size(output_dir, max_output_dir_bytes, max_output_dir_file_bytes)
             if process.returncode:
-                raise MediaProcessError("failed")
+                raise _failed(process.returncode)
             return deadline
     except BaseException as exc:
         primary_error = exc
@@ -219,6 +241,36 @@ def _signal_owned_group(pgid: int, sig: int) -> None:
         # Linux signals zombie-only groups successfully, so EPERM stays an error.
         if sys.platform != "darwin":
             raise
+
+
+def _failed(returncode: int) -> MediaProcessError:
+    error = MediaProcessError("failed")
+    # Commands with their own exit statuses (the yt-dlp child) are told apart by it.
+    error.returncode = returncode
+    return error
+
+
+def _check_output_dir_size(
+    directory: Path | None, limit: int | None, file_limit: int | None = None
+) -> None:
+    if directory is None or (limit is None and file_limit is None):
+        return
+    total = 0
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        size = entry.stat(follow_symlinks=False).st_size
+                        if file_limit is not None and size > file_limit:
+                            raise MediaProcessError("output limit")
+                        total += size
+                except FileNotFoundError:
+                    continue  # renamed or removed by the command meanwhile
+    except FileNotFoundError:
+        return
+    if limit is not None and total > limit:
+        raise MediaProcessError("output limit")
 
 
 def _check_output_size(path: Path | None, limit: int | None) -> None:

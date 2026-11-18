@@ -24,3 +24,24 @@ def transcription_max_gap_seconds(value: object) -> float:
 
 def transcription_max_job_age_seconds(value: object) -> float:
     return _finite_seconds(value, name="ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS", positive=True)
+
+
+def transcription_min_bytes_per_second(value: object, *, name: str) -> int:
+    """A positive integer rate; a non-positive or malformed rate is a configuration error."""
+    message = f"{name} must be a positive integer number of bytes per second."
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ImproperlyConfigured(message)
+    try:
+        rate = int(value)
+    except ValueError:
+        raise ImproperlyConfigured(message) from None
+    if rate <= 0:
+        raise ImproperlyConfigured(message)
+    return rate
+
+
+def size_scaled_seconds(size_bytes: int, bytes_per_second: int) -> int:
+    """Seconds needed to move ``size_bytes`` at the given minimum rate, rounded up."""
+    if size_bytes <= 0:
+        return 0
+    return -(-size_bytes // bytes_per_second)

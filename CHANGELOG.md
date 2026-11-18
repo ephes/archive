@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Let long recordings pass. `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` now defaults to 16 GiB
+  (was 250 MiB), the same ceiling as Voxhelm's staged uploads. Archived media on S3
+  storage is streamed with ranged `GetObject` requests instead of django-storages
+  copying the whole object into memory on first read; this also stops every public
+  audio request (including `HEAD` and small ranges) from loading the full recording.
+  The pass that stages archived audio gets at least its size at
+  `ARCHIVE_TRANSCRIPTION_UPLOAD_MIN_BYTES_PER_SECOND` (4 MiB/s), and a batch job may
+  run at least its size at `ARCHIVE_TRANSCRIPTION_JOB_MIN_BYTES_PER_SECOND` (16 KiB/s)
+  before the 2-hour `ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS` gives up on it. The
+  worker's `--media-archive-timeout` default rises from 300 to 3600 s and
+  `--transcription-timeout` from 300 to 1800 s; the default stale-processing window
+  counts the largest staging allowance. Media work refuses to start unless the
+  temporary directory keeps `ARCHIVE_MEDIA_TEMP_RESERVE_BYTES` (2 GiB) free after its
+  files, under one lock shared by all workers of the Archive and held while those files
+  exist (`ARCHIVE_MEDIA_TEMP_LOCK_PATH`, next to the database by default). yt-dlp
+  downloads stop once the downloaded source passes the limit, checked on disk before
+  any fixup or conversion (yt-dlp ignores its own limit without a `Content-Length`),
+  and a direct audio download is uploaded from its downloaded file instead of a second
+  temporary copy. See "Long recordings" in the README.
+
 - Send a Content-Security-Policy on every response (`default-src 'self'`, no inline
   code; `media-src` also allows `https:` for items that play their original audio URL).
   The inline CSS and JS of `base.html` moved to the static files `archive/base.css` and

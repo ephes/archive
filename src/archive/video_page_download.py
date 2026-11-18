@@ -15,6 +15,13 @@ import yt_dlp.postprocessor.ffmpeg as ytdlp_ffmpeg
 # Same per-stream budget as archive.media_process.MAX_DIAGNOSTIC_BYTES. This
 # script runs isolated (python -I) and imports nothing from the application.
 MAX_DIAGNOSTIC_BYTES = 1024 * 1024
+# Exit status for a downloaded source over ``max_source_bytes``; the parent
+# (archive.media_archival) reports it as the archive limit.
+SOURCE_LIMIT_EXIT_CODE = 3
+
+
+class SourceLimitError(RuntimeError):
+    """A downloaded source file grew past its byte limit."""
 
 
 class DiagnosticLimitError(RuntimeError):
@@ -102,19 +109,70 @@ def bounded_ffmpeg_output() -> Iterator[None]:
         ytdlp_ffmpeg.Popen = original
 
 
-def download(request) -> None:
-    with bounded_ffmpeg_output(), yt_dlp.YoutubeDL(request["options"]) as downloader:
+def source_limit_hook(limit: int, exceeded: list[bool]):
+    """A progress hook that stops a download once its file passes ``limit`` bytes.
+
+    yt-dlp ignores ``max_filesize`` without a ``Content-Length`` and may rewrite
+    the downloaded file in its fixups before any conversion. A ``finished`` event
+    comes before every postprocessor, so the original is measured here, on disk.
+    """
+
+    def hook(status) -> None:
+        size = status.get("downloaded_bytes")
+        if status.get("status") == "finished":
+            filename = status.get("filename")
+            size = os.lstat(filename).st_size if isinstance(filename, str) else None
+        if isinstance(size, int) and size > limit:
+            exceeded.append(True)
+            raise SourceLimitError("Downloaded source exceeded its byte limit")
+
+    return hook
+
+
+def output_limit_postprocessor_hook(directory: str, limit: int, exceeded: list[bool]):
+    """A postprocessor hook that measures every output file before each postprocessor.
+
+    Some downloaders (FFmpeg-delegated HLS, for example) do not forward progress
+    hooks, and fixups may replace the downloaded file. Each postprocessor reports
+    ``started`` before it touches a file, so an oversized source is refused there.
+    """
+
+    def hook(status) -> None:
+        if status.get("status") != "started":
+            return
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.is_file(follow_symlinks=False):
+                    if entry.stat(follow_symlinks=False).st_size > limit:
+                        exceeded.append(True)
+                        raise SourceLimitError("Downloaded source exceeded its byte limit")
+
+    return hook
+
+
+def download(request, exceeded: list[bool] | None = None) -> None:
+    options = dict(request["options"])
+    limit = request.get("max_source_bytes")
+    if limit is not None:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("max_source_bytes must be a positive integer")
+        flag = exceeded if exceeded is not None else []
+        directory = os.path.dirname(os.path.abspath(str(options["outtmpl"])))
+        options["progress_hooks"] = [source_limit_hook(limit, flag)]
+        options["postprocessor_hooks"] = [output_limit_postprocessor_hook(directory, limit, flag)]
+    with bounded_ffmpeg_output(), yt_dlp.YoutubeDL(options) as downloader:
         downloader.extract_info(request["url"], download=True)
 
 
 def main() -> int:
+    exceeded: list[bool] = []
     try:
-        download(json.load(sys.stdin))
+        download(json.load(sys.stdin), exceeded)
     except Exception:
         # Do not emit an additional raw exception or traceback; the parent
         # discards and bounds any diagnostics produced by yt-dlp itself.
-        return 1
-    return 0
+        return SOURCE_LIMIT_EXIT_CODE if exceeded else 1
+    return SOURCE_LIMIT_EXIT_CODE if exceeded else 0
 
 
 if __name__ == "__main__":

@@ -64,6 +64,8 @@
         </audio>
         {% if item.has_stable_audio_enclosure %}
             <p><a href="{{ item.stable_audio_enclosure_url }}">Open local audio enclosure</a></p>
+        {% elif not item.has_generated_article_audio %}
+            <p><a href="{{ item.audio_url }}" rel="noopener noreferrer">Open original audio</a></p>
         {% endif %}
     {% endif %}
 

@@ -5,7 +5,10 @@
 - Send a Content-Security-Policy on every response (`default-src 'self'`, no inline
   code; `media-src` also allows `https:` for items that play their original audio URL).
   The inline CSS and JS of `base.html` moved to the static files `archive/base.css` and
-  `archive/base.js`.
+  `archive/base.js`. The policy also covers redirects and, in production, the static files WhiteNoise serves
+  (the `runserver` static handler in local development does not add it). Item pages that
+  play an external audio URL show a visible "Open original audio" link, in case the
+  browser cannot play it inline.
 
 - Bound the FFmpeg/ffprobe output that yt-dlp captures itself during video-page
   downloads (audio conversion and fixups). Each stream now has its own 1 MiB budget

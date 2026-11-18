@@ -1,4 +1,5 @@
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -10,9 +11,37 @@ from archive.models import Item
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "src" / "archive" / "templates"
 
-INLINE_SCRIPT = re.compile(rb"<script(?![^>]*\bsrc=)[^>]*>", re.IGNORECASE)
-INLINE_STYLE = re.compile(rb"<style\b|\sstyle=", re.IGNORECASE)
-INLINE_HANDLER = re.compile(rb"\son[a-z]+\s*=", re.IGNORECASE)
+INLINE_STYLE_ELEMENT = re.compile(rb"<style\b", re.IGNORECASE)
+
+
+class InlineCodeFinder(HTMLParser):
+    """Collects inline scripts, style elements/attributes and on* handlers."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.problems: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        names = {name.lower() for name, _ in attrs}
+        if tag == "script" and "src" not in names:
+            # Browsers use the first occurrence of a duplicated attribute.
+            script_type = next((value or "" for name, value in attrs if name == "type"), "")
+            if script_type.lower() not in {"application/json", "application/ld+json"}:
+                self.problems.append(f"inline <script> ({self.getpos()})")
+        if tag == "style":
+            self.problems.append(f"<style> element ({self.getpos()})")
+        if "style" in names:
+            self.problems.append(f"style attribute on <{tag}> ({self.getpos()})")
+        for name in names:
+            if name.startswith("on"):
+                self.problems.append(f"{name} handler on <{tag}> ({self.getpos()})")
+
+
+def inline_code(content: bytes) -> list[str]:
+    finder = InlineCodeFinder()
+    finder.feed(content.decode())
+    finder.close()
+    return finder.problems
 
 
 def csp_directives(response) -> dict[str, list[str]]:
@@ -46,9 +75,8 @@ def assert_strict_policy(response) -> None:
 
 
 def assert_no_inline_code(content: bytes) -> None:
-    assert INLINE_SCRIPT.search(content) is None
-    assert INLINE_STYLE.search(content) is None
-    assert INLINE_HANDLER.search(content) is None
+    assert inline_code(content) == []
+    assert INLINE_STYLE_ELEMENT.search(content) is None
 
 
 @pytest.mark.django_db
@@ -111,7 +139,7 @@ def test_admin_pages_send_policy(client) -> None:
         response = client.get(url)
         assert response.status_code == 200, url
         assert_strict_policy(response)
-        assert INLINE_HANDLER.search(response.content) is None
+        assert [p for p in inline_code(response.content) if "handler" in p] == []
 
 
 @pytest.mark.django_db
@@ -129,3 +157,45 @@ def test_item_form_sends_policy_without_inline_code(client) -> None:
 def test_templates_contain_no_inline_code() -> None:
     for template in TEMPLATES_DIR.rglob("*.html"):
         assert_no_inline_code(template.read_bytes())
+
+
+def test_inline_code_guard_catches_evasive_forms() -> None:
+    assert inline_code(b'<p style = "color: red">x</p>')
+    assert inline_code(b'<script data-src="/x.js">alert(1)</script>')
+    assert inline_code(b'<button ONCLICK="x()">x</button>')
+    assert inline_code(b'<script type="text/javascript" type="application/json">x()</script>')
+    assert inline_code(b'<script type="application/json">{}</script>') == []
+    assert inline_code(b'<script src="/static/x.js" defer></script>') == []
+
+
+def test_policy_middleware_wraps_static_files_and_redirects() -> None:
+    from config.settings import base
+
+    middleware = base.MIDDLEWARE
+    csp = middleware.index("django.middleware.csp.ContentSecurityPolicyMiddleware")
+    assert csp < middleware.index("whitenoise.middleware.WhiteNoiseMiddleware")
+    assert csp < middleware.index("django.middleware.common.CommonMiddleware")
+
+
+@pytest.mark.django_db
+def test_slash_redirect_carries_policy(client) -> None:
+    response = client.get("/accounts/login")
+
+    assert response.status_code == 301
+    assert_strict_policy(response)
+
+
+@pytest.mark.django_db
+def test_external_audio_has_visible_link(client) -> None:
+    item = Item.objects.create(
+        original_url="https://example.com/episode",
+        title="External episode",
+        audio_url="http://127.0.0.1:9000/episode.mp3",
+    )
+
+    response = client.get(reverse("archive:item-detail", kwargs={"pk": item.pk}))
+
+    content = response.content.decode()
+    player_end = content.index("</audio>")
+    assert 'href="http://127.0.0.1:9000/episode.mp3"' in content[player_end:]
+    assert "Open original audio" in content[player_end:]

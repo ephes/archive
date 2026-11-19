@@ -848,14 +848,16 @@ class S3RangeReader(io.RawIOBase):
             if body is None:
                 body = self._body = self._open_range()
             data = body.read(wanted)
+            if not data:
+                raise OSError("Archived media ended before its recorded length")
+            count = len(data)
+            buffer[:count] = data
         except (BotoCoreError, ClientError) as exc:
             self._close_body()
             raise OSError(f"Archived media read failed: {safe_api_error(exc)}") from None
-        if not data:
+        except BaseException:
             self._close_body()
-            raise OSError("Archived media ended before its recorded length")
-        count = len(data)
-        buffer[:count] = data
+            raise
         self._position += count
         return count
 

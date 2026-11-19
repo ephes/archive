@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Close S3 range streams after read failures so a retry starts at the last delivered offset.
+
 - Keep an existing account's contact address when `ensure_admin_user` omits `--email`.
   An explicit empty address clears it.
 

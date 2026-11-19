@@ -185,6 +185,31 @@ def test_s3_range_reader_seek_opens_a_new_range_and_never_reads_past_the_end():
         reader.seek(-1)
 
 
+@pytest.mark.parametrize("error", [OSError, RuntimeError])
+def test_s3_range_reader_discards_a_body_that_advances_before_raising(monkeypatch, error):
+    obj = _FakeS3Object(PAYLOAD)
+    with S3RangeReader(obj) as reader:
+        assert reader.read(7) == PAYLOAD[:7]
+        body = obj.bodies[0]
+        original_read = body.read
+        failure = error("read interrupted")
+
+        def advance_then_fail(wanted):
+            original_read(wanted)
+            raise failure
+
+        monkeypatch.setattr(body, "read", advance_then_fail)
+        with pytest.raises(error) as caught:
+            reader.read(3)
+
+        assert caught.value is failure
+        assert body.delivered == 10
+        assert body.closed
+        assert reader.tell() == 7
+        assert reader.read(3) == PAYLOAD[7:10]
+        assert obj.ranges == ["bytes=0-", "bytes=7-"]
+
+
 def test_s3_range_reader_reports_a_short_object_and_safe_backend_errors():
     class ShortObject(_FakeS3Object):
         def get(self, **kwargs):

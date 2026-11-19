@@ -32,6 +32,46 @@ def test_replay_rejects_blank_explicit_host_before_inventory(selectors, django_a
     assert list(Item.objects.values_list("classification_engine_version", flat=True)) == [0, 0]
 
 
+@pytest.mark.parametrize(
+    ("selector", "urls"),
+    [
+        (
+            " ExAMPLE.test ",
+            (
+                "https://example.test/story",
+                "https://EXAMPLE.test:8443/story",
+                "https://adjacent.example.test/story",
+            ),
+        ),
+        (
+            "[2001:0DB8::1]",
+            (
+                "https://[2001:db8::1]/story",
+                "https://[2001:db8:0:0::1]:8443/story",
+                "https://[2001:db8::2]/story",
+            ),
+        ),
+    ],
+)
+def test_replay_host_matches_hostname_across_ports(selector, urls):
+    first, second, adjacent = Item.objects.bulk_create(
+        [Item(original_url=url, classification_engine_version=0) for url in urls]
+    )
+    call_command("reclassify_items", "--host", selector, "--apply", stdout=StringIO())
+    changed_ids = set(
+        Item.objects.exclude(classification_engine_version=0).values_list("pk", flat=True)
+    )
+    assert changed_ids == {first.pk, second.pk}
+    assert adjacent.pk not in changed_ids
+
+
+@pytest.mark.parametrize("selector", ["example.test:8443", "[2001:db8::1]:8443", "2001:db8::1"])
+def test_replay_rejects_host_with_port_or_unbracketed_ipv6(selector, django_assert_num_queries):
+    with django_assert_num_queries(0):
+        with pytest.raises(CommandError, match="--host requires a hostname without a port"):
+            call_command("reclassify_items", "--host", selector, "--apply", stdout=StringIO())
+
+
 def test_replay_uses_edits_and_completed_work_after_selection(monkeypatch):
     item = Item.objects.create(original_url="https://example.com/story", kind=ItemKind.LINK)
     select = reclassify_items.Command._matching_items

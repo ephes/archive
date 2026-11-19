@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from contextlib import nullcontext
+from ipaddress import IPv6Address
 from typing import Any
 from urllib.parse import urlparse
 
@@ -39,6 +40,20 @@ def diagnostic_origin(url: str) -> str:
         return "[URL omitted]"
 
 
+def normalize_host_selector(value: str) -> str:
+    host = value.strip()
+    if not host:
+        raise CommandError("--host must not be blank.")
+    if re.fullmatch(r"[\w.-]+", host):
+        return host.lower()
+    if re.fullmatch(r"\[[\w.:%-]+\]", host):
+        try:
+            return IPv6Address(host[1:-1]).compressed
+        except ValueError:
+            pass
+    raise CommandError("--host requires a hostname without a port (bracket IPv6 addresses).")
+
+
 class Command(BaseCommand):
     help = (
         "Replay classification and media-resolution decisions for existing items. "
@@ -58,7 +73,7 @@ class Command(BaseCommand):
             "--host",
             action="append",
             default=[],
-            help="Only include items whose original URL host exactly matches this value.",
+            help="Match an original URL hostname across ports. Bracket IPv6 addresses.",
         )
         parser.add_argument(
             "--rule",
@@ -114,10 +129,7 @@ class Command(BaseCommand):
         if options["limit"] is not None and options["limit"] <= 0:
             raise CommandError("--limit must be strictly positive.")
 
-        hosts = {host.strip().lower() for host in options["host"]}
-        if "" in hosts:
-            raise CommandError("--host must not be blank.")
-        options["host"] = hosts
+        options["host"] = {normalize_host_selector(host) for host in options["host"]}
 
         selectors_used = any(
             (
@@ -234,7 +246,9 @@ class Command(BaseCommand):
         if not allowed_hosts:
             return True
         try:
-            host = urlparse(original_url).netloc.lower()
+            host = urlparse(original_url).hostname
+            if host and ":" in host:
+                host = IPv6Address(host).compressed
         except ValueError:
             raise CommandError(f"Cannot select item {item_id}: invalid URL.") from None
         return host in allowed_hosts

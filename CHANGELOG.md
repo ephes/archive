@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Match reclassification hostnames across ports. Use brackets for IPv6 selectors and omit
+  ports from all host selectors.
+
 - Reject blank explicit `reclassify_items --host` selectors before inventory or writes.
 
 - Check trailing batch transcript coverage when Voxhelm supplies measured audio duration.

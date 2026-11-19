@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -428,25 +429,42 @@ def _archive_supported_video_page_audio(
     try:
         with TemporaryDirectory(prefix="archive-media-") as temp_dir:
             temp_dir_path = Path(temp_dir)
-            source_path, content_type, size_bytes = _download_supported_video_page_audio_source(
+            source_path, content_type, admitted = _download_supported_video_page_audio_source(
                 source_url=source_url,
                 temp_dir=temp_dir_path,
                 timeout=_remaining_archive_time(deadline),
             )
             object_name = f"items/{item.pk}/audio/source{source_path.suffix}"
-            saved_name = _save_storage_path(
-                target_name=object_name,
-                file_path=source_path,
-                using=_item_database(item),
-                owner=item,
-            )
+            try:
+                source_file = open(
+                    source_path,
+                    "rb",
+                    opener=lambda path, flags: os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK),
+                )
+            except OSError:
+                raise MediaArchivalError("Video page download output could not be opened") from None
+            with source_file:
+                opened = os.fstat(source_file.fileno())
+                if (
+                    not _is_regular_downloaded_output(opened)
+                    or not os.path.samestat(admitted, opened)
+                    or opened.st_size != admitted.st_size
+                ):
+                    raise MediaArchivalError("Video page download output changed before storage")
+                saved_name = save_reserved_media_file(
+                    target_name=object_name,
+                    upload_name=source_path.name,
+                    file_handle=_BoundedFile(source_file, admitted.st_size),
+                    using=_item_database(item),
+                    owner=item,
+                )
     except OSError as exc:
         raise MediaArchivalError(f"Video archival failed: {exc}") from exc
 
     return ArchivedAudio(
         object_name=saved_name,
         content_type=content_type,
-        size_bytes=size_bytes,
+        size_bytes=admitted.st_size,
     )
 
 
@@ -511,7 +529,7 @@ def _download_supported_video_page_audio_source(
     source_url: str,
     temp_dir: Path,
     timeout: float,
-) -> tuple[Path, str, int]:
+) -> tuple[Path, str, os.stat_result]:
     output_template = str(temp_dir / "source.%(ext)s")
     options = {
         "ffmpeg_location": _youtube_dl_ffmpeg_location(
@@ -573,11 +591,12 @@ def _download_supported_video_page_audio_source(
             ) from None
         raise MediaArchivalError(f"Video page download {exc}") from None
 
-    source_path = _find_downloaded_audio_path(temp_dir)
-    if source_path is None:
+    output = _find_downloaded_audio(temp_dir)
+    if output is None:
         raise MediaArchivalError("Video page download did not produce a supported audio file")
 
-    size_bytes = source_path.stat().st_size
+    source_path, admitted = output
+    size_bytes = admitted.st_size
     if size_bytes <= 0:
         raise MediaArchivalError("Video page download produced an empty audio file")
     if size_bytes >= settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES:
@@ -589,7 +608,7 @@ def _download_supported_video_page_audio_source(
     suffix = _detect_audio_suffix(url=str(source_path), content_type="")
     if not suffix:
         raise MediaArchivalError("Video page download produced an unsupported audio file")
-    return source_path, _content_type_for_audio_suffix(suffix), size_bytes
+    return source_path, _content_type_for_audio_suffix(suffix), admitted
 
 
 def _video_page_download_command() -> list[str]:
@@ -607,19 +626,25 @@ def _youtube_dl_ffmpeg_location(ffmpeg_bin: str) -> str:
     return ffmpeg_bin
 
 
-def _find_downloaded_audio_path(temp_dir: Path) -> Path | None:
-    # yt-dlp keeps the original (keepvideo); the MP3 conversion is the result.
-    converted = temp_dir / f"source{DEFAULT_EXTRACTED_AUDIO_SUFFIX}"
-    if converted.is_file() and not converted.is_symlink():
-        return converted
-    candidates = sorted(
-        path
-        for path in temp_dir.iterdir()
-        if path.is_file()
-        and path.name.startswith("source.")
-        and _detect_audio_suffix(url=path.name, content_type="")
-    )
-    return candidates[0] if candidates else None
+def _is_regular_downloaded_output(info: os.stat_result) -> bool:
+    return stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+
+
+def _find_downloaded_audio(temp_dir: Path) -> tuple[Path, os.stat_result] | None:
+    # yt-dlp keeps the original (keepvideo); prefer the MP3 conversion.
+    converted = f"source{DEFAULT_EXTRACTED_AUDIO_SUFFIX}"
+    for path in sorted(
+        temp_dir.glob("source.*"), key=lambda path: (path.name != converted, path.name)
+    ):
+        if not _detect_audio_suffix(url=path.name, content_type=""):
+            continue
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        if _is_regular_downloaded_output(info):
+            return path, info
+    return None
 
 
 def _extract_audio_with_ffmpeg(*, source_path: Path, output_path: Path, timeout: float) -> None:

@@ -116,6 +116,7 @@ class BatchTranscriptionJobUpdate:
     transcript: str = ""
     error_message: str = ""
     json_artifact_path: str = ""
+    media_duration_seconds: float | None = None
 
     @property
     def is_complete(self) -> bool:
@@ -494,7 +495,11 @@ def _check_batch_transcript_coverage(
         if artifact_job_id != completed.job_id:
             raise TranscriptionJobFailed("Batch transcription artifact job identity does not match")
     try:
-        gaps = find_transcript_gaps(payload.get("segments"), max_gap_seconds=max_gap_seconds)
+        gaps = find_transcript_gaps(
+            payload.get("segments"),
+            max_gap_seconds=max_gap_seconds,
+            media_duration_seconds=completed.media_duration_seconds,
+        )
     except TranscriptionGenerationError as exc:
         raise TranscriptionJobFailed(f"Batch transcription evidence: {exc}") from None
     if not gaps:
@@ -511,10 +516,12 @@ def find_transcript_gaps(
     segments: object,
     *,
     max_gap_seconds: float,
+    media_duration_seconds: float | None = None,
 ) -> list[tuple[float, float]]:
     """Return ``(start, end)`` stretches longer than ``max_gap_seconds`` without a segment.
 
-    Reject malformed evidence; measure coverage from the union without reordering text.
+    Reject malformed evidence and measure coverage from the union of positive spans.
+    An admitted media duration also bounds the trailing gap.
     """
     max_gap_seconds = transcription_max_gap_seconds(max_gap_seconds)
     if max_gap_seconds <= 0:
@@ -539,6 +546,11 @@ def find_transcript_gaps(
         if start - covered_until > max_gap_seconds:
             gaps.append((covered_until, start))
         covered_until = max(covered_until, end)
+    if (
+        media_duration_seconds is not None
+        and media_duration_seconds - covered_until > max_gap_seconds
+    ):
+        gaps.append((covered_until, media_duration_seconds))
     return gaps
 
 
@@ -735,11 +747,21 @@ def _parse_batch_transcription_job_update(
                 json_artifact_path = artifact_path(artifacts["json"])
             except ValueError:
                 raise TranscriptionJobFailed("Invalid JSON segment artifact path") from None
+        metadata = result.get("metadata")
+        media_duration_seconds = None
+        if isinstance(metadata, dict) and "media_duration_seconds" in metadata:
+            # Voxhelm's separate duration_seconds is derived from segment ends.
+            media_duration_seconds = _seconds(metadata["media_duration_seconds"])
+            if media_duration_seconds is None:
+                raise TranscriptionJobFailed(
+                    "Batch transcription result has invalid measured duration"
+                )
         return BatchTranscriptionJobUpdate(
             job_id=job_id,
             state=state,
             transcript=text.strip(),
             json_artifact_path=json_artifact_path,
+            media_duration_seconds=media_duration_seconds,
         )
 
     if state == "failed":

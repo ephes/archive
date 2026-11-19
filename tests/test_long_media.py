@@ -587,10 +587,10 @@ def test_video_page_original_over_the_limit_fails_even_after_conversion(
         lambda: [sys.executable, "-c", writer, str(tmp_path)],
     )
     if accepted:
-        path, content_type, size = media_archival._download_supported_video_page_audio_source(
+        path, content_type, output = media_archival._download_supported_video_page_audio_source(
             source_url="https://www.youtube.com/watch?v=abc", temp_dir=tmp_path, timeout=30
         )
-        assert (path.name, content_type, size) == ("source.mp3", "audio/mpeg", 400)
+        assert (path.name, content_type, output.st_size) == ("source.mp3", "audio/mpeg", 400)
     else:
         with pytest.raises(MediaArchivalError, match="1000-byte archive limit"):
             media_archival._download_supported_video_page_audio_source(

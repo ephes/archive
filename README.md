@@ -742,21 +742,25 @@ item (`transcript_job_id`, with the job's source fingerprint and submission time
 `pending` with a `transcript_poll_at` time `ARCHIVE_TRANSCRIPTION_POLL_SECONDS` later, and moves on to other
 items. A later pass makes one `GET /v1/jobs/<id>` request: a running job is polled again later, a failed job
 fails the step and forgets the job, and a finished job is checked and stored. A stored job is never uploaded
-again. Transient status or segment artifact read failures (including on immediate completion)
-keep the job and retry until
-`ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS` (2 hours, longer for long recordings, see
-`ARCHIVE_TRANSCRIPTION_JOB_MIN_BYTES_PER_SECOND`) after submission. Pending reconciliation measures age and schedules the next poll after locking
-and refreshing the item row. Because the job
-lives in the database, a worker restart or deploy picks the polling up again. A job made for an older source
+again. Transient status or segment artifact read failures, including on immediate completion,
+keep the job and retry until `ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS` after submission
+(2 hours, longer for long recordings, see `ARCHIVE_TRANSCRIPTION_JOB_MIN_BYTES_PER_SECOND`).
+Pending reconciliation measures age and schedules the next poll after locking and refreshing
+the item row. Because the job lives in the database, a worker restart or deploy picks the
+polling up again. A job made for an older source
 (the archived audio changed) is not resumed; the current audio is uploaded instead. Summaries generated while
 the job runs are refreshed from the transcript once it arrives. Archive then reads the job's segment JSON and rejects the
 transcript as incomplete when a stretch of audio longer than `ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS`
 (10 minutes) has no segment with a positive span. Zero-length segments carry no coverage
-and an artifact with only zero-length segments fails admission. whisper.cpp splits long audio across processors and ignores a worker
-thread that fails, so a job can succeed with whole parts of the audio missing (item 408, a 3:09 h
+and an artifact with only zero-length segments fails admission. whisper.cpp splits long audio
+across processors and ignores a worker thread that fails, so a job can succeed with whole parts
+of the audio missing (item 408, a 3:09 h
 podcast, kept text for only 44 % of its audio). The transcript step then fails with that error instead of
-storing the partial text; requeue it with `reprocess_items --only transcript`. The check cannot see
-audio missing at the very end, because neither side records the media duration. Failed summary jobs retry automatically with bounded backoff
+storing the partial text. Requeue it with `reprocess_items --only transcript`. When Voxhelm
+supplies a measured `result.metadata.media_duration_seconds`, Archive checks the trailing gap
+from the last covered time to that duration. The field must be a finite nonnegative number.
+For older results without it, Archive checks from time zero through the last covered time.
+Failed summary jobs retry automatically with bounded backoff
 (5 minutes, 30 minutes, 2 hours) before remaining in a failed state for operator review. Article items can
 also submit a Voxhelm batch `synthesize` job once a summary exists; Archive prefers extracted article body
 text as the TTS input when it can fetch it and falls back to stored summary/notes text otherwise. That fetch
@@ -1406,8 +1410,9 @@ Long recordings must pass: archival, staging and the batch job are sized for mul
 - **Time.** Capacity admission, download and extraction share one
   `--media-archive-timeout` budget (3600 s). Each phase receives the time remaining,
   and a media helper starts only while time remains. Staging checks its deadline again
-  after disk admission and gives transport setup only the remaining time. A staging pass gets at least `size / ARCHIVE_TRANSCRIPTION_UPLOAD_MIN_BYTES_PER_SECOND`
-  (16 GiB at 4 MiB/s: 4096 s); Voxhelm itself accepts a declared upload at no less than 128 KiB/s
+  after disk admission and gives transport setup only the remaining time. A staging pass gets at least
+  `size / ARCHIVE_TRANSCRIPTION_UPLOAD_MIN_BYTES_PER_SECOND` (4096 s for 16 GiB at 4 MiB/s).
+  Voxhelm accepts a declared upload at no less than 128 KiB/s
   and cuts it after 120 s without data. A submitted job may run at least
   `size / ARCHIVE_TRANSCRIPTION_JOB_MIN_BYTES_PER_SECOND` before Archive gives up on it.
 - **Memory.** Archived media on S3-compatible storage is read with ranged `GetObject` requests
@@ -1445,14 +1450,17 @@ Long recordings must pass: archival, staging and the batch job are sized for mul
   progress hook that stops the download once the source passes the limit and measures the
   finished file on disk, and a postprocessor hook measures every file in its output directory
   before each fixup or conversion starts (downloaders that delegate to FFmpeg do not report
-  progress); either stops it with exit status 3, reported as the archive limit. The parent also watches the temporary directory while the child runs: it is
-  checked on a 20 ms cadence independent of diagnostic output. One file exceeding the
+  progress). Either hook stops it with exit status 3, reported as the archive limit. The parent
+  checks the temporary directory on a 20 ms cadence independent of diagnostic output. One file exceeding the
   limit or all files exceeding twice the limit stops the run. After retiring the process
   group, the parent checks the files again, including after nonzero exits. An observed
   size violation takes precedence over the exit status. If sizes pass, exit status 3
   still reports the archive limit. yt-dlp keeps the original next to its MP3 conversion
-  (`keepvideo`) for the final check. A refused archival retries with the usual media-archive backoff; a refused staging fails
-  the transcript step like other transport failures (requeue it with
+  (`keepvideo`) for the final check. Archive admits only regular, single-link output files,
+  including alternate audio formats. Before storage, it opens without following symbolic links
+  and verifies the file identity and size against the admitted candidate. A refused archival
+  retries with the usual media-archive backoff. A refused staging fails the transcript step
+  like other transport failures (requeue it with
   `reprocess_items --only transcript`). Temporary files are removed when a step ends, also on
   failure.
 - **Segment evidence.** Voxhelm's segment JSON is read under the 8 MiB API response cap. It holds the

@@ -768,6 +768,7 @@ class _FakeVoxhelm:
         self.segments = _segments((0, 3000))
         self.artifact: dict[str, object] = {"text": "Async batch transcript"}
         self.artifact_error: Exception | None = None
+        self.result_metadata: dict[str, object] = {}
         self.jobs = 0
 
     def __call__(self, request, timeout):
@@ -799,6 +800,7 @@ class _FakeVoxhelm:
         if state == "succeeded":
             payload["result"] = {
                 "text": " Async   batch transcript ",
+                "metadata": self.result_metadata,
                 "artifacts": {"json": f"/v1/jobs/{job_id}/artifacts/transcript.json"},
             }
         return payload
@@ -1337,3 +1339,31 @@ def test_staging_closes_reader_even_if_failed_transport_keeps_request(
     assert retained
     assert len(opened) == int(read_payload)
     assert all(reader.closed for reader in opened)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("metadata", "error"),
+    [
+        ({}, None),
+        ({"duration_seconds": 2000}, None),
+        ({"media_duration_seconds": 610}, None),
+        ({"media_duration_seconds": 611}, "incomplete"),
+        ({"media_duration_seconds": "611"}, "invalid measured duration"),
+        ({"media_duration_seconds": True}, "invalid measured duration"),
+        ({"media_duration_seconds": -1}, "invalid measured duration"),
+        ({"media_duration_seconds": None}, "invalid measured duration"),
+    ],
+)
+def test_batch_trailing_gap_uses_measured_media_duration(voxhelm, metadata, error):
+    voxhelm.state = "succeeded"
+    voxhelm.segments = _segments((0, 10))
+    voxhelm.result_metadata = metadata
+    voxhelm.artifact["job_id"] = "job-1"
+    item = _oversized_archived_audio_item()
+
+    if error:
+        with pytest.raises(TranscriptionJobFailed, match=error):
+            _transcribe_through_batch_job(item)
+    else:
+        assert _transcribe_through_batch_job(item) == "Async batch transcript"

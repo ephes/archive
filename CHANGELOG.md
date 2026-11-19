@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Check trailing batch transcript coverage when Voxhelm supplies measured audio duration.
+  Admit only regular, single-link downloader audio and verify its identity at upload.
+
 - Share one archival deadline across disk admission, download and extraction. Recheck
   the transcription staging deadline after disk admission before opening any reader.
 

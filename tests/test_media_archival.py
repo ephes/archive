@@ -694,3 +694,55 @@ def test_direct_audio_download_uses_remaining_budget_after_capacity_wait(monkeyp
     with storages["archive_media"].open(result.object_name) as audio:
         assert audio.read() == b"ID3-audio"
     assert seen == [4]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("output_kind", ["file", "symlink", "hardlink", "replaced"])
+def test_video_page_fallback_admits_only_regular_unchanged_output(
+    monkeypatch, tmp_path, output_kind
+):
+    import os
+
+    from archive import media_archival
+
+    item = Item.objects.create(
+        original_url="https://www.youtube.com/watch?v=demo123",
+        kind=ItemKind.VIDEO,
+    )
+    other_file = tmp_path / "other.m4a"
+    other_file.write_bytes(b"other")
+    source = None
+
+    def download(command, *, output_dir, **kwargs):
+        nonlocal source
+        source = output_dir / "source.m4a"
+        if output_kind == "symlink":
+            source.symlink_to(other_file)
+        elif output_kind == "hardlink":
+            source.hardlink_to(other_file)
+        else:
+            source.write_bytes(b"audio")
+
+    real_open = os.open
+
+    def replace_before_open(path, flags, *args, **kwargs):
+        if source is not None and Path(path) == source:
+            other_file.replace(source)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(media_archival, "run_media_command", download)
+    if output_kind == "replaced":
+        monkeypatch.setattr(media_archival.os, "open", replace_before_open)
+
+    if output_kind == "file":
+        result = archive_item_audio(item)
+        assert result.object_name.endswith("/source.m4a")
+        assert result.size_bytes == 5
+        assert result.content_type == "audio/mp4"
+        with storages["archive_media"].open(result.object_name) as handle:
+            assert handle.read() == b"audio"
+    else:
+        with pytest.raises(MediaArchivalError, match="Video page download"):
+            archive_item_audio(item)
+        assert not PendingArchiveMediaUpload.objects.exists()
+        assert list(iter_archive_media_object_names()) == []

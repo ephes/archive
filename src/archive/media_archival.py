@@ -114,6 +114,7 @@ def uses_supported_video_page_source(item: Item) -> bool:
 
 
 def archive_item_audio(item: Item, timeout: int = 300) -> ArchivedAudio:
+    deadline = monotonic() + timeout
     limit = settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES
     audio_source_url = _select_audio_archive_source_url(item)
     if audio_source_url is not None:
@@ -121,9 +122,9 @@ def archive_item_audio(item: Item, timeout: int = 300) -> ArchivedAudio:
         with temp_space_admission(
             (1 + _stored_copies_on_temp_volume(1)) * limit,
             purpose="Audio archival",
-            timeout=timeout,
+            timeout=_remaining_archive_time(deadline),
         ):
-            return _archive_direct_audio(item=item, source_url=audio_source_url, timeout=timeout)
+            return _archive_direct_audio(item=item, source_url=audio_source_url, deadline=deadline)
 
     video_source_url = _select_video_archive_source_url(item)
     if video_source_url is not None:
@@ -134,11 +135,18 @@ def archive_item_audio(item: Item, timeout: int = 300) -> ArchivedAudio:
         with temp_space_admission(
             (2 + _stored_copies_on_temp_volume(stored)) * limit,
             purpose="Video archival",
-            timeout=timeout,
+            timeout=_remaining_archive_time(deadline),
         ):
-            return _archive_video_audio(item=item, source_url=video_source_url, timeout=timeout)
+            return _archive_video_audio(item=item, source_url=video_source_url, deadline=deadline)
 
     raise MediaArchivalError("Item does not have an archivable audio source yet")
+
+
+def _remaining_archive_time(deadline: float) -> float:
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise MediaArchivalError("Media source exceeded the elapsed archival budget")
+    return remaining
 
 
 TEMP_ADMISSION_POLL_SECONDS = 0.5
@@ -300,7 +308,7 @@ def _open_direct_media(request: Request, *, timeout: float, max_bytes: int | Non
             yield addinfourl(source, headers, metadata["url"])
 
 
-def _archive_direct_audio(item: Item, source_url: str, timeout: int) -> ArchivedAudio:
+def _archive_direct_audio(item: Item, source_url: str, deadline: float) -> ArchivedAudio:
     request = Request(
         source_url,
         headers={
@@ -309,7 +317,7 @@ def _archive_direct_audio(item: Item, source_url: str, timeout: int) -> Archived
         },
     )
     try:
-        with _open_direct_media(request, timeout=timeout) as response:
+        with _open_direct_media(request, timeout=_remaining_archive_time(deadline)) as response:
             final_url = response.geturl() or source_url
             content_type = (response.headers.get_content_type() or "").lower()
             suffix = _detect_audio_suffix(url=final_url, content_type=content_type)
@@ -345,12 +353,12 @@ def _archive_direct_audio(item: Item, source_url: str, timeout: int) -> Archived
     )
 
 
-def _archive_video_audio(item: Item, source_url: str, timeout: int) -> ArchivedAudio:
+def _archive_video_audio(item: Item, source_url: str, deadline: float) -> ArchivedAudio:
     if _looks_like_supported_video_page_url(source_url):
         return _archive_supported_video_page_audio(
             item=item,
             source_url=source_url,
-            timeout=timeout,
+            deadline=deadline,
         )
 
     try:
@@ -359,14 +367,14 @@ def _archive_video_audio(item: Item, source_url: str, timeout: int) -> ArchivedA
             source_path, source_content_type, source_size_bytes = _download_video_source(
                 source_url=source_url,
                 temp_dir=temp_dir_path,
-                timeout=timeout,
+                timeout=_remaining_archive_time(deadline),
             )
 
             extracted_audio_path = temp_dir_path / f"extracted{DEFAULT_EXTRACTED_AUDIO_SUFFIX}"
             _extract_audio_with_ffmpeg(
                 source_path=source_path,
                 output_path=extracted_audio_path,
-                timeout=timeout,
+                timeout=_remaining_archive_time(deadline),
             )
             if not extracted_audio_path.exists():
                 raise MediaArchivalError("Audio extraction did not produce an output file")
@@ -415,7 +423,7 @@ def _archive_video_audio(item: Item, source_url: str, timeout: int) -> ArchivedA
 def _archive_supported_video_page_audio(
     item: Item,
     source_url: str,
-    timeout: int,
+    deadline: float,
 ) -> ArchivedAudio:
     try:
         with TemporaryDirectory(prefix="archive-media-") as temp_dir:
@@ -423,7 +431,7 @@ def _archive_supported_video_page_audio(
             source_path, content_type, size_bytes = _download_supported_video_page_audio_source(
                 source_url=source_url,
                 temp_dir=temp_dir_path,
-                timeout=timeout,
+                timeout=_remaining_archive_time(deadline),
             )
             object_name = f"items/{item.pk}/audio/source{source_path.suffix}"
             saved_name = _save_storage_path(
@@ -446,7 +454,7 @@ def _download_video_source(
     *,
     source_url: str,
     temp_dir: Path,
-    timeout: int,
+    timeout: float,
 ) -> tuple[Path, str, int]:
     if _looks_like_direct_video_url(source_url):
         return _download_direct_video_source(
@@ -461,7 +469,7 @@ def _download_direct_video_source(
     *,
     source_url: str,
     temp_dir: Path,
-    timeout: int,
+    timeout: float,
 ) -> tuple[Path, str, int]:
     request = Request(
         source_url,
@@ -502,7 +510,7 @@ def _download_supported_video_page_audio_source(
     *,
     source_url: str,
     temp_dir: Path,
-    timeout: int,
+    timeout: float,
 ) -> tuple[Path, str, int]:
     output_template = str(temp_dir / "source.%(ext)s")
     options = {
@@ -614,7 +622,7 @@ def _find_downloaded_audio_path(temp_dir: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
-def _extract_audio_with_ffmpeg(*, source_path: Path, output_path: Path, timeout: int) -> None:
+def _extract_audio_with_ffmpeg(*, source_path: Path, output_path: Path, timeout: float) -> None:
     command = [
         settings.ARCHIVE_MEDIA_EXTRACTION_FFMPEG_BIN,
         "-nostdin",

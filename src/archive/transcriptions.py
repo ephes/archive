@@ -586,7 +586,7 @@ def _stage_archived_audio_upload(
         except MediaArchivalError as exc:
             raise TranscriptionGenerationError(str(exc)) from None
         return _send_staged_upload(
-            item=item, source=source, suffix=suffix, timeout=timeout, deadline=deadline
+            item=item, source=source, suffix=suffix, timeout=_remaining(deadline), deadline=deadline
         )
 
 

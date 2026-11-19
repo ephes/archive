@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Share one archival deadline across disk admission, download and extraction. Recheck
+  the transcription staging deadline after disk admission before opening any reader.
+
 - Count only positive-duration segments as batch transcript coverage and close archived
   audio staging readers immediately when a send fails.
 

@@ -1005,3 +1005,46 @@ def test_real_ytdlp_stops_before_the_first_postprocessor_without_progress_callba
     video_page_download.download(request, exceeded := [])
     assert exceeded == []
     assert marker.exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("admission_seconds", [9, 11])
+def test_staging_budget_is_recomputed_after_disk_admission(
+    settings, monkeypatch, admission_seconds
+):
+    from archive import media_archival, transcriptions
+
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "key"
+    settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
+    item = _long_item(4)
+    clock = 100.0
+    sends = []
+
+    def disk_space():
+        nonlocal clock
+        clock += admission_seconds
+        return 10**15
+
+    def send(*, item, source, suffix, timeout, deadline):
+        sends.append((timeout, deadline))
+        return "upload-1"
+
+    monkeypatch.setattr(media_archival, "monotonic", lambda: clock)
+    monkeypatch.setattr(transcriptions, "monotonic", lambda: clock)
+    monkeypatch.setattr(media_archival, "_temp_free_bytes", disk_space)
+    monkeypatch.setattr(transcriptions, "_send_staged_upload", send)
+
+    if admission_seconds > 10:
+        with pytest.raises(TranscriptionGenerationError, match="pipeline timeout"):
+            _stage_archived_audio_upload(
+                item=item, source=_select_transcription_source(item), timeout=10
+            )
+        assert sends == []
+    else:
+        assert (
+            _stage_archived_audio_upload(
+                item=item, source=_select_transcription_source(item), timeout=10
+            )
+            == "upload-1"
+        )
+        assert sends == [(1, 110)]

@@ -1403,8 +1403,10 @@ Long recordings must pass: archival, staging and the batch job are sized for mul
 - **Limit.** `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` defaults to 16 GiB, matching Voxhelm's
   `VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES` (Voxhelm adds its own multipart headroom on top). Media
   over the limit still fails as before.
-- **Time.** Downloads and extraction get `--media-archive-timeout` (3600 s, the same as one Voxhelm
-  batch URL download attempt). A staging pass gets at least `size / ARCHIVE_TRANSCRIPTION_UPLOAD_MIN_BYTES_PER_SECOND`
+- **Time.** Capacity admission, download and extraction share one
+  `--media-archive-timeout` budget (3600 s). Each phase receives the time remaining,
+  and a media helper starts only while time remains. Staging checks its deadline again
+  after disk admission and gives transport setup only the remaining time. A staging pass gets at least `size / ARCHIVE_TRANSCRIPTION_UPLOAD_MIN_BYTES_PER_SECOND`
   (16 GiB at 4 MiB/s: 4096 s); Voxhelm itself accepts a declared upload at no less than 128 KiB/s
   and cuts it after 120 s without data. A submitted job may run at least
   `size / ARCHIVE_TRANSCRIPTION_JOB_MIN_BYTES_PER_SECOND` before Archive gives up on it.

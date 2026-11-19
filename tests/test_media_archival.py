@@ -621,3 +621,76 @@ def test_real_ffmpeg_synthetic_audio_respects_output_ceiling(limited, settings, 
     else:
         _extract_audio_with_ffmpeg(source_path=source, output_path=output, timeout=5)
         assert 0 < output.stat().st_size < settings.ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("download_seconds", [2, 4])
+def test_video_download_and_extraction_share_budget_after_capacity_wait(
+    monkeypatch, download_seconds
+):
+    from archive import media_archival
+
+    item = Item.objects.create(original_url="https://example.com/video.mp4", kind=ItemKind.VIDEO)
+    clock = 100.0
+    times = []
+
+    def disk_space():
+        nonlocal clock
+        clock += 6
+        return 10**15
+
+    def download(request, *, timeout):
+        nonlocal clock
+        times.append(("download", timeout))
+        clock += download_seconds
+        return _FakeResponse(
+            [b"video"], content_type="video/mp4", final_url="https://example.com/video.mp4"
+        )
+
+    def extract(command, *, timeout, **kwargs):
+        times.append(("extract", timeout))
+        _fake_ffmpeg_run(command, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(media_archival, "monotonic", lambda: clock)
+    monkeypatch.setattr(media_archival, "_temp_free_bytes", disk_space)
+    monkeypatch.setattr(media_archival, "_open_direct_media", download)
+    monkeypatch.setattr(media_archival, "run_media_command", extract)
+
+    if download_seconds == 4:
+        with pytest.raises(MediaArchivalError, match="elapsed archival budget"):
+            archive_item_audio(item, timeout=10)
+        assert times == [("download", 4)]
+        assert not PendingArchiveMediaUpload.objects.exists()
+    else:
+        result = archive_item_audio(item, timeout=10)
+        assert result.content_type == "audio/mpeg"
+        assert times == [("download", 4), ("extract", 2)]
+
+
+@pytest.mark.django_db
+def test_direct_audio_download_uses_remaining_budget_after_capacity_wait(monkeypatch):
+    from archive import media_archival
+
+    item = Item.objects.create(
+        original_url="https://example.com/episode.mp3", kind=ItemKind.PODCAST_EPISODE
+    )
+    clock = 100.0
+    seen = []
+
+    def disk_space():
+        nonlocal clock
+        clock += 6
+        return 10**15
+
+    def download(request, *, timeout):
+        seen.append(timeout)
+        return _FakeResponse([b"ID3-audio"])
+
+    monkeypatch.setattr(media_archival, "monotonic", lambda: clock)
+    monkeypatch.setattr(media_archival, "_temp_free_bytes", disk_space)
+    monkeypatch.setattr(media_archival, "_open_direct_media", download)
+
+    result = archive_item_audio(item, timeout=10)
+    with storages["archive_media"].open(result.object_name) as audio:
+        assert audio.read() == b"ID3-audio"
+    assert seen == [4]

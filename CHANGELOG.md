@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep an existing account's contact address when `ensure_admin_user` omits `--email`.
+  An explicit empty address clears it.
+
 - Exclude processing events after the health report's generation time from recent totals.
 
 - Validate opened S3 audio lengths from metadata, avoiding full reads on HEAD and

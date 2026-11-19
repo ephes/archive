@@ -32,11 +32,14 @@ class Command(BaseCommand):
                 "--password-stdin instead."
             ),
         )
-        parser.add_argument("--email", default="")
+        parser.add_argument(
+            "--email",
+            help="Omit to keep the current email. Pass an empty value to clear it.",
+        )
 
     def handle(self, *args, **options) -> None:
         username = options["username"].strip()
-        email = options["email"].strip()
+        email = options["email"]
 
         if not username:
             raise CommandError("username must not be empty")
@@ -44,14 +47,18 @@ class Command(BaseCommand):
         if not password:
             raise CommandError("password must not be empty")
 
+        fields: dict[str, str | bool] = {"is_staff": True, "is_superuser": True}
+        if email is not None:
+            fields["email"] = email.strip()
+
         user_model = get_user_model()
         with transaction.atomic():
             user, created = user_model.objects.select_for_update().get_or_create(
                 username=username,
-                defaults={"email": email, "is_staff": True, "is_superuser": True},
+                defaults={"email": "", **fields},
             )
             changed_fields = []
-            for field, value in (("email", email), ("is_staff", True), ("is_superuser", True)):
+            for field, value in fields.items():
                 if getattr(user, field) != value:
                     setattr(user, field, value)
                     changed_fields.append(field)

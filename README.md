@@ -431,7 +431,9 @@ every deploy no longer logs the user out. `--password` still works for compatibi
 deprecated and prints a warning. Provisioning runs in one transaction, locks the current
 account before comparing credentials, and saves only changed provisioning fields. Failure
 rolls back a newly created account. Existing inactive accounts stay inactive; reactivation
-requires a separate operator action.
+requires a separate operator action. Omitting `--email` preserves an existing
+account's address and creates new accounts with an empty address. Pass
+`--email address@example.test` to set it or `--email ''` to clear it.
 
 ## Configuration
 

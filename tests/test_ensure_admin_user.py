@@ -39,6 +39,7 @@ def test_reads_password_from_stdin(monkeypatch):
 
     user = get_user_model().objects.get(username="owner")
     assert user.check_password("it's a 'quoted' secret")
+    assert user.email == ""
 
 
 def test_stdin_strips_only_the_line_ending():
@@ -90,6 +91,32 @@ def test_changed_password_is_rehashed(monkeypatch):
     assert user.check_password("new-secret")
     assert not user.check_password("old-secret")
     assert "(password unchanged)" not in out
+
+
+@pytest.mark.parametrize(
+    ("args", "expected_email"),
+    [
+        ((), "original@example.test"),
+        (("--email", " replacement@example.test "), "replacement@example.test"),
+        (("--email", ""), ""),
+    ],
+    ids=["omitted", "replace", "clear"],
+)
+def test_password_rotation_changes_email_only_when_explicit(monkeypatch, args, expected_email):
+    user = get_user_model().objects.create_user(
+        username="owner",
+        password="old-secret",
+        email="original@example.test",
+        is_staff=True,
+        is_superuser=True,
+    )
+    monkeypatch.setenv("ARCHIVE_ADMIN_PASSWORD", "rotated-secret")
+
+    run("--username", "owner", *args)
+
+    user.refresh_from_db()
+    assert user.email == expected_email
+    assert user.check_password("rotated-secret")
 
 
 def test_existing_user_is_promoted(monkeypatch):

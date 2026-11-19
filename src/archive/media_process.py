@@ -16,6 +16,7 @@ from typing import BinaryIO
 
 # Count each stream independently; retain no upstream diagnostic text.
 MAX_DIAGNOSTIC_BYTES = 1024 * 1024
+_OUTPUT_SCAN_INTERVAL = 0.02
 
 
 class MediaProcessError(RuntimeError):
@@ -91,6 +92,7 @@ def _run_media_command(
             for stream in (process.stdout, process.stderr):
                 os.set_blocking(stream.fileno(), False)
                 selector.register(stream, selectors.EVENT_READ, 0)
+            next_output_scan = monotonic()
             while selector.get_map() or not retired:
                 # A successful wrapper can leave a child holding these pipes.
                 if not retired and _leader_has_exited(process.pid):
@@ -107,16 +109,23 @@ def _run_media_command(
                         raise MediaProcessError("process cleanup failed") from None
                     retired = True
                     if process.returncode:
-                        raise _failed(process.returncode)
+                        break  # Admit final output before interpreting the exit status.
                     # The fixed TERM grace and bounded reap are cleanup, not
                     # command runtime: a success near the deadline stays a success.
                     deadline += monotonic() - retirement_started
-                remaining = deadline - monotonic()
-                if remaining <= 0:
+                now = monotonic()
+                if now >= deadline:
                     raise MediaProcessError("timed out")
-                _check_output_size(output_path, max_output_bytes)
-                _check_output_dir_size(output_dir, max_output_dir_bytes, max_output_dir_file_bytes)
-                for key, _ in selector.select(min(remaining, 0.02)):
+                wake_at = min(deadline, now + _OUTPUT_SCAN_INTERVAL)
+                if not retired:
+                    if now >= next_output_scan:
+                        _check_output_size(output_path, max_output_bytes)
+                        _check_output_dir_size(
+                            output_dir, max_output_dir_bytes, max_output_dir_file_bytes
+                        )
+                        next_output_scan = now + _OUTPUT_SCAN_INTERVAL
+                    wake_at = min(wake_at, next_output_scan)
+                for key, _ in selector.select(max(0, wake_at - monotonic())):
                     chunk = os.read(key.fd, 64 * 1024)
                     if not chunk:
                         selector.unregister(key.fileobj)
@@ -265,12 +274,12 @@ def _check_output_dir_size(
                         if file_limit is not None and size > file_limit:
                             raise MediaProcessError("output limit")
                         total += size
+                        if limit is not None and total > limit:
+                            raise MediaProcessError("output limit")
                 except FileNotFoundError:
                     continue  # renamed or removed by the command meanwhile
     except FileNotFoundError:
         return
-    if limit is not None and total > limit:
-        raise MediaProcessError("output limit")
 
 
 def _check_output_size(path: Path | None, limit: int | None) -> None:

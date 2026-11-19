@@ -1442,8 +1442,12 @@ Long recordings must pass: archival, staging and the batch job are sized for mul
   finished file on disk, and a postprocessor hook measures every file in its output directory
   before each fixup or conversion starts (downloaders that delegate to FFmpeg do not report
   progress); either stops it with exit status 3, reported as the archive limit. The parent also watches the temporary directory while the child runs: it is
-  killed once one file exceeds the limit or all files exceed twice the limit, and yt-dlp keeps
-  the original next to its MP3 conversion (`keepvideo`) for the check after the run. A refused archival retries with the usual media-archive backoff; a refused staging fails
+  checked on a 20 ms cadence independent of diagnostic output. One file exceeding the
+  limit or all files exceeding twice the limit stops the run. After retiring the process
+  group, the parent checks the files again, including after nonzero exits. An observed
+  size violation takes precedence over the exit status. If sizes pass, exit status 3
+  still reports the archive limit. yt-dlp keeps the original next to its MP3 conversion
+  (`keepvideo`) for the final check. A refused archival retries with the usual media-archive backoff; a refused staging fails
   the transcript step like other transport failures (requeue it with
   `reprocess_items --only transcript`). Temporary files are removed when a step ends, also on
   failure.

@@ -536,3 +536,78 @@ def test_failed_retirement_is_retried_once_in_cleanup(retry_fails, monkeypatch):
     assert str(caught.value) == "process cleanup failed"
     assert not getattr(caught.value, "__notes__", [])
     assert events == [signal.SIGTERM, signal.SIGKILL, "wait"] * 2
+
+
+@pytest.mark.parametrize("exit_status", [0, 7])
+def test_output_scan_cadence_and_final_admission(exit_status, tmp_path, monkeypatch):
+    from archive import media_process
+
+    clock = 0.0
+    scans = []
+    retired = []
+    output = tmp_path / "output"
+    output.mkdir()
+    for index in range(16):
+        (output / str(index)).write_bytes(b"x")
+    scandir = os.scandir
+    frames = 0
+
+    def scan(directory):
+        if directory == output:
+            scans.append(clock)
+        return scandir(directory)
+
+    def ready_frames(selector, timeout):
+        nonlocal frames, clock
+        if frames < 60:
+            frames += 1
+            clock += 0.001
+            return [(next(iter(selector.get_map().values())), media_process.selectors.EVENT_READ)]
+        return [(key, media_process.selectors.EVENT_READ) for key in selector.get_map().values()]
+
+    def read(fd, amount):
+        return b"x" if frames < 60 else b""
+
+    def exited(_):
+        if frames < 60:
+            return False
+        (output / "last-fragment").write_bytes(b"x" * 65)
+        return True
+
+    def retire(process):
+        retired.append(process)
+        process.wait(timeout=1)
+
+    class Process:
+        pid = 12345
+        returncode = None
+
+        def __init__(self, *args, **kwargs):
+            streams = []
+            for _ in range(2):
+                reader, writer = os.pipe()
+                os.close(writer)
+                streams.append(os.fdopen(reader, "rb"))
+            self.stdout, self.stderr = streams
+
+        def wait(self, timeout):
+            self.returncode = exit_status
+
+    monkeypatch.setattr(media_process.os, "scandir", scan)
+    monkeypatch.setattr(media_process.os, "read", read)
+    monkeypatch.setattr(media_process, "monotonic", lambda: clock)
+    monkeypatch.setattr(media_process.selectors.DefaultSelector, "select", ready_frames)
+    monkeypatch.setattr(media_process, "_leader_has_exited", exited)
+    monkeypatch.setattr(media_process, "_retire_process_group", retire)
+    monkeypatch.setattr(media_process.subprocess, "Popen", Process)
+
+    with pytest.raises(media_process.MediaProcessError, match="^output limit$"):
+        media_process.run_media_command(
+            ["synthetic"], timeout=2, output_dir=output, max_output_dir_bytes=64
+        )
+    assert len(scans) == 4
+    assert scans[:3] == pytest.approx([0, 0.02, 0.04])
+    assert scans[-1] == pytest.approx(0.06)
+    assert len(retired) == 1
+    assert retired[0].returncode == exit_status
+    assert retired[0].stdout.closed and retired[0].stderr.closed

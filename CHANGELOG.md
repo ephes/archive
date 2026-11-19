@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Check media helper output size on a fixed cadence and after nonzero exits.
+
 - Retain immediately completed batch jobs after transient segment artifact read failures.
   Measure pending batch job age and schedule the next poll after locking the item row.
 

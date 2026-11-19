@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+
 import pytest
 from django.core.files import File
 from django.core.files.base import ContentFile
@@ -131,6 +133,41 @@ def test_unpublished_audio_is_rechecked_and_errors_are_not_cacheable(
     assert response.status_code == 404
     assert response["Cache-Control"] == "no-store"
     assert "ETag" not in response
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("method", ["get", "head"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"is_public": False},
+        {"archived_audio_path": "items/1/audio/replacement.mp3"},
+        {"archived_audio_size_bytes": len(PAYLOAD) + 1},
+        {"archived_audio_content_type": "audio/ogg"},
+    ],
+)
+def test_archived_audio_rechecks_publication_after_storage_open(
+    client, monkeypatch, method, change
+):
+    item, url = _publish("item-archived-audio")
+    initial = client.head(url)
+    etag = initial["ETag"]
+    initial.close()
+    handle = io.BytesIO(PAYLOAD)
+
+    def open_then_change_publication(opened_item):
+        Item.objects.filter(pk=opened_item.pk).update(**change)
+        return handle
+
+    monkeypatch.setattr("archive.views.open_archived_audio", open_then_change_publication)
+    response = getattr(client, method)(url, headers={"If-None-Match": etag})
+    try:
+        assert response.status_code == 404
+        assert response["Cache-Control"] == "no-store"
+        assert "ETag" not in response
+        assert handle.closed
+    finally:
+        response.close()
 
 
 @pytest.mark.django_db

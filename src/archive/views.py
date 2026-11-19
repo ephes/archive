@@ -575,6 +575,21 @@ def item_archived_audio(request: HttpRequest, pk: int) -> HttpResponse:
             headers={"Cache-Control": "no-store"},
         )
 
+    # Storage open can block while publication or the archive metadata changes.
+    try:
+        if not Item.objects.filter(
+            pk=pk,
+            is_public=True,
+            archived_audio_path=item.archived_audio_path,
+            archived_audio_size_bytes=item.archived_audio_size_bytes,
+            archived_audio_content_type=item.archived_audio_content_type,
+        ).exists():
+            raise Http404("Archived audio is not available")
+    except BaseException:
+        with suppress(Exception):
+            audio_file.close()
+        raise
+
     content_type = item.archived_audio_content_type or "audio/mpeg"
     return ranged_file_response(
         request,

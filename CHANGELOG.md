@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Recheck archived audio visibility and metadata after opening storage, before
+  serving bytes or revalidating a cached response.
+
 - Reject S3 range responses with a missing or mismatched object ETag before reading the body.
 
 - Close S3 range streams after read failures so a retry starts at the last delivered offset.

@@ -50,7 +50,12 @@ Public endpoints:
   exception text, traceback, object key or signed URL; acquired handles close once.
   Before any length, range or body is committed, a known recorded size is compared
   with the opened object's own length. S3 readers use object length metadata without
-  loading or spooling the object for HEAD and conditional 304 responses. Local files
+  loading or spooling the object for HEAD and conditional 304 responses. Full and
+  range GETs of an S3 file with a known recorded size also compare the length of the
+  downloaded copy, since that download is not pinned to the opened metadata. There a
+  failed download answers a `no-store` 502 and logs the fixed
+  `stored_media_download_failed` event without backend exception text, and a partial
+  copy is never served. Local files
   use `fstat` on the opened descriptor, and other readers can supply an integer
   `size` when a descriptor is unavailable. A disagreement, from
   truncation or replacement outside the publication protocol, answers GET, HEAD and

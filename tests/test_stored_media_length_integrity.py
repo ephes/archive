@@ -247,3 +247,72 @@ def test_lazy_s3_file_validates_head_and_revalidation_without_spooling(
             assert b"".join(response.streaming_content) == b""
     response.close()
     close.assert_called_once_with()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("downloaded", [PAYLOAD, PAYLOAD[:5], PAYLOAD + b"-appended"])
+@pytest.mark.parametrize("headers", [{}, {"Range": "bytes=2-5"}], ids=["GET", "range"])
+def test_lazy_s3_file_get_checks_the_spooled_download(client, monkeypatch, downloaded, headers):
+    # The HeadObject length matches, but the object was replaced before the download.
+    url = _item("item-article-audio", PAYLOAD, recorded=len(PAYLOAD))
+    storage = Mock(location="", max_memory_size=0, gzip=False)
+    storage.get_object_parameters.return_value = {}
+    obj = storage.bucket.Object.return_value
+    obj.content_length = len(PAYLOAD)
+    obj.download_fileobj.side_effect = lambda file, **_: file.write(downloaded)
+    handle = S3File("synthetic.mp3", "rb", storage, buffer_size=1)
+    close = Mock(wraps=handle.close)
+    monkeypatch.setattr(handle, "close", close)
+    monkeypatch.setattr(
+        Item._meta.get_field("article_audio_file").storage, "open", lambda *a, **kw: handle
+    )
+
+    response = client.get(url, headers=headers)
+
+    if downloaded != PAYLOAD:
+        assert response.status_code == 502
+        assert response["Cache-Control"] == "no-store"
+    else:
+        assert handle.file._rolled is True  # the streamed copy does not stay in memory
+        if headers:
+            assert response.status_code == 206
+            assert b"".join(response.streaming_content) == PAYLOAD[2:6]
+        else:
+            assert response.status_code == 200
+            assert response["Content-Length"] == str(len(PAYLOAD))
+            assert b"".join(response.streaming_content) == PAYLOAD
+    obj.download_fileobj.assert_called_once()
+    response.close()
+    close.assert_called_once_with()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("headers", [{}, {"Range": "bytes=2-5"}], ids=["GET", "range"])
+def test_lazy_s3_file_get_never_serves_a_failed_partial_download(
+    client, monkeypatch, caplog, headers
+):
+    url = _item("item-article-audio", PAYLOAD, recorded=len(PAYLOAD))
+    storage = Mock(location="", max_memory_size=0, gzip=False)
+    storage.get_object_parameters.return_value = {}
+    obj = storage.bucket.Object.return_value
+    obj.content_length = len(PAYLOAD)
+
+    def interrupted(file, **_):
+        file.write(PAYLOAD[:3])
+        raise OSError("https://signed.example/secret interrupted")
+
+    obj.download_fileobj.side_effect = interrupted
+    handle = S3File("synthetic.mp3", "rb", storage, buffer_size=1)
+    close = Mock(wraps=handle.close)
+    monkeypatch.setattr(handle, "close", close)
+    monkeypatch.setattr(
+        Item._meta.get_field("article_audio_file").storage, "open", lambda *a, **kw: handle
+    )
+
+    response = client.get(url, headers=headers)
+
+    assert response.status_code == 502
+    assert response["Cache-Control"] == "no-store"
+    assert "stored_media_download_failed" in caplog.text
+    assert "signed.example" not in caplog.text
+    close.assert_called_once_with()

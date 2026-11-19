@@ -135,6 +135,20 @@ def ranged_file_response(
                     response["ETag"] = etag
                 return finalize(response)
 
+        if request.method == "GET" and size > 0 and isinstance(opened, S3File):
+            # The S3 body comes from a later download that is not pinned to the
+            # metadata checked above, so measure the downloaded copy before serving it.
+            try:
+                downloaded = _downloaded_length(opened)
+            except Exception:
+                # A failed download may leave a partial spool behind; never serve it.
+                # Backend messages can contain signed URLs or credentials.
+                logger.warning("stored_media_download_failed")
+                return finalize(HttpResponse("Audio is temporarily unavailable.", status=502))
+            if downloaded != size:
+                logger.warning("stored_media_length_mismatch")
+                return finalize(HttpResponse("Audio is temporarily unavailable.", status=502))
+
         if byte_range is None:
             if lazy_head:
                 # FileResponse's header inference can seek and load a lazy file.
@@ -216,6 +230,16 @@ def opened_object_length(file_handle: object) -> int | None:
     if isinstance(reported, bool) or not isinstance(reported, int) or reported < 0:
         return None
     return reported
+
+
+def _downloaded_length(s3_file: S3File) -> int:
+    """Length of the S3 file's downloaded spool; download errors propagate.
+
+    ``fileno`` rolls the spool over to a temporary file, so a slow client does not
+    keep the whole object in process memory while it streams.
+    """
+    spool = s3_file.file
+    return os.fstat(spool.fileno()).st_size
 
 
 def _if_none_match(header: str | None, etag: str) -> bool:

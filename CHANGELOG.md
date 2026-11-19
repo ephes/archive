@@ -8,7 +8,9 @@
 - Exclude processing events after the health report's generation time from recent totals.
 
 - Validate opened S3 audio lengths from metadata, avoiding full reads on HEAD and
-  cache revalidation.
+  cache revalidation. Full and range GETs of an S3 file with a known recorded size
+  still check the length of the downloaded copy, so a replacement with a different
+  length or a failed download answers 502.
 
 - Preserve the initiating health or feed snapshot error, roll back failed commits, and
   close connections when rollback or autocommit restoration fails.

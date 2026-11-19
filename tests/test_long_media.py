@@ -92,7 +92,11 @@ class _FakeS3Object:
         start = int(kwargs["Range"].removeprefix("bytes=").removesuffix("-"))
         body = _FakeBody(self._data[start:], piece=self._piece)
         self.bodies.append(body)
-        return {"Body": body, "ContentRange": _content_range(start, len(self._data))}
+        return {
+            "Body": body,
+            "ContentRange": _content_range(start, len(self._data)),
+            "ETag": self.e_tag,
+        }
 
 
 class _ZeroBody:
@@ -121,6 +125,7 @@ class _ZeroS3Object:
         return {
             "Body": _ZeroBody(self.content_length - start),
             "ContentRange": _content_range(start, self.content_length),
+            "ETag": self.e_tag,
         }
 
 
@@ -213,7 +218,11 @@ def test_s3_range_reader_discards_a_body_that_advances_before_raising(monkeypatc
 def test_s3_range_reader_reports_a_short_object_and_safe_backend_errors():
     class ShortObject(_FakeS3Object):
         def get(self, **kwargs):
-            return {"Body": _FakeBody(b"abc"), "ContentRange": _content_range(0, 6)}
+            return {
+                "Body": _FakeBody(b"abc"),
+                "ContentRange": _content_range(0, 6),
+                "ETag": self.e_tag,
+            }
 
     reader = S3RangeReader(ShortObject(b"abcdef"))
     assert reader.read(3) == b"abc"
@@ -261,13 +270,34 @@ def test_s3_range_reader_refuses_a_replaced_object():
         def get(self, **kwargs):
             body = _FakeBody(b"NEWER")
             self.bodies.append(body)
-            return {"Body": body, "ContentRange": _content_range(0, 5)}
+            return {"Body": body, "ContentRange": _content_range(0, 5), "ETag": self.e_tag}
 
     obj = ReplacedObject(b"old")
     with pytest.raises(OSError, match="changed while it was read"):
         S3RangeReader(obj).read(3)
     assert obj.bodies[0].closed is True
     assert obj.bodies[0].delivered == 0
+
+
+@pytest.mark.parametrize("response_etag", ['"another-generation"', None])
+def test_s3_range_reader_refuses_an_unverified_generation_with_a_matching_range(response_etag):
+    class UnverifiedObject(_FakeS3Object):
+        def get(self, **kwargs):
+            response = super().get(**kwargs)
+            if response_etag is None:
+                del response["ETag"]
+            else:
+                response["ETag"] = response_etag
+            return response
+
+    obj = UnverifiedObject(PAYLOAD)
+    with S3RangeReader(obj) as reader:
+        reader.seek(7)
+        with pytest.raises(OSError, match="changed while it was read"):
+            reader.read(3)
+        assert reader.tell() == 7
+        assert obj.bodies[0].closed
+        assert obj.bodies[0].delivered == 0
 
 
 def test_real_s3_storage_open_streams_with_ranged_get_object(settings):
@@ -299,6 +329,7 @@ def test_real_s3_storage_open_streams_with_ranged_get_object(settings):
             {
                 "Body": StreamingBody(io.BytesIO(PAYLOAD[100:]), len(PAYLOAD) - 100),
                 "ContentRange": _content_range(100, len(PAYLOAD)),
+                "ETag": '"abc"',
             },
             {
                 "Bucket": "archive-media",

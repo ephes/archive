@@ -1437,9 +1437,9 @@ Long recordings must pass: archival, staging and the batch job are sized for mul
 - **Memory.** Archived media on S3-compatible storage is read with ranged `GetObject` requests
   (`S3RangeReader`): the public audio route, the sync transcription read and the staged upload
   stream the bytes they need. An object without an ETag is refused. Every ranged request is
-  pinned to the object's ETag from the opening `HeadObject` (`IfMatch`) and must return the matching `Content-Range`, so a replaced
-  object fails the read instead of being stitched into the stream; the backend's download
-  parameters (for example SSE-C keys) are passed on. A failed read closes its stream
+  pinned to the object's ETag from the opening `HeadObject` (`IfMatch`). Before reading
+  the body, Archive requires the response to return that ETag and the expected `Content-Range`.
+  The backend's download parameters (for example SSE-C keys) are passed on. A failed read closes its stream
   and leaves the offset unchanged so a retry starts a fresh ranged request. django-storages' own `S3File` would copy the whole object into
   memory on first read (`AWS_S3_MAX_MEMORY_SIZE` is 0 by default), which a multi-gigabyte
   recording cannot afford. A range request for a public player reads only the requested bytes.

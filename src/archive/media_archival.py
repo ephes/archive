@@ -794,9 +794,9 @@ class S3RangeReader(io.RawIOBase):
     Each read continues one open ``GetObject`` stream from the current position;
     a seek elsewhere closes it and the next read starts a new ranged request.
     ``size`` is the object length from the ``HeadObject`` made when it was opened.
-    Every ranged request is pinned to that object's ETag (``IfMatch``) and its
-    ``Content-Range`` must name the same total length, so a replaced object can
-    never be stitched into the stream.
+    Every ranged request uses that object's ETag (``IfMatch``). The response must
+    echo the ETag and return the requested ``Content-Range`` before any bytes
+    are read.
     """
 
     def __init__(self, s3_object, *, extra_args: dict[str, object] | None = None) -> None:
@@ -875,7 +875,7 @@ class S3RangeReader(io.RawIOBase):
         response = self._object.get(**kwargs)
         body = response["Body"]
         expected = f"bytes {self._position}-{self.size - 1}/{self.size}"
-        if response.get("ContentRange") != expected:
+        if response.get("ContentRange") != expected or response.get("ETag") != self._etag:
             try:
                 body.close()
             except Exception:  # noqa: BLE001 - the mismatch is the error to report

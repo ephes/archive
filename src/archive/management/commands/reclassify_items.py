@@ -114,6 +114,11 @@ class Command(BaseCommand):
         if options["limit"] is not None and options["limit"] <= 0:
             raise CommandError("--limit must be strictly positive.")
 
+        hosts = {host.strip().lower() for host in options["host"]}
+        if "" in hosts:
+            raise CommandError("--host must not be blank.")
+        options["host"] = hosts
+
         selectors_used = any(
             (
                 options["item_ids"],
@@ -225,7 +230,7 @@ class Command(BaseCommand):
         return self._matches_host(item.pk, item.original_url, options)
 
     def _matches_host(self, item_id: int, original_url: str, options: dict[str, Any]) -> bool:
-        allowed_hosts = {host.strip().lower() for host in options["host"] if host.strip()}
+        allowed_hosts = options["host"]
         if not allowed_hosts:
             return True
         try:

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.db import transaction
 from django.db.models.query import QuerySet
 
@@ -13,6 +14,22 @@ from archive.management.commands import reclassify_items
 from archive.models import EnrichmentStatus, Item, ItemKind
 
 pytestmark = pytest.mark.django_db
+
+
+@pytest.mark.parametrize("selectors", [[], ["--host", "example.test"], ["--all"]])
+def test_replay_rejects_blank_explicit_host_before_inventory(selectors, django_assert_num_queries):
+    Item.objects.bulk_create(
+        [
+            Item(original_url="https://example.test/story", classification_engine_version=0),
+            Item(original_url="https://other.test/story", classification_engine_version=0),
+        ]
+    )
+    with django_assert_num_queries(0):
+        with pytest.raises(CommandError, match="--host must not be blank"):
+            call_command(
+                "reclassify_items", *selectors, "--host", "  ", "--apply", stdout=StringIO()
+            )
+    assert list(Item.objects.values_list("classification_engine_version", flat=True)) == [0, 0]
 
 
 def test_replay_uses_edits_and_completed_work_after_selection(monkeypatch):
@@ -243,8 +260,6 @@ def test_replay_stops_at_starting_horizon_despite_new_batches(monkeypatch, apply
 @pytest.mark.parametrize("apply", [False, True])
 @pytest.mark.parametrize("host_filter", [False, True])
 def test_replay_malformed_legacy_url_has_fixed_diagnostic(apply, host_filter):
-    from django.core.management.base import CommandError
-
     item = Item.objects.create(original_url="https://[private-token]/private-path?signature=secret")
     args = [
         "--all",

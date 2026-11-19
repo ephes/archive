@@ -1142,7 +1142,8 @@ The command does not delete stored media.
 
 - use `just manage reclassify_items --item-id <id>` for a dry-run replay of one or more items
 - use selectors such as `--host <host>`, `--rule <rule>`, `--empty-rule`, `--empty-evidence`, or
-  `--stale-only` to narrow a historical replay pass
+  `--stale-only` to narrow a historical replay pass. Every explicit `--host` must be
+  nonblank after trimming whitespace.
 - use `--limit N` for a strictly positive cap after filtering; zero/negative values
   fail before selection or mutation. Omitting the limit inspects all matches.
 - add `--apply` to persist `kind`, `classification_rule`, `classification_evidence`, and the stored engine

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reject blank explicit `reclassify_items --host` selectors before inventory or writes.
+
 - Check trailing batch transcript coverage when Voxhelm supplies measured audio duration.
   Admit only regular, single-link downloader audio and verify its identity at upload.
 

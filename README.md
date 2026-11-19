@@ -1068,7 +1068,9 @@ Each general/podcast RSS response uses one SQLite read snapshot from the first
 count/policy query through page selection, hydration, enclosure metadata and complete
 XML rendering. It shares the processing-health snapshot scope: an existing transaction
 keeps ownership of its lifecycle, otherwise a deferred read transaction is committed
-or rolled back and autocommit restored before returning the buffered response. Feed
+or rolled back and autocommit restored before returning the buffered response. A commit
+failure also triggers rollback. If rollback or restoring autocommit fails, the connection closes
+so Django can reconnect on the next request and the initiating error still propagates. Feed
 rendering performs no remote fetch or audio generation. Concurrent WAL writers can
 commit while a response reads its original generation; publication, unpublication and
 summary/policy edits appear in the next response's snapshot. A response already being

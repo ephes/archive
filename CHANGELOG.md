@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preserve the initiating health or feed snapshot error, roll back failed commits, and
+  close connections when rollback or autocommit restoration fails.
+
 - Match reclassification hostnames across ports. Use brackets for IPv6 selectors and omit
   ports from all host selectors.
 

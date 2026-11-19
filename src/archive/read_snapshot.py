@@ -1,7 +1,7 @@
 """Short SQLite read snapshots shared by public feeds and processing health."""
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 
 from django.db import connection, transaction
 
@@ -17,15 +17,33 @@ def snapshot_read_transaction() -> Iterator[None]:
         with transaction.atomic():
             yield
         return
-    connection.set_autocommit(False)
     try:
+        connection.set_autocommit(False)
         with connection.cursor() as cursor:
             cursor.execute("BEGIN DEFERRED")
         yield
+        connection.commit()
     except BaseException:
-        connection.rollback()
+        rollback_failed = False
+        try:
+            connection.rollback()
+        except BaseException:
+            rollback_failed = True
+        with suppress(BaseException):
+            _restore_autocommit(retire=rollback_failed)
         raise
     else:
-        connection.commit()
-    finally:
+        _restore_autocommit()
+
+
+def _restore_autocommit(*, retire: bool = False) -> None:
+    try:
         connection.set_autocommit(True)
+    except BaseException:
+        retire = True
+        raise
+    finally:
+        if retire:
+            # Django reconnects on the next use. Closing must preserve the primary error.
+            with suppress(BaseException):
+                connection.close()

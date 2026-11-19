@@ -38,12 +38,14 @@ Public endpoints:
   rechecks that the item is still public. After opening storage, the archived audio
   route checks that the item is still public and that its archived path, size and
   content type still match. If the check fails, it closes the file and returns
-  `404` with `no-store` before evaluating conditional request headers. Each
-  response carries a strong `ETag`
-  bound to the route, item, stored object key, recorded size and content type, so a
-  matching `If-None-Match` gets a cheap `304` (handle closed once) and a new object
-  generation gets a new validator. `If-Range` is honoured only when it equals the
-  current `ETag`; anything else, including dates, gets the whole file. Unpublished or
+  `404` with `no-store` before evaluating conditional request headers. The strong
+  `ETag` binds the route, item, stored object key, recorded size and content type.
+  Archived audio opened with the S3 range reader also uses the opened object's ETag,
+  so a same-size replacement at the same key gets a fresh HTTP validator. Other
+  readers rely on a new storage key for each published generation. A matching
+  `If-None-Match` gets a cheap `304` (handle closed once).
+  `If-Range` is honoured only when it equals the current `ETag`; anything else,
+  including dates, gets the whole file. Unpublished or
   deleted items answer `404` with `no-store`; all other error responses of both
   routes (except a `416` for a stable unsatisfiable range) are `no-store` too. The
   revocation window for conforming caches is therefore the next request. Responses
@@ -54,9 +56,9 @@ Public endpoints:
   exception text, traceback, object key or signed URL; acquired handles close once.
   Before any length, range or body is committed, a known recorded size is compared
   with the opened object's own length. S3 readers use object length metadata without
-  loading or spooling the object for HEAD and conditional 304 responses. Full and
-  range GETs of an S3 file with a known recorded size also compare the length of the
-  downloaded copy, since that download is not pinned to the opened metadata. There a
+  loading or spooling the object for HEAD and conditional 304 responses. For readers
+  that spool an S3 object with a known recorded size, full and range GETs compare
+  the downloaded copy's length, since that download is not pinned to the opened metadata. There a
   failed download answers a `no-store` 502 and logs the fixed
   `stored_media_download_failed` event without backend exception text, and a partial
   copy is never served. Local files
@@ -1443,8 +1445,9 @@ Long recordings must pass: archival, staging and the batch job are sized for mul
   stream the bytes they need. An object without an ETag is refused. Every ranged request is
   pinned to the object's ETag from the opening `HeadObject` (`IfMatch`). Before reading
   the body, Archive requires the response to return that ETag and the expected `Content-Range`.
-  The backend's download parameters (for example SSE-C keys) are passed on. A failed read closes its stream
-  and leaves the offset unchanged so a retry starts a fresh ranged request. django-storages' own `S3File` would copy the whole object into
+  The backend's download parameters (for example SSE-C keys) are passed on. A failed
+  read closes its stream and leaves the offset unchanged so a retry starts a fresh
+  ranged request. django-storages' own `S3File` would copy the whole object into
   memory on first read (`AWS_S3_MAX_MEMORY_SIZE` is 0 by default), which a multi-gigabyte
   recording cannot afford. A range request for a public player reads only the requested bytes.
 - **Disk.** Media work refuses to start unless the temporary directory

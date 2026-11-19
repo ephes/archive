@@ -805,11 +805,17 @@ class S3RangeReader(io.RawIOBase):
         self._position = 0
         self._object = s3_object
         self.size = int(s3_object.content_length)
-        self._etag = s3_object.e_tag
-        if not self._etag:
+        etag = s3_object.e_tag
+        if not isinstance(etag, str) or not etag:
             # Without a validator a same-length replacement could be stitched in.
             raise OSError("Archived media object has no ETag")
+        self._etag = etag
         self._extra_args = dict(extra_args or {})
+
+    @property
+    def object_etag(self) -> str:
+        """The object ETag captured at open and used for all range requests."""
+        return self._etag
 
     def readable(self) -> bool:
         return True

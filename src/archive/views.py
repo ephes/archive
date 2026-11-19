@@ -46,7 +46,7 @@ from archive.classification import (
 )
 from archive.forms import ArchiveAuthenticationForm, ItemForm
 from archive.json_objects import unique_json_object as _unique_json_object
-from archive.media_archival import MediaArchivalError, open_archived_audio
+from archive.media_archival import MediaArchivalError, S3RangeReader, open_archived_audio
 from archive.media_responses import ranged_file_response
 from archive.models import Item, ItemKind, PodcastFeedPolicy
 from archive.processing_health import processing_health_snapshot
@@ -536,8 +536,19 @@ def weekly_items_json(request: HttpRequest, week: str) -> JsonResponse:
 PUBLIC_AUDIO_CACHE_CONTROL = "public, no-cache"
 
 
-def _public_audio_etag(route: str, pk: int, object_name: str, size: int, content_type: str) -> str:
-    identity = "\0".join((route, str(pk), object_name, str(size), content_type))
+def _public_audio_etag(
+    route: str,
+    pk: int,
+    object_name: str,
+    size: int,
+    content_type: str,
+    *,
+    object_etag: str | None = None,
+) -> str:
+    parts = [route, str(pk), object_name, str(size), content_type]
+    if object_etag is not None:
+        parts.append(object_etag)
+    identity = "\0".join(parts)
     return '"' + hashlib.sha256(identity.encode()).hexdigest()[:32] + '"'
 
 
@@ -603,6 +614,7 @@ def item_archived_audio(request: HttpRequest, pk: int) -> HttpResponse:
             item.archived_audio_path,
             item.archived_audio_size_bytes,
             content_type,
+            object_etag=audio_file.object_etag if isinstance(audio_file, S3RangeReader) else None,
         ),
     )
 

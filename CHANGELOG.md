@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Bind public archived audio validators to the opened S3 object ETag so replacing
+  an object at the same key and size invalidates cached audio.
+
 - Recheck archived audio visibility and metadata after opening storage, before
   serving bytes or revalidating a cached response.
 

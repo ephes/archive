@@ -388,6 +388,37 @@ def test_public_archived_audio_from_s3_reads_only_the_served_bytes(
     assert all(b.closed for b in obj.bodies)
 
 
+@pytest.mark.django_db
+def test_public_archived_audio_revalidates_against_the_opened_s3_generation(
+    client, s3_archive_media
+):
+    item = _long_item(3, is_public=True)
+    url = reverse("archive:item-archived-audio", kwargs={"pk": item.pk})
+    original = _FakeS3Object(b"old")
+    s3_archive_media[item.archived_audio_path] = original
+
+    first = client.head(url)
+    first.close()
+    assert first.status_code == 200
+    etag = first["ETag"]
+    same = client.get(url, headers={"If-None-Match": etag})
+    same.close()
+    assert same.status_code == 304
+    assert original.ranges == []
+
+    replacement = _FakeS3Object(b"new")
+    replacement.e_tag = '"etag-2"'
+    s3_archive_media[item.archived_audio_path] = replacement
+    response = client.get(url, headers={"If-None-Match": etag})
+    try:
+        assert response.status_code == 200
+        assert response["ETag"] != etag
+        assert b"".join(response.streaming_content) == b"new"
+    finally:
+        response.close()
+    assert replacement.calls == [{"Range": "bytes=0-", "IfMatch": replacement.e_tag}]
+
+
 def test_ensure_temp_space_keeps_the_reserve(settings, monkeypatch):
     settings.ARCHIVE_MEDIA_TEMP_RESERVE_BYTES = 100
     monkeypatch.setattr("archive.media_archival._temp_free_bytes", lambda: 1_000)

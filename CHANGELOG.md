@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Count only positive-duration segments as batch transcript coverage and close archived
+  audio staging readers immediately when a send fails.
+
 - Check media helper output size on a fixed cadence and after nonzero exits.
 
 - Retain immediately completed batch jobs after transient segment artifact read failures.

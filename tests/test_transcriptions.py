@@ -1274,3 +1274,66 @@ def test_pending_reconciliation_uses_post_lock_time(voxhelm, monkeypatch, lock_w
     else:
         assert item.transcript_status == EnrichmentStatus.FAILED
         assert item.transcript_job_id == ""
+
+
+@pytest.mark.django_db
+def test_point_segments_cannot_hide_uncovered_batch_audio(voxhelm, settings):
+    settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = 25
+    voxhelm.state = "succeeded"
+    voxhelm.segments = _segments((0, 1), (80, 81)) + [
+        {"start": point, "end": point} for point in (20, 40, 60)
+    ]
+
+    with pytest.raises(TranscriptionJobFailed, match="0:00:01 to 0:01:20"):
+        _transcribe_through_batch_job(_oversized_archived_audio_item())
+
+
+def test_gap_check_rejects_point_only_evidence():
+    with pytest.raises(TranscriptionGenerationError, match="positive span"):
+        find_transcript_gaps([{"start": 5, "end": 5}], max_gap_seconds=10)
+
+
+@pytest.mark.parametrize(
+    ("read_payload", "close_error"), [(False, False), (True, False), (True, True)]
+)
+def test_staging_closes_reader_even_if_failed_transport_keeps_request(
+    voxhelm, monkeypatch, read_payload, close_error
+):
+    from io import BytesIO
+    from urllib.error import URLError
+
+    from archive import transcriptions
+
+    class Reader(BytesIO):
+        def close(self):
+            was_closed = self.closed
+            super().close()
+            if close_error and not was_closed:
+                raise OSError("synthetic close failure")
+
+    source = transcriptions.TranscriptionSource(
+        kind="archived_audio", location="audio.mp3", content_type="audio/mpeg", size_bytes=4
+    )
+    opened = []
+    retained = []
+
+    def open_audio(item):
+        reader = Reader(b"test")
+        opened.append(reader)
+        return reader
+
+    def interrupted_transport(request, timeout):
+        retained.append(request)
+        if read_payload:
+            next(request.data)  # Multipart headers.
+            assert next(request.data) == b"test"
+        raise URLError("synthetic send failure")
+
+    monkeypatch.setattr(transcriptions, "open_archived_audio", open_audio)
+    monkeypatch.setattr(transcriptions, "urlopen", interrupted_transport)
+    with pytest.raises(TranscriptionGenerationError, match=r"transport error \(URLError\)"):
+        transcriptions._stage_archived_audio_upload(item=Item(), source=source, timeout=30)
+
+    assert retained
+    assert len(opened) == int(read_payload)
+    assert all(reader.closed for reader in opened)

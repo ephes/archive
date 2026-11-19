@@ -751,7 +751,8 @@ lives in the database, a worker restart or deploy picks the polling up again. A 
 (the archived audio changed) is not resumed; the current audio is uploaded instead. Summaries generated while
 the job runs are refreshed from the transcript once it arrives. Archive then reads the job's segment JSON and rejects the
 transcript as incomplete when a stretch of audio longer than `ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS`
-(10 minutes) has no segment: whisper.cpp splits long audio across processors and ignores a worker
+(10 minutes) has no segment with a positive span. Zero-length segments carry no coverage
+and an artifact with only zero-length segments fails admission. whisper.cpp splits long audio across processors and ignores a worker
 thread that fails, so a job can succeed with whole parts of the audio missing (item 408, a 3:09 h
 podcast, kept text for only 44 % of its audio). The transcript step then fails with that error instead of
 storing the partial text; requeue it with `reprocess_items --only transcript`. The check cannot see
@@ -1419,7 +1420,8 @@ Long recordings must pass: archival, staging and the batch job are sized for mul
   keeps `ARCHIVE_MEDIA_TEMP_RESERVE_BYTES` (2 GiB) free after its files: one limit-sized file for a
   direct audio download (the downloaded file is uploaded to storage directly), two for video
   sources (download plus extracted audio) and YouTube pages (download plus MP3 conversion), and the
-  archived size for staging (the request body is spooled once before it is sent). Local
+  archived size for staging (the request body is spooled once before it is sent). A failed
+  staging request closes any open archived audio reader before releasing the disk lock. Local
   filesystem storage on the same volume also counts the copies it stores: the audio for direct
   audio and YouTube pages, the source and the audio for direct video. With the defaults
   (16 GiB limit, 2 GiB reserve) a start needs this much free space:

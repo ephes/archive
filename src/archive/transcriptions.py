@@ -6,7 +6,7 @@ import math
 import mimetypes
 import re
 import uuid
-from contextlib import ExitStack, closing
+from contextlib import ExitStack, closing, suppress
 from dataclasses import dataclass
 from time import monotonic
 from urllib.error import HTTPError, URLError
@@ -528,7 +528,10 @@ def find_transcript_gaps(
         start, end = _seconds(segment.get("start")), _seconds(segment.get("end"))
         if start is None or end is None or start > end:
             raise TranscriptionGenerationError("Batch transcription segment times were invalid")
-        intervals.append((start, end))
+        if start < end:
+            intervals.append((start, end))
+    if not intervals:
+        raise TranscriptionGenerationError("Batch transcription segments lacked a positive span")
 
     gaps: list[tuple[float, float]] = []
     covered_until = 0.0
@@ -593,17 +596,18 @@ def _send_staged_upload(
     filename = _transcription_source_filename(source=source, default_suffix=suffix)
     content_type = source.content_type.lower() or SUPPORTED_SUFFIXES[suffix]
     boundary = f"archive-{uuid.uuid4().hex}"
+    body = _iter_file_multipart_formdata(
+        boundary=boundary,
+        field_name="file",
+        filename=filename,
+        content_type=content_type,
+        file_opener=lambda: open_archived_audio(item),
+        expected_size=source.size_bytes,
+        deadline=deadline,
+    )
     request = Request(
         _api_url("uploads"),
-        data=_iter_file_multipart_formdata(
-            boundary=boundary,
-            field_name="file",
-            filename=filename,
-            content_type=content_type,
-            file_opener=lambda: open_archived_audio(item),
-            expected_size=source.size_bytes,
-            deadline=deadline,
-        ),
+        data=body,
         headers={
             "Authorization": f"Bearer {settings.ARCHIVE_TRANSCRIPTION_API_KEY}",
             "Content-Type": f"multipart/form-data; boundary={boundary}",
@@ -617,12 +621,20 @@ def _send_staged_upload(
         },
         method="POST",
     )
-    payload = _request_json(
-        request=request,
-        timeout=timeout,
-        deadline=deadline,
-        error_prefix="Archived audio staging failed",
-    )
+    try:
+        payload = _request_json(
+            request=request,
+            timeout=timeout,
+            deadline=deadline,
+            error_prefix="Archived audio staging failed",
+        )
+    except BaseException:
+        # A failed transport may retain a request with a suspended body iterator.
+        with suppress(Exception):
+            body.close()
+        raise
+    else:
+        body.close()
     try:
         return wire_id(payload.get("id"))
     except ValueError:

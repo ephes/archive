@@ -935,7 +935,8 @@ over about two and a half hours).
 
 Per step:
 
-- `successes` / `failures`: attempts in the last `window_hours` (24). Rising failures are the
+- `successes` / `failures`: attempts from `generated_at - window_hours` (24 hours)
+  through `generated_at`, including both endpoints. Rising failures are the
   "errors are increasing" signal.
 - `last_success_at` / `last_success_age_seconds`: the latest success, kept indefinitely; `null`
   if the step never succeeded since the health tables were created.
@@ -947,6 +948,10 @@ Per step:
 - `failing_items`: distinct items with a failed attempt since `failing_since`. Retries of one
   item count once, so a value of two or more points to a systemic problem rather than one
   broken source.
+
+An explicit `now` passed to `processing_health_snapshot` sets the event window and
+the reference for age calculations. Latest timestamps and streak membership
+reflect the current durable state in the read snapshot.
 
 Each outcome prunes at most 100 events older than 30 days, oldest timestamp first
 (then primary key). Repeated outcomes drain a retention backlog; expired events

@@ -118,13 +118,14 @@ def _prune_events(*, cutoff: datetime, using: str = "default") -> None:
 
 
 def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:
+    """Bound event totals by now, while reading the current durable streak state."""
     now = now or timezone.now()
     window_start = now - HEALTH_WINDOW
     with snapshot_read_transaction():
         states = {state.step: state for state in ProcessingStepState.objects.all()}
         counts: dict[tuple[str, bool], int] = {
             (row["step"], row["succeeded"]): row["total"]
-            for row in ProcessingEvent.objects.filter(occurred_at__gte=window_start)
+            for row in ProcessingEvent.objects.filter(occurred_at__range=(window_start, now))
             .values("step", "succeeded")
             .annotate(total=Count("id"))
         }

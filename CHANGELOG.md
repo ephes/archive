@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Exclude processing events after the health report's generation time from recent totals.
+
 - Validate opened S3 audio lengths from metadata, avoiding full reads on HEAD and
   cache revalidation.
 

@@ -81,6 +81,29 @@ def test_window_counts_exclude_older_events() -> None:
 
 
 @pytest.mark.django_db
+def test_window_counts_include_both_boundaries_and_exclude_future_events() -> None:
+    for occurred_at in (
+        NOW - timedelta(hours=24, microseconds=1),
+        NOW - timedelta(hours=24),
+        NOW,
+        NOW + timedelta(microseconds=1),
+    ):
+        for succeeded in (True, False):
+            record_step_outcome(YOUTUBE, succeeded=succeeded, item_id=1, now=occurred_at)
+    # A later failure advances the live streak independently of the event window.
+    future = NOW + timedelta(seconds=1)
+    record_step_outcome(YOUTUBE, succeeded=False, item_id=2, now=future)
+
+    step = processing_health_snapshot(now=NOW)["steps"][YOUTUBE]
+
+    assert step["successes"] == 2
+    assert step["failures"] == 2
+    assert step["last_failure_at"] == future.isoformat()
+    assert step["failing_since"] == future.isoformat()
+    assert step["failing_items"] == 1
+
+
+@pytest.mark.django_db
 def test_failing_since_tracks_failures_after_the_latest_success() -> None:
     _record(YOUTUBE, True, 1, hours_ago=100)
     _record(YOUTUBE, False, 2, hours_ago=50)
@@ -370,7 +393,7 @@ def interleave(execute, sql, params, many, context):
     global changed
     if not changed and 'SELECT' in sql and 'archive_processingevent' in sql:
         changed = True
-        stamp = (now-timedelta(hours=1)).isoformat()
+        stamp = connection.ops.adapt_datetimefield_value(now - timedelta(hours=1))
         with writer:
             writer.execute(
                 'UPDATE archive_processingstepstate '

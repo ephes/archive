@@ -742,9 +742,11 @@ item (`transcript_job_id`, with the job's source fingerprint and submission time
 `pending` with a `transcript_poll_at` time `ARCHIVE_TRANSCRIPTION_POLL_SECONDS` later, and moves on to other
 items. A later pass makes one `GET /v1/jobs/<id>` request: a running job is polled again later, a failed job
 fails the step and forgets the job, and a finished job is checked and stored. A stored job is never uploaded
-again; status requests that fail (HTTP errors, timeouts) keep the job and retry until
+again. Transient status or segment artifact read failures (including on immediate completion)
+keep the job and retry until
 `ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS` (2 hours, longer for long recordings, see
-`ARCHIVE_TRANSCRIPTION_JOB_MIN_BYTES_PER_SECOND`) after submission, then the step fails. Because the job
+`ARCHIVE_TRANSCRIPTION_JOB_MIN_BYTES_PER_SECOND`) after submission. Pending reconciliation measures age and schedules the next poll after locking
+and refreshing the item row. Because the job
 lives in the database, a worker restart or deploy picks the polling up again. A job made for an older source
 (the archived audio changed) is not resumed; the current audio is uploaded instead. Summaries generated while
 the job runs are refreshed from the transcript once it arrives. Archive then reads the job's segment JSON and rejects the

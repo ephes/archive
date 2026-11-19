@@ -527,12 +527,12 @@ def _mark_transcript_pending(item: Item, pending: TranscriptionPending, *, expec
         settings.ARCHIVE_TRANSCRIPTION_MAX_JOB_AGE_SECONDS
     )
     using = item._state.db or router.db_for_write(Item, instance=item)
-    now = timezone.now()
     job = pending.job
     with transaction.atomic(using=using):
         item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
         if not _current_result(item, "transcript", expected):
             return True
+        now = timezone.now()
         # A long recording's job may run longer than the fixed age: allow at least
         # its archived size at the configured minimum processing rate.
         max_age = max(

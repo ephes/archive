@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Retain immediately completed batch jobs after transient segment artifact read failures.
+  Measure pending batch job age and schedule the next poll after locking the item row.
+
 - Let long recordings pass. `ARCHIVE_MEDIA_ARCHIVE_MAX_BYTES` now defaults to 16 GiB
   (was 250 MiB), the same ceiling as Voxhelm's staged uploads. Archived media on S3
   storage is streamed with ranged `GetObject` requests instead of django-storages

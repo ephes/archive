@@ -393,14 +393,18 @@ def _request_staged_archived_audio_transcription(
         timeout=_remaining(deadline),
         deadline=deadline,
     )
+    job = BatchTranscriptionJob(
+        job_id=update.job_id,
+        job_ref=_transcription_job_task_ref(item=item, source=source),
+    )
     if update.is_pending:
-        raise TranscriptionPending(
-            BatchTranscriptionJob(
-                job_id=update.job_id,
-                job_ref=_transcription_job_task_ref(item=item, source=source),
-            )
-        )
-    return _finish_batch_transcription_job(update=update, deadline=deadline)
+        raise TranscriptionPending(job)
+    try:
+        return _finish_batch_transcription_job(update=update, deadline=deadline)
+    except TranscriptionJobFailed:
+        raise
+    except TranscriptionGenerationError as exc:
+        raise TranscriptionPending(job, poll_error=str(exc)) from None
 
 
 def _poll_stored_batch_transcription_job(*, job: BatchTranscriptionJob, deadline: float) -> str:

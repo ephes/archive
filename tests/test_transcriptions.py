@@ -763,6 +763,7 @@ class _FakeVoxhelm:
     def __init__(self) -> None:
         self.requested: list[str] = []
         self.state = "queued"
+        self.submitted_state = "queued"
         self.poll_error: Exception | None = None
         self.segments = _segments((0, 3000))
         self.artifact: dict[str, object] = {"text": "Async batch transcript"}
@@ -778,7 +779,7 @@ class _FakeVoxhelm:
             payload = {"id": "upload-123"}
         elif url == f"{self.BASE}/jobs":
             self.jobs += 1
-            payload = {"id": f"job-{self.jobs}", "state": "queued"}
+            payload = self.job_payload(f"job-{self.jobs}", self.submitted_state)
         elif url.endswith("/artifacts/transcript.json"):
             if self.artifact_error is not None:
                 raise self.artifact_error
@@ -788,15 +789,19 @@ class _FakeVoxhelm:
             if self.poll_error is not None:
                 raise self.poll_error
             job_id = url.rsplit("/", 1)[1]
-            payload = {"id": job_id, "state": self.state}
-            if self.state == "succeeded":
-                payload["result"] = {
-                    "text": " Async   batch transcript ",
-                    "artifacts": {"json": f"/v1/jobs/{job_id}/artifacts/transcript.json"},
-                }
+            payload = self.job_payload(job_id, self.state)
         return _FakeResponse(
             json.dumps(payload).encode("utf-8"), content_type="application/json", url=url
         )
+
+    def job_payload(self, job_id: str, state: str) -> dict[str, object]:
+        payload: dict[str, object] = {"id": job_id, "state": state}
+        if state == "succeeded":
+            payload["result"] = {
+                "text": " Async   batch transcript ",
+                "artifacts": {"json": f"/v1/jobs/{job_id}/artifacts/transcript.json"},
+            }
+        return payload
 
     def uploads(self) -> int:
         return self.requested.count(f"{self.BASE}/uploads")
@@ -999,17 +1004,22 @@ def test_batch_artifact_binding_uses_publication_normalization(voxhelm, identity
 
 
 @pytest.mark.django_db
-def test_artifact_transport_error_keeps_job_for_matching_retry(voxhelm):
+@pytest.mark.parametrize("immediately_complete", [False, True])
+def test_artifact_transport_error_keeps_job_for_matching_retry(voxhelm, immediately_complete):
     from urllib.error import URLError
 
     from archive.models import EnrichmentStatus
     from archive.services import enrich_item_transcript
 
     item = _claimed_batch_item()
-    assert enrich_item_transcript(item) is True
-    item.refresh_from_db()
-    submitted_at = item.transcript_job_submitted_at
-    _make_poll_due(item)
+    submitted_at = None
+    if immediately_complete:
+        voxhelm.submitted_state = "succeeded"
+    else:
+        assert enrich_item_transcript(item) is True
+        item.refresh_from_db()
+        submitted_at = item.transcript_job_submitted_at
+        _make_poll_due(item)
     voxhelm.state = "succeeded"
     voxhelm.artifact_error = URLError("synthetic unavailable artifact")
 
@@ -1018,7 +1028,9 @@ def test_artifact_transport_error_keeps_job_for_matching_retry(voxhelm):
     item.refresh_from_db()
     assert item.transcript_status == EnrichmentStatus.PENDING
     assert item.transcript_job_id == "job-1"
-    assert item.transcript_job_submitted_at == submitted_at
+    assert item.transcript_job_submitted_at is not None
+    if submitted_at is not None:
+        assert item.transcript_job_submitted_at == submitted_at
     assert item.transcript == ""
     assert item.short_summary == "Summary from metadata"
     _make_poll_due(item)
@@ -1224,3 +1236,41 @@ def test_item_reprocess_keeps_a_running_job_and_polls_it_now(voxhelm) -> None:
     assert item.transcript_status == EnrichmentStatus.PENDING
     assert item.transcript_job_id == "job-1"
     assert item.transcript_poll_at is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("lock_wait_seconds", [1, 3])
+def test_pending_reconciliation_uses_post_lock_time(voxhelm, monkeypatch, lock_wait_seconds):
+    from django.utils import timezone
+
+    from archive.models import EnrichmentStatus
+    from archive.services import enrich_item_transcript
+
+    item = _claimed_batch_item()
+    assert enrich_item_transcript(item) is True
+    before_lock = timezone.now()
+    after_lock = before_lock + timezone.timedelta(seconds=lock_wait_seconds)
+    Item.objects.filter(pk=item.pk).update(
+        transcript_job_submitted_at=before_lock - timezone.timedelta(seconds=7198),
+        transcript_poll_at=before_lock,
+    )
+    item.refresh_from_db()
+    refresh = item.refresh_from_db
+    now = before_lock
+
+    def refresh_with_lock_wait(**kwargs):
+        nonlocal now
+        refresh(**kwargs)
+        if "from_queryset" in kwargs:
+            now = after_lock
+
+    monkeypatch.setattr(item, "refresh_from_db", refresh_with_lock_wait)
+    monkeypatch.setattr("archive.services.timezone.now", lambda: now)
+
+    assert enrich_item_transcript(item) is (lock_wait_seconds == 1)
+    refresh()
+    if lock_wait_seconds == 1:
+        assert item.transcript_poll_at == after_lock + timezone.timedelta(seconds=60)
+    else:
+        assert item.transcript_status == EnrichmentStatus.FAILED
+        assert item.transcript_job_id == ""

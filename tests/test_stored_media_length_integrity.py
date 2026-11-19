@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from unittest.mock import Mock
 
 import pytest
 from django.core.files import File
@@ -10,6 +11,7 @@ from django.core.files.base import ContentFile
 from django.core.files.storage import storages
 from django.test import RequestFactory
 from django.urls import reverse
+from storages.backends.s3 import S3File
 
 from archive.media_responses import ranged_file_response
 from archive.models import EnrichmentStatus, Item, ItemKind
@@ -208,3 +210,40 @@ def test_unusable_size_evidence_keeps_documented_behavior(db, size):
     assert b"".join(response.streaming_content) == PAYLOAD
     response.close()
     assert handle.closes == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("reported_size", [len(PAYLOAD), len(PAYLOAD) - 1])
+@pytest.mark.parametrize("conditional", [False, True], ids=["HEAD", "conditional-GET"])
+def test_lazy_s3_file_validates_head_and_revalidation_without_spooling(
+    client, monkeypatch, reported_size, conditional
+):
+    url = _item("item-article-audio", PAYLOAD, recorded=len(PAYLOAD))
+    etag = client.head(url)["ETag"]
+    storage = Mock(location="", max_memory_size=0, gzip=False)
+    storage.get_object_parameters.return_value = {}
+    obj = storage.bucket.Object.return_value
+    obj.content_length = reported_size
+    obj.download_fileobj.side_effect = lambda file, **_: file.write(PAYLOAD)
+    handle = S3File("synthetic.mp3", "rb", storage, buffer_size=1)
+    close = Mock(wraps=handle.close)
+    monkeypatch.setattr(handle, "close", close)
+    monkeypatch.setattr(
+        Item._meta.get_field("article_audio_file").storage, "open", lambda *a, **kw: handle
+    )
+
+    response = client.get(url, headers={"If-None-Match": etag}) if conditional else client.head(url)
+
+    obj.download_fileobj.assert_not_called()
+    if reported_size != len(PAYLOAD):
+        assert response.status_code == 502
+        assert response["Cache-Control"] == "no-store"
+    else:
+        assert response.status_code == (304 if conditional else 200)
+        assert response["ETag"] == etag
+        if not conditional:
+            assert response["Content-Length"] == str(len(PAYLOAD))
+            assert response["Accept-Ranges"] == "bytes"
+            assert b"".join(response.streaming_content) == b""
+    response.close()
+    close.assert_called_once_with()

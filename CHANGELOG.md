@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Validate opened S3 audio lengths from metadata, avoiding full reads on HEAD and
+  cache revalidation.
+
 - Preserve the initiating health or feed snapshot error, roll back failed commits, and
   close connections when rollback or autocommit restoration fails.
 

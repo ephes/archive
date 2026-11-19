@@ -16,11 +16,15 @@ from typing import IO
 from django.db.models.fields.files import FieldFile
 from django.http import FileResponse, HttpRequest, HttpResponse, HttpResponseNotModified
 from django.utils.http import parse_etags
+from storages.backends.s3 import S3File
+
+from archive.media_archival import S3RangeReader
 
 logger = logging.getLogger(__name__)
 
 # At most 18 digits per number: enough for any file, and it bounds int().
 _RANGE_RE = re.compile(r"bytes=([0-9]{0,18})-([0-9]{0,18})")
+_LAZY_STORAGE_READERS = (S3File, S3RangeReader)
 
 
 class UnsatisfiableRange(Exception):
@@ -104,11 +108,12 @@ def ranged_file_response(
 
     transferred = False
     try:
-        if size > 0:
-            available = opened_object_length(file_handle)
-            if available is not None and available != size:
-                logger.warning("stored_media_length_mismatch")
-                return finalize(HttpResponse("Audio is temporarily unavailable.", status=502))
+        opened = _underlying_file(file_handle)
+        lazy_head = request.method == "HEAD" and isinstance(opened, _LAZY_STORAGE_READERS)
+        available = opened_object_length(opened) if size > 0 or lazy_head else None
+        if size > 0 and available is not None and available != size:
+            logger.warning("stored_media_length_mismatch")
+            return finalize(HttpResponse("Audio is temporarily unavailable.", status=502))
         if etag is not None and _if_none_match(request.headers.get("If-None-Match"), etag):
             # Conditionals precede Range (RFC 9110 section 13.2.2); the handle closes below.
             not_modified = HttpResponseNotModified()
@@ -131,7 +136,18 @@ def ranged_file_response(
                 return finalize(response)
 
         if byte_range is None:
-            response = FileResponse(file_handle, content_type=content_type)
+            if lazy_head:
+                # FileResponse's header inference can seek and load a lazy file.
+                # Give it an empty reader that still owns the opened handle.
+                response = FileResponse(
+                    _LimitedReader(file_handle, 0),
+                    content_type=content_type,
+                    filename=getattr(file_handle, "name", ""),
+                )
+                if available is not None:
+                    response["Content-Length"] = str(available)
+            else:
+                response = FileResponse(file_handle, content_type=content_type)
             if size > 0:
                 response["Content-Length"] = str(size)
                 response["Accept-Ranges"] = "bytes"
@@ -173,25 +189,26 @@ def ranged_file_response(
                 )
 
 
-def opened_object_length(file_handle: object) -> int | None:
-    """Length of the opened stored object from supported file APIs, or ``None``.
+def _underlying_file(file_handle: object) -> object:
+    return file_handle.file if isinstance(file_handle, FieldFile) else file_handle
 
-    A real descriptor is measured with ``fstat`` (the opened file, even if the
-    path was replaced afterwards). Otherwise a backend file's own ``size``
-    (for example django-storages' S3 object length) is used. Missing, failing or
-    non-integer evidence returns ``None`` so the recorded size stays authoritative.
+
+def opened_object_length(file_handle: object) -> int | None:
+    """Use opened-object metadata for lazy S3 readers and fstat for local files.
+
+    Other readers may provide an integer size when there is no descriptor.
     """
-    if isinstance(file_handle, FieldFile):
-        file_handle = file_handle.file
-    try:
-        descriptor = file_handle.fileno()  # type: ignore[attr-defined]
-    except Exception:
-        descriptor = None
-    if isinstance(descriptor, int) and not isinstance(descriptor, bool) and descriptor >= 0:
+    file_handle = _underlying_file(file_handle)
+    if not isinstance(file_handle, _LAZY_STORAGE_READERS):
         try:
-            return os.fstat(descriptor).st_size
-        except OSError:
-            return None
+            descriptor = file_handle.fileno()  # type: ignore[attr-defined]
+        except Exception:
+            descriptor = None
+        if isinstance(descriptor, int) and not isinstance(descriptor, bool) and descriptor >= 0:
+            try:
+                return os.fstat(descriptor).st_size
+            except OSError:
+                return None
     try:
         reported = file_handle.size  # type: ignore[attr-defined]
     except Exception:

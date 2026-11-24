@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from django.contrib.auth.models import Permission
 from django.urls import reverse
 
 from archive.models import EnrichmentStatus, Item, ItemKind
@@ -231,6 +232,66 @@ def test_admin_add_and_manual_override(client, editor_user):
     item.refresh_from_db()
     assert item.short_summary == "Reviewed operator override"
     assert not item.short_summary_generated
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("can_change", [False, True])
+def test_admin_reprocess_requires_change_permission(client, django_user_model, can_change):
+    staff = django_user_model.objects.create_user(username="staff", is_staff=True)
+    staff.user_permissions.add(
+        Permission.objects.get(content_type__app_label="archive", codename="view_item")
+    )
+    if can_change:
+        staff.user_permissions.add(
+            Permission.objects.get(content_type__app_label="archive", codename="change_item")
+        )
+    client.force_login(staff)
+    item = Item.objects.create(
+        original_url="https://example.test/reprocess", enrichment_status=EnrichmentStatus.COMPLETE
+    )
+    url = reverse("admin:archive_item_changelist")
+
+    response = client.get(url)
+    assert response.status_code == 200
+    action_visible = b'<option value="reprocess_selected_items">' in response.content
+    client.post(url, {"action": "reprocess_selected_items", "_selected_action": [item.pk]})
+    item.refresh_from_db()
+    assert item.enrichment_status == (
+        EnrichmentStatus.PENDING if can_change else EnrichmentStatus.COMPLETE
+    )
+    assert action_visible == can_change
+
+
+@pytest.mark.django_db(transaction=True)
+def test_admin_reprocess_continues_after_selected_item_disappears(client, editor_user, monkeypatch):
+    client.force_login(editor_user)
+    first, middle, last = [
+        Item.objects.create(
+            original_url=f"https://example.test/{n}", enrichment_status=EnrichmentStatus.COMPLETE
+        )
+        for n in range(3)
+    ]
+    selected = []
+
+    def delete_before_reload(item):
+        selected.append(item.pk)
+        if item.pk == middle.pk:
+            Item.objects.filter(pk=middle.pk).delete()
+        return request_item_reprocess(item)
+
+    monkeypatch.setattr("archive.admin.request_item_reprocess", delete_before_reload)
+    response = client.post(
+        reverse("admin:archive_item_changelist"),
+        {"action": "reprocess_selected_items", "_selected_action": [first.pk, middle.pk, last.pk]},
+        follow=True,
+    )
+    assert selected[1] == middle.pk
+    assert b"Queued 2 item(s) for reprocessing. Skipped 0 active item(s)." in response.content
+    assert b"Skipped 1 disappeared item(s)." in response.content
+    assert not Item.objects.filter(pk=middle.pk).exists()
+    for item in (first, last):
+        item.refresh_from_db()
+        assert item.enrichment_status == EnrichmentStatus.PENDING
 
 
 @pytest.mark.django_db(transaction=True)

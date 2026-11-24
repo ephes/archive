@@ -10,7 +10,11 @@ from archive.classification import (
 )
 from archive.forms import ItemAdminForm
 from archive.models import Item
-from archive.services import describe_item_downstream_normalization, request_item_reprocess
+from archive.services import (
+    ReprocessItemDisappeared,
+    describe_item_downstream_normalization,
+    request_item_reprocess,
+)
 
 
 @admin.register(Item)
@@ -113,17 +117,23 @@ class ItemAdmin(admin.ModelAdmin):
         changes = describe_item_downstream_normalization(obj)
         return "clean" if not changes else "\n".join(changes)
 
-    @admin.action(description="Reprocess selected items")
+    @admin.action(permissions=["change"], description="Reprocess selected items")
     def reprocess_selected_items(self, request, queryset) -> None:
         count = 0
         skipped = 0
+        disappeared = 0
         for item in queryset:
-            request_item_reprocess(item)
+            try:
+                request_item_reprocess(item)
+            except ReprocessItemDisappeared:
+                disappeared += 1
+                continue
             if item._has_processing_status():
                 skipped += 1
             else:
                 count += 1
         self.message_user(
             request,
-            f"Queued {count} item(s) for reprocessing. Skipped {skipped} active item(s).",
+            f"Queued {count} item(s) for reprocessing. Skipped {skipped} active item(s). "
+            f"Skipped {disappeared} disappeared item(s).",
         )

@@ -1462,10 +1462,17 @@ def _next_article_audio_poll_at() -> datetime:
     return timezone.now() + timedelta(seconds=settings.ARCHIVE_ARTICLE_AUDIO_POLL_SECONDS)
 
 
+class ReprocessItemDisappeared(Item.DoesNotExist):  # type: ignore[name-defined]
+    """The selected item disappeared before the locked reprocess reload."""
+
+
 def request_item_reprocess(item: Item) -> Item:
     using = item._state.db or "default"
     with transaction.atomic(using=using):
-        item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
+        try:
+            item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())
+        except Item.DoesNotExist as exc:
+            raise ReprocessItemDisappeared(*exc.args) from exc
         # A selected instance may predate a newly claimed worker attempt. Leave
         # its lease and publication ownership intact; retry after it finishes.
         if item._has_processing_status():

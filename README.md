@@ -1110,7 +1110,8 @@ Operator workflow in Django admin:
 - inspect the downstream-state diagnostic before using replay normalization
 - override podcast feed policy with `auto`, `include`, or `exclude`
 - manually override `kind` when automatic classification is wrong; supported values include `quote` for daybook/weeknote quote items
-- use `Reprocess selected items` to re-queue one or more items for a fresh enrichment pass
+- use `Reprocess selected items` to re-queue one or more items for a fresh enrichment pass.
+  The action requires the Item change permission. Staff with view-only access can still browse items.
 
 Admin change forms carry a signed fingerprint of the loaded item's persisted state.
 If a worker or another editor changes that state before submission, the save is refused
@@ -1123,6 +1124,8 @@ transaction and SQLite's configured IMMEDIATE write reservation.
 Reprocessing reloads each selected row under the same short write reservation before
 classification and status changes. Rows with an active processing stage are skipped
 and counted separately; retry after the worker finishes (or use explicit stale recovery).
+If a selected row disappears before the reload, reprocessing continues and reports
+the disappeared item separately from items with active processing.
 Only names retired from the current row are queued for reference-aware storage cleanup
 after commit; external storage work stays outside the mutation transaction.
 Regression tests in `tests/test_admin_mutations.py` use synthetic content and independent

@@ -1,7 +1,7 @@
 """Bound reads from operator-configured upstream APIs."""
 
 import json
-from typing import Protocol
+from typing import Never, Protocol
 from urllib.error import HTTPError, URLError
 
 from archive.json_objects import unique_json_object
@@ -29,10 +29,18 @@ class InvalidAPIJSON(ValueError):
     """An upstream response could not be decoded within interpreter limits."""
 
 
+def _reject_nonstandard_number(_literal: str) -> Never:
+    raise ValueError("Nonstandard JSON number")
+
+
 def decode_api_json(payload: bytes | str):
     try:
         text = payload.decode("utf-8") if isinstance(payload, bytes) else payload
-        return json.loads(text, object_pairs_hook=unique_json_object)
+        return json.loads(
+            text,
+            object_pairs_hook=unique_json_object,
+            parse_constant=_reject_nonstandard_number,
+        )
     except (ValueError, RecursionError):
         raise InvalidAPIJSON("Invalid upstream JSON") from None
 

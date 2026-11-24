@@ -615,7 +615,7 @@ def test_generate_transcript_rejects_malformed_batch_evidence(
     settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
     requested: list[str] = []
     response = _batch_job_urlopen(
-        segments=[{"start": 0, "end": float("inf")}, {"start": 900, "end": 905}],
+        segments=[{"start": 0, "end": -1}, {"start": 900, "end": 905}],
         requested=requested,
     )
 

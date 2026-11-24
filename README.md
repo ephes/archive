@@ -1619,9 +1619,10 @@ Successful summary, transcription and article-audio JSON exchanges reject HTTP 2
 differs from the advertised length. Upstream HTTP error bodies are read only up to
 64 KiB for diagnostics. JSON responses decode UTF-8 strictly.
 Duplicate object members at any nesting level (including escaped key aliases),
-malformed encoding, JSON recursion and integer-decoding limits become fixed stage
-errors. Responses close before worker failure/retry bookkeeping; invalid output
-publishes no generated fields or audio artifacts.
+nonstandard numeric literals (`NaN`, `Infinity`, `-Infinity`), malformed encoding,
+JSON recursion and integer-decoding limits become fixed stage errors. Responses
+close before worker failure/retry bookkeeping; invalid output publishes no
+generated fields or audio artifacts.
 
 Normal stored errors and logs include HTTP status or a fixed transport/limit
 category. They omit upstream error bodies, failed-job messages, raw transport

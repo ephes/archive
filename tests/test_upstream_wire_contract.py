@@ -385,3 +385,39 @@ def test_ambiguous_poll_json_preserves_item(kind, member, reverse, monkeypatch, 
     assert item.transcript == "Previous transcript"
     assert item.article_audio_job_id == "job-a"
     assert item.article_audio_artifact_path == "/v1/previous.mp3"
+
+
+@pytest.mark.parametrize(
+    "number",
+    [
+        pytest.param(float("nan"), id="NaN"),
+        pytest.param(float("inf"), id="Infinity"),
+        pytest.param(float("-inf"), id="-Infinity"),
+    ],
+)
+def test_audio_poll_rejects_nonstandard_numbers_before_job_parsing(monkeypatch, settings, number):
+    settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = "synthetic"
+    response = Response({"id": "job-a", "state": "queued", "ignored": [{"number": number}]})
+    monkeypatch.setattr(audio, "urlopen", lambda *args, **kwargs: response)
+
+    def unexpected_parse(payload):
+        pytest.fail("invalid upstream JSON reached job parsing")
+
+    monkeypatch.setattr(audio, "_parse_job_update", unexpected_parse)
+    with pytest.raises(
+        audio.ArticleAudioGenerationError,
+        match="^Article audio job status request failed: invalid JSON response$",
+    ):
+        audio.generate_item_article_audio(Item(article_audio_job_id="job-a"))
+    assert response.closed
+
+
+def test_audio_poll_accepts_finite_json_numbers(monkeypatch, settings):
+    settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = "synthetic"
+    response = Response({"id": "job-a", "state": "queued", "ignored": [{"number": -1.25e20}]})
+    monkeypatch.setattr(audio, "urlopen", lambda *args, **kwargs: response)
+
+    update = audio.generate_item_article_audio(Item(article_audio_job_id="job-a"))
+
+    assert (update.job_id, update.state) == ("job-a", "queued")
+    assert response.closed

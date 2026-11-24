@@ -1337,15 +1337,19 @@ just manage reconcile_archive_media_reservations --apply  # release retired ones
 ```
 
 Dry-run lists retired prefixes with their owner item and the objects that would be
-deleted. Apply rechecks the owner attempt under the row lock, deletes unreferenced
-objects under the prefix and releases the reservation in one durable transaction;
-referenced objects are kept. Like every deletion check, references are compared
-after whitespace trimming, the same normalization reads and orphan inventory use. Reservations of a still-current attempt stay protected,
-whatever their age. Expected filesystem/S3 deletion failures roll back that
-reservation's release (it keeps protecting what remains), are reported as
-`storage_delete_failed` without backend details, and make the command exit nonzero;
-rerun it after the backend recovers. Prefixes holding more than 16 objects are
-reported as `oversized` and left alone. Reservations without a recorded owner
+deleted. Dry-run holds no write locks during storage inventory. The report is
+advisory and concurrent changes can affect its results. Apply rechecks the owner
+attempt under the row lock, deletes unreferenced objects under the prefix and
+releases the reservation in one durable transaction. Referenced objects are kept.
+References are compared after whitespace trimming, the same normalization reads and
+orphan inventory use. Reservations of a still-current attempt stay protected,
+whatever their age. On an expected filesystem/S3 deletion failure, the reservation
+keeps protecting what remains. The command reports `storage_delete_failed` without
+backend details and exits nonzero. The summary includes completed deletes from
+those reservations in `deleted`.
+Rerun the command after the backend recovers to reconcile the remaining objects.
+Prefixes holding more than 16 objects are reported as `oversized` and left alone.
+Reservations without a recorded owner
 attempt (rows created before this change, or uploads by unclaimed direct callers)
 are reported as `unowned` and never released automatically: stop the affected
 worker and confirm no upload/publication is active before removing such a

@@ -4,7 +4,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from django.core.management.base import BaseCommand, CommandError
 from django.db import router
 
-from archive.media_storage import reconcile_upload_reservation
+from archive.media_storage import ReservationStorageDeleteError, reconcile_upload_reservation
 from archive.models import PendingArchiveMediaUpload
 
 
@@ -32,7 +32,7 @@ class Command(BaseCommand):
         self.stdout.write(
             "Apply mode: releasing retired upload reservations."
             if apply
-            else "Dry-run mode: reporting upload reservations only."
+            else "Dry-run mode: advisory report. Concurrent changes may affect results."
         )
         reservation_ids = list(
             PendingArchiveMediaUpload.objects.using(using)
@@ -42,8 +42,10 @@ class Command(BaseCommand):
         for ordinal, reservation_id in enumerate(reservation_ids, start=1):
             try:
                 outcome = reconcile_upload_reservation(reservation_id, using=using, apply=apply)
-            except (OSError, BotoCoreError, ClientError):
+            except (ReservationStorageDeleteError, OSError, BotoCoreError, ClientError) as exc:
                 # The release rolled back; the reservation keeps protecting what is left.
+                if isinstance(exc, ReservationStorageDeleteError):
+                    deleted_count += exc.deleted_count
                 failed_count += 1
                 self.stderr.write(
                     f"Storage deletion failed for reservation {ordinal} (storage_delete_failed)."
@@ -61,6 +63,7 @@ class Command(BaseCommand):
                 self.stdout.write(f"  {'DELETED' if apply else 'WOULD-DELETE'} {name}")
             if outcome.released:
                 released_count += 1
+            if apply:
                 deleted_count += len(outcome.deleted)
 
         if counts["retired"] and not apply:

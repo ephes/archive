@@ -5,6 +5,9 @@
 - Require Item change permission for the admin reprocess action.
 - Continue the admin reprocess batch when a selected item disappears and report
   disappeared items separately from active ones.
+- Count completed deletes from partially failed archive media reservation
+  reconciliations in the command summary.
+- Allow writes to proceed during dry-run archive media reservation inventory.
 
 - Bind public archived audio validators to the opened S3 object ETag so replacing
   an object at the same key and size invalidates cached audio.

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
+from contextlib import nullcontext
 from dataclasses import dataclass
 
+from botocore.exceptions import BotoCoreError, ClientError
 from django.core.files.storage import storages
 from django.db import transaction
 from django.db.models import Q
@@ -129,6 +131,14 @@ def _reservation_prefix(path: str) -> str:
 MAX_RECONCILED_PREFIX_OBJECTS = 16
 
 
+class ReservationStorageDeleteError(RuntimeError):
+    """A reconciliation delete failed, with the count of earlier successful deletes."""
+
+    def __init__(self, deleted_count: int):
+        super().__init__("Storage deletion failed during reservation reconciliation")
+        self.deleted_count = deleted_count
+
+
 @dataclass(frozen=True)
 class ReservationReconciliation:
     """Outcome for one upload reservation.
@@ -157,9 +167,11 @@ def reconcile_upload_reservation(
     attempt differs (recovered, settled, re-claimed) or the item is gone, the upload
     can never be published, whether or not its process is still running. Age alone
     never retires a reservation, and reservations without a recorded owner attempt
-    are left for manual recovery. With ``apply``, unreferenced objects under the
-    prefix are deleted and the reservation is released in one durable transaction;
-    a storage failure rolls the release back, keeping the remaining protection.
+    are left for manual recovery. With ``apply``, a durable transaction locks the
+    rows while unreferenced objects are deleted, then releases the reservation.
+    A storage deletion failure raises ReservationStorageDeleteError with the
+    number of completed deletes and keeps the reservation protecting what remains.
+    Dry runs use advisory reads without write transactions or row locks.
     """
     from archive.models import Item, PendingArchiveMediaUpload
 
@@ -177,20 +189,19 @@ def reconcile_upload_reservation(
         return ReservationReconciliation(state="unowned", prefix=prefix)
 
     storage = storages[ARCHIVE_MEDIA_STORAGE_ALIAS]
-    with transaction.atomic(using=using, durable=True):
-        # Lock the owner row before the reservation, like publication does.
+    with transaction.atomic(using=using, durable=True) if apply else nullcontext():
+        owners = Item.objects.using(using)
+        reservations = PendingArchiveMediaUpload.objects.using(using)
+        if apply:
+            # Acquire the owner row before the reservation, like publication does.
+            owners = owners.select_for_update()
+            reservations = reservations.select_for_update()
         current_attempts = list(
-            Item.objects.using(using)
-            .select_for_update()
-            .filter(pk=owner_item_id)
-            .values_list("processing_started_at", flat=True)
+            owners.filter(pk=owner_item_id).values_list("processing_started_at", flat=True)
         )
-        reservation = (
-            PendingArchiveMediaUpload.objects.using(using)
-            .select_for_update()
-            .filter(pk=reservation_id, prefix=prefix, owner_item_id=owner_item_id)
-            .first()
-        )
+        reservation = reservations.filter(
+            pk=reservation_id, prefix=prefix, owner_item_id=owner_item_id
+        ).first()
         if reservation is None or reservation.owner_attempt is None:
             return ReservationReconciliation(state="gone", prefix=prefix)
         if current_attempts and current_attempts[0] == reservation.owner_attempt:
@@ -208,11 +219,14 @@ def reconcile_upload_reservation(
         deleted: list[str] = []
         kept: list[str] = []
         for name in names:
-            if _is_referenced_archive_media_path(name, using=using):
+            if _is_referenced_archive_media_path(name, using=using, for_update=apply):
                 kept.append(name)
                 continue
             if apply:
-                storage.delete(name)
+                try:
+                    storage.delete(name)
+                except (OSError, BotoCoreError, ClientError) as exc:
+                    raise ReservationStorageDeleteError(len(deleted)) from exc
             deleted.append(name)
         if apply:
             reservation.delete()
@@ -226,7 +240,7 @@ def reconcile_upload_reservation(
     )
 
 
-def _is_referenced_archive_media_path(path: str, *, using: str) -> bool:
+def _is_referenced_archive_media_path(path: str, *, using: str, for_update: bool = True) -> bool:
     """Whether any committed item references ``path`` after whitespace trimming.
 
     Reads and the orphan inventory strip stored references, so a reference with
@@ -235,16 +249,12 @@ def _is_referenced_archive_media_path(path: str, *, using: str) -> bool:
     """
     from archive.models import Item
 
-    candidates = (
-        Item.objects.using(using)
-        .select_for_update()
-        .filter(
-            Q(archived_audio_path__contains=path)
-            | Q(archived_video_path__contains=path)
-            | Q(article_audio_file__contains=path)
-        )
-        .values_list(*ARCHIVE_MEDIA_PATH_FIELDS)
-    )
-    return any(
-        str(value or "").strip() == path for row in candidates.iterator() for value in row
-    )
+    items = Item.objects.using(using)
+    if for_update:
+        items = items.select_for_update()
+    candidates = items.filter(
+        Q(archived_audio_path__contains=path)
+        | Q(archived_video_path__contains=path)
+        | Q(article_audio_file__contains=path)
+    ).values_list(*ARCHIVE_MEDIA_PATH_FIELDS)
+    return any(str(value or "").strip() == path for row in candidates.iterator() for value in row)

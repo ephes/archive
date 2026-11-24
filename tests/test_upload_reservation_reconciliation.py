@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from io import BytesIO, StringIO
 
@@ -10,6 +11,7 @@ from django.core.files.base import ContentFile
 from django.core.files.storage import storages
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import OperationalError, connections
 
 from archive.media_archival import save_reserved_media_file
 from archive.models import EnrichmentStatus, Item, ItemKind, PendingArchiveMediaUpload
@@ -112,6 +114,46 @@ def test_retired_attempt_is_released_and_its_unreferenced_objects_deleted(retire
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
+def test_reconciliation_inventory_writer_lock(monkeypatch, apply):
+    item = _processing_item()
+    storage = storages["archive_media"]
+    stored = _upload(item)
+    Item.objects.filter(pk=item.pk).update(processing_started_at=None)
+    listdir = storage.listdir
+    writes_during_listing = []
+
+    def update_owner():
+        connection = connections["default"]
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("PRAGMA busy_timeout = 0")
+            return Item.objects.filter(pk=item.pk).update(title="Updated during inventory")
+        except OperationalError as exc:
+            assert "locked" in str(exc)
+            return 0
+        finally:
+            connection.close()
+
+    def listdir_during_update(prefix):
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            writes_during_listing.append(executor.submit(update_owner).result(timeout=5))
+        return listdir(prefix)
+
+    monkeypatch.setattr(storage, "listdir", listdir_during_update)
+    if apply:
+        assert f"DELETED {stored}" in _reconcile("--apply")
+        assert writes_during_listing == [0]
+        assert not storage.exists(stored)
+        assert not PendingArchiveMediaUpload.objects.exists()
+    else:
+        assert f"WOULD-DELETE {stored}" in _reconcile()
+        assert writes_during_listing == [1]
+        assert storage.exists(stored)
+        assert PendingArchiveMediaUpload.objects.exists()
+
+
+@pytest.mark.django_db(transaction=True)
 def test_retired_reservation_without_object_is_released():
     item = _processing_item()
     PendingArchiveMediaUpload.objects.create(
@@ -155,14 +197,25 @@ def test_referenced_object_under_retired_prefix_is_kept():
 
 
 @pytest.mark.django_db(transaction=True)
-def test_storage_failure_keeps_reservation_and_fails_the_command(monkeypatch):
+@pytest.mark.parametrize("deletes_before_failure", [0, 1])
+def test_storage_failure_keeps_reservation_and_fails_the_command(
+    monkeypatch, deletes_before_failure
+):
     item = _processing_item()
     storage = storages["archive_media"]
     stored = _upload(item)
+    extra = stored.rsplit("/", 1)[0] + "/z-extra.mp3"
+    storage.save(extra, ContentFile(b"extra"))
     Item.objects.filter(pk=item.pk).update(processing_started_at=None)
 
+    delete = storage.delete
+    deleted = []
+
     def failing_delete(name):
-        raise OSError("backend down")
+        if len(deleted) == deletes_before_failure:
+            raise OSError("backend down")
+        delete(name)
+        deleted.append(name)
 
     monkeypatch.setattr(storage, "delete", failing_delete)
     out = StringIO()
@@ -172,12 +225,17 @@ def test_storage_failure_keeps_reservation_and_fails_the_command(monkeypatch):
     assert "storage_delete_failed" in out.getvalue()
     assert "backend down" not in out.getvalue()
     assert PendingArchiveMediaUpload.objects.count() == 1
-    assert storage.exists(stored)
+    assert storage.exists(stored) == (deletes_before_failure == 0)
+    assert storage.exists(extra)
+    assert f"released=0 deleted={deletes_before_failure} mode=apply failed=1" in out.getvalue()
 
-    monkeypatch.undo()
-    isolated = storages["archive_media"]
-    assert "released=1" in _reconcile("--apply")
-    assert not isolated.exists(stored)
+    monkeypatch.setattr(storage, "delete", delete)
+    assert f"released=1 deleted={2 - deletes_before_failure} mode=apply failed=0" in _reconcile(
+        "--apply"
+    )
+    assert not storage.exists(stored)
+    assert not storage.exists(extra)
+    assert not PendingArchiveMediaUpload.objects.exists()
 
 
 @pytest.mark.django_db(transaction=True)

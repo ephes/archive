@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Raise a streaming error when stored audio ends before the advertised range
+  has been delivered.
+
 - Reject partial upstream JSON successes and responses with invalid or mismatched
   content lengths before decoding job results.
 

@@ -125,6 +125,34 @@ def test_matching_lengths_keep_validated_responses(
     assert len(observed_closes) == 1
 
 
+def test_truncated_open_file_fails_during_range_stream(db, tmp_path):
+    with (tmp_path / "audio.mp3").open("w+b", buffering=0) as handle:
+        handle.write(PAYLOAD)
+        response = ranged_file_response(
+            RequestFactory().get("/media", headers={"Range": "bytes=2-7"}),
+            file_handle=handle,
+            size=len(PAYLOAD),
+            content_type="audio/mpeg",
+            cache_control="public",
+        )
+        try:
+            assert response.status_code == 206
+            assert response["Content-Length"] == "6"
+            assert response["Content-Range"] == "bytes 2-7/17"
+            response.block_size = 2
+            stream = iter(response.streaming_content)
+            assert next(stream) == PAYLOAD[2:4]
+
+            handle.truncate(5)
+            assert next(stream) == PAYLOAD[4:5]
+            with pytest.raises(OSError, match="^Archived media ended before its recorded length$"):
+                next(stream)
+            assert not handle.closed
+        finally:
+            response.close()
+        assert handle.closed
+
+
 @pytest.mark.django_db
 def test_unknown_recorded_size_keeps_whole_file_behavior(client, observed_closes):
     url = _item("item-archived-audio", PAYLOAD, recorded=0)

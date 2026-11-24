@@ -72,10 +72,11 @@ Public endpoints:
   truncation or replacement outside the publication protocol, answers GET, HEAD and
   range requests with a `no-store` 502, logs the fixed `stored_media_length_mismatch`
   event and closes the handle once. Backends without usable length evidence keep the
-  recorded size, and an unknown recorded size (0) keeps whole-file delivery. Changes
-  after the response has started streaming are not detected. HEAD keeps the GET
-  headers without reading the body and closes the handle once, when the server
-  closes the response.
+  recorded size, and an unknown recorded size (0) keeps whole-file delivery. If
+  the file ends before all advertised range bytes are read, streaming raises a
+  fixed I/O error. The response still owns the file until the server closes it.
+  HEAD keeps the GET headers without reading the body and closes the handle once,
+  when the server closes the response.
 - `/feeds/podcast.xml` podcast-style feed for items with stable local audio enclosures
 - `/feeds/podcast/page/<n>.xml` older podcast feed pages when more than 50 eligible items exist
 - `/api/health/` unauthenticated JSON processing health for monitoring (step counts and timestamps

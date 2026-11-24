@@ -73,6 +73,8 @@ class _LimitedReader:
         if size is None or size < 0 or size > self._remaining:
             size = self._remaining
         chunk = self._file.read(size)
+        if size > 0 and not chunk:
+            raise OSError("Archived media ended before its recorded length")
         self._remaining -= len(chunk)
         return chunk
 

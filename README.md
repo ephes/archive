@@ -56,7 +56,10 @@ Public endpoints:
   exception text, traceback, object key or signed URL; acquired handles close once.
   Before any length, range or body is committed, a known recorded size is compared
   with the opened object's own length. S3 readers use object length metadata without
-  loading or spooling the object for HEAD and conditional 304 responses. For readers
+  loading or spooling the object for HEAD and conditional 304 responses. The S3
+  adapter closes the lazy storage wrapper after initializing the range reader
+  or if initialization fails. The range reader retains the S3 object for later
+  reads. Metadata errors retain precedence if closing the wrapper also fails. For readers
   that spool an S3 object with a known recorded size, full and range GETs compare
   the downloaded copy's length, since that download is not pinned to the opened metadata. There a
   failed download answers a `no-store` 502 and logs the fixed

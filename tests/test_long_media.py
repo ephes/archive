@@ -23,7 +23,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.files.storage import storages
 from django.urls import reverse
 from django.utils import timezone
-from storages.backends.s3 import S3Storage
+from storages.backends.s3 import S3File, S3Storage
 
 from archive.management.commands.run_metadata_worker import Command as WorkerCommand
 from archive.media_archival import (
@@ -150,7 +150,7 @@ def s3_archive_media(settings, monkeypatch):
     def fake_open(self, name, mode="rb"):
         if name not in objects:
             raise ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "HeadObject")
-        return SimpleNamespace(obj=objects[name], name=name)
+        return SimpleNamespace(obj=objects[name], name=name, close=lambda: None)
 
     monkeypatch.setattr(S3Storage, "_open", fake_open)
     return objects
@@ -300,7 +300,9 @@ def test_s3_range_reader_refuses_an_unverified_generation_with_a_matching_range(
         assert obj.bodies[0].delivered == 0
 
 
-def test_real_s3_storage_open_streams_with_ranged_get_object(settings):
+@pytest.mark.parametrize("etag", ['"abc"', ""])
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_real_s3_storage_retires_lazy_wrapper(settings, monkeypatch, etag, close_fails):
     settings.STORAGES = {
         **settings.STORAGES,
         "archive_media": {
@@ -318,32 +320,50 @@ def test_real_s3_storage_open_streams_with_ranged_get_object(settings):
     storage = storages["archive_media"]
     client = storage.connection.meta.client
     item = Item(archived_audio_path="items/1/audio/source.mp3")
+    closed = []
+    close = S3File.close
+
+    def close_wrapper(wrapper):
+        closed.append(wrapper)
+        close(wrapper)
+        if close_fails:
+            raise OSError("Wrapper close failed")
+
+    monkeypatch.setattr(S3File, "close", close_wrapper)
     with Stubber(client) as stubber:
         stubber.add_response(
             "head_object",
-            {"ContentLength": len(PAYLOAD), "ContentType": "audio/mpeg", "ETag": '"abc"'},
+            {"ContentLength": len(PAYLOAD), "ContentType": "audio/mpeg", "ETag": etag},
             {"Bucket": "archive-media", "Key": "items/1/audio/source.mp3"},
         )
-        stubber.add_response(
-            "get_object",
-            {
-                "Body": StreamingBody(io.BytesIO(PAYLOAD[100:]), len(PAYLOAD) - 100),
-                "ContentRange": _content_range(100, len(PAYLOAD)),
-                "ETag": '"abc"',
-            },
-            {
-                "Bucket": "archive-media",
-                "Key": "items/1/audio/source.mp3",
-                "Range": "bytes=100-",
-                "IfMatch": '"abc"',
-            },
-        )
-        reader = open_archived_audio(item)
-        assert isinstance(reader, S3RangeReader)
-        assert reader.size == len(PAYLOAD)
-        reader.seek(100)
-        assert reader.read(50) == PAYLOAD[100:150]
-        reader.close()
+        if etag:
+            with open_archived_audio(item) as reader:
+                assert isinstance(reader, S3RangeReader)
+                assert reader.size == len(PAYLOAD)
+                # Only the HEAD was allowed until the reader was acquired.
+                assert len(closed) == 1
+                assert closed[0].closed
+                stubber.add_response(
+                    "get_object",
+                    {
+                        "Body": StreamingBody(io.BytesIO(PAYLOAD[100:]), len(PAYLOAD) - 100),
+                        "ContentRange": _content_range(100, len(PAYLOAD)),
+                        "ETag": etag,
+                    },
+                    {
+                        "Bucket": "archive-media",
+                        "Key": "items/1/audio/source.mp3",
+                        "Range": "bytes=100-",
+                        "IfMatch": etag,
+                    },
+                )
+                reader.seek(100)
+                assert reader.read(50) == PAYLOAD[100:150]
+        else:
+            with pytest.raises(MediaArchivalError, match="Archived media object has no ETag"):
+                open_archived_audio(item)
+        assert len(closed) == 1
+        assert closed[0].closed
         stubber.assert_no_pending_responses()
 
 

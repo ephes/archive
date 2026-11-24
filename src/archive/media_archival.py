@@ -10,7 +10,7 @@ import shutil
 import stat
 import subprocess
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from email.message import Message
 from pathlib import Path
@@ -777,10 +777,15 @@ def _open_archived_file(path: str, *, label: str):
         if isinstance(storage, S3Storage):
             # django-storages would copy the whole object into memory on first
             # read; stream it with ranged GETs instead.
-            return S3RangeReader(
-                opened.obj,
-                extra_args=_filter_download_params(storage.get_object_parameters(opened.name)),
-            )
+            try:
+                return S3RangeReader(
+                    opened.obj,
+                    extra_args=_filter_download_params(storage.get_object_parameters(opened.name)),
+                )
+            finally:
+                # The wrapper only owns its local buffer.
+                with suppress(Exception):
+                    opened.close()
         return opened
     except OSError as exc:
         raise MediaArchivalError(f"Archived {label} open failed: {exc}") from exc

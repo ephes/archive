@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Close lazy S3 storage wrappers after range reader setup, including failed
+  setup. Keep object reads lazy and preserve metadata errors.
+
 - Require Item change permission for the admin reprocess action.
 - Continue the admin reprocess batch when a selected item disappears and report
   disappeared items separately from active ones.

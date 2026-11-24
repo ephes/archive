@@ -253,30 +253,69 @@ def test_article_complete_response_is_published(synthetic_authenticated_response
     assert not exchanges[0][1].parent.exists()
 
 
-@pytest.mark.parametrize("http_error", [False, True])
-def test_non_audio_and_error_responses_keep_separate_limits(
-    synthetic_authenticated_response, http_error
+@pytest.mark.parametrize(
+    "framing",
+    [
+        pytest.param({"status": 206}, id="partial-status"),
+        pytest.param({"headers": [("Content-Range", "bytes 0-14/100")]}, id="partial-header"),
+        pytest.param({"headers": [("Content-Length", "100")]}, id="short-body"),
+    ],
+)
+def test_incomplete_json_is_refused(synthetic_authenticated_response, framing):
+    exchanges = synthetic_authenticated_response(
+        {"content_type": "application/json", "body": '{"status":"ok"}', **framing}
+    )
+
+    with pytest.raises(OSError, match="complete"):
+        with upstream_http.open_authenticated_url(
+            Request("https://example.test/v1/job"), timeout=5
+        ):
+            pytest.fail("incomplete JSON response admitted")
+
+    assert exchanges[0][0].returncode == 1
+    assert not exchanges[0][1].parent.exists()
+
+
+@pytest.mark.parametrize("status", [200, 201, 202])
+def test_complete_json_is_admitted(synthetic_authenticated_response, status):
+    body = b'{"status":"ok"}'
+    exchanges = synthetic_authenticated_response(
+        {
+            "status": status,
+            "content_type": "application/json",
+            "headers": [("Content-Length", str(len(body)))],
+            "body": body.decode(),
+        }
+    )
+
+    with upstream_http.open_authenticated_url(
+        Request("https://example.test/v1/job"), timeout=5
+    ) as response:
+        assert response.read() == body
+
+    assert exchanges[0][0].returncode == 0
+    assert not exchanges[0][1].parent.exists()
+
+
+def test_http_error_body_is_bounded_without_success_framing_checks(
+    synthetic_authenticated_response,
 ):
     exchanges = synthetic_authenticated_response(
         {
-            "status": 500 if http_error else 206,
-            "http_error": http_error,
+            "status": 500,
+            "http_error": True,
             "content_type": "application/json",
             "headers": [("Content-Range", "bytes 0-2/100"), ("Content-Length", "100")],
-            "body": "e" * 70000 if http_error else "{}",
+            "body": "e" * 70000,
         }
     )
     request = Request("https://example.test/v1/artifact")
-    if http_error:
-        with pytest.raises(HTTPError) as caught:
-            with upstream_http.open_authenticated_url(request, timeout=5, audio=True):
-                pytest.fail("HTTP error admitted")
-        with caught.value as response:
-            assert response.code == 500
-            assert response.read() == b"e" * 65536
-    else:
-        with upstream_http.open_authenticated_url(request, timeout=5) as response:
-            assert response.read() == b"{}"
+    with pytest.raises(HTTPError) as caught:
+        with upstream_http.open_authenticated_url(request, timeout=5, audio=True):
+            pytest.fail("HTTP error admitted")
+    with caught.value as response:
+        assert response.code == 500
+        assert response.read() == b"e" * 65536
     assert exchanges[0][0].returncode == 0
     assert not exchanges[0][1].parent.exists()
 

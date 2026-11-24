@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reject partial upstream JSON successes and responses with invalid or mismatched
+  content lengths before decoding job results.
+
 - After archived audio storage fails to open, return 404 for a withdrawn or
   replaced publication and retain 502 for a still-current publication.
 

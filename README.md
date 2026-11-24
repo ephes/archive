@@ -1610,7 +1610,10 @@ only to new submissions; previously recorded jobs remain usable.
 
 ### Upstream failure diagnostics
 
-Summary, transcription and article-audio JSON responses decode UTF-8 strictly.
+Successful summary, transcription and article-audio JSON exchanges reject HTTP 206,
+`Content-Range`, invalid or ambiguous `Content-Length`, and bodies whose byte count
+differs from the advertised length. Upstream HTTP error bodies are read only up to
+64 KiB for diagnostics. JSON responses decode UTF-8 strictly.
 Duplicate object members at any nesting level (including escaped key aliases),
 malformed encoding, JSON recursion and integer-decoding limits become fixed stage
 errors. Responses close before worker failure/retry bookkeeping; invalid output

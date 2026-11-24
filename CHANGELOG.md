@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reject lone Unicode surrogates in capture fields with a field-specific 400
+  before classification or storage.
+
 - Cap authenticated capture POST and PATCH bodies at 1 MiB before JSON decoding
   and return a JSON 413 for oversized bodies.
 

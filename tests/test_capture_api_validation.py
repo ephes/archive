@@ -243,3 +243,30 @@ def test_capture_rejects_oversized_body_before_decoding(
         read.assert_called_once_with(1024 * 1024 + 1)
     for work in no_capture:
         work.assert_not_called()
+
+
+@pytest.mark.parametrize("field", FIELDS)
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
+def test_capture_rejects_lone_surrogates_before_work(client, no_capture, field, surrogate):
+    body = json.dumps({"url": "https://example.com/story", field: f"text {surrogate}"})
+    response = client.post("/api/items/", body, content_type="application/json", headers=HEADERS)
+
+    assert response.status_code == 400
+    assert response.json() == {"error": f"Invalid {field}"}
+    for work in no_capture:
+        work.assert_not_called()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("ensure_ascii", [True, False])
+def test_capture_preserves_unicode_scalar_values(client, ensure_ascii):
+    notes = "Grüße aus Köln 📝"
+    body = json.dumps(
+        {"url": "https://example.com/story", "notes": notes}, ensure_ascii=ensure_ascii
+    )
+    response = client.post(
+        "/api/items/", body.encode(), content_type="application/json", headers=HEADERS
+    )
+
+    assert response.status_code == 201
+    assert Item.objects.get().notes == notes

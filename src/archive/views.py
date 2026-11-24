@@ -73,6 +73,7 @@ SEARCH_MAX_CHARS = 512
 SEARCH_MAX_TERMS = 32
 SEARCH_MAX_TERM_CHARS = 64
 MAX_CAPTURE_BODY_BYTES = 1024 * 1024
+_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 SEARCH_TOKEN_RE = re.compile(r"\w+")
 SEARCH_LIMIT_MESSAGE = (
     f"Search allows at most {SEARCH_MAX_CHARS} characters, {SEARCH_MAX_TERMS} terms "
@@ -824,7 +825,7 @@ def api_create_item(request: HttpRequest) -> JsonResponse:
         value = payload.get(name)
         if value is None:
             value = ""
-        if not isinstance(value, str):
+        if not isinstance(value, str) or _SURROGATE_RE.search(value):
             return JsonResponse({"error": f"Invalid {name}"}, status=400)
         model_name = "original_url" if name == "url" else name
         max_length = Item._meta.get_field(model_name).max_length

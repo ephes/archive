@@ -311,11 +311,11 @@ Reference docs:
 
 `POST /api/items/` captures a new item with `Authorization: Bearer <ARCHIVE_API_TOKEN>` and a JSON body containing `url`. Optional fields include `title`, `notes`, `kind`, `audio_url`, `media_url`, `source`, `author`, and `original_published_at`. `kind="quote"` is accepted through the same explicit-kind path as the other item kinds.
 
-Capture fields must be JSON strings; omitted or `null` fields are treated as empty,
+Capture fields must be JSON strings of Unicode scalar values; omitted or `null` fields are treated as empty,
 with `url` still required. Values are trimmed after validating the model length limits:
 `url`, `audio_url`, and `media_url` allow 200 characters; `title` allows 500;
 `source` and `author` allow 255; `kind` allows 32. `notes` has no model length limit.
-Wrong types or overlong values return `400` with `{"error":"Invalid <field>"}`
+Wrong types, lone surrogates, or overlong values return `400` with `{"error":"Invalid <field>"}`
 before classification or capture. Unknown fields are ignored.
 
 `original_published_at` accepts an ISO datetime string. Naive timestamps use the current

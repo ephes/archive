@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from unittest.mock import Mock
 
 import pytest
+from django.urls import resolve
 
 from archive.models import Item
 
@@ -213,3 +214,32 @@ def test_capture_refuses_duplicate_json_members_before_work(
     assert response.json() == {"error": "Invalid JSON"}
     for call in no_capture:
         call.assert_not_called()
+
+
+@pytest.mark.parametrize("method,path", [("POST", "/api/items/"), ("PATCH", "/api/items/1/")])
+@pytest.mark.parametrize("declared_length", [True, False])
+def test_capture_rejects_oversized_body_before_decoding(
+    rf, monkeypatch, no_capture, method, path, declared_length
+):
+    body = b'{"ignored":"' + b"x" * (1024 * 1024) + b'"}'
+    request = rf.generic(method, path, body, content_type="application/json", headers=HEADERS)
+    if not declared_length:
+        # Model a server that supplies a readable stream without Content-Length.
+        del request.META["CONTENT_LENGTH"]
+    read = Mock(wraps=request.read)
+    monkeypatch.setattr(request, "read", read)
+    parse = Mock(side_effect=AssertionError("must bound the body before JSON decoding"))
+    monkeypatch.setattr("archive.views.json.loads", parse)
+
+    route = resolve(path)
+    response = route.func(request, **route.kwargs)
+
+    assert response.status_code == 413
+    assert response.content == b'{"error": "Request body too large"}'
+    parse.assert_not_called()
+    if declared_length:
+        read.assert_not_called()
+    else:
+        read.assert_called_once_with(1024 * 1024 + 1)
+    for work in no_capture:
+        work.assert_not_called()

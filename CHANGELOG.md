@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Cap authenticated capture POST and PATCH bodies at 1 MiB before JSON decoding
+  and return a JSON 413 for oversized bodies.
+
 - Raise a streaming error when stored audio ends before the advertised range
   has been delivered.
 

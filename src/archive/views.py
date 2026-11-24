@@ -72,6 +72,7 @@ SEARCH_EXCERPT_CHARS = 240
 SEARCH_MAX_CHARS = 512
 SEARCH_MAX_TERMS = 32
 SEARCH_MAX_TERM_CHARS = 64
+MAX_CAPTURE_BODY_BYTES = 1024 * 1024
 SEARCH_TOKEN_RE = re.compile(r"\w+")
 SEARCH_LIMIT_MESSAGE = (
     f"Search allows at most {SEARCH_MAX_CHARS} characters, {SEARCH_MAX_TERMS} terms "
@@ -769,18 +770,44 @@ def _api_request_is_authorized(request: HttpRequest) -> bool:
     )
 
 
+def _read_capture_payload(request: HttpRequest) -> dict | JsonResponse:
+    limit = MAX_CAPTURE_BODY_BYTES
+    django_limit = settings.DATA_UPLOAD_MAX_MEMORY_SIZE
+    if django_limit is not None:
+        limit = min(limit, django_limit)
+    try:
+        declared_length = int(request.META.get("CONTENT_LENGTH") or 0)
+    except ValueError:
+        declared_length = 0
+    if declared_length > limit:
+        return JsonResponse({"error": "Request body too large"}, status=413)
+
+    body = bytearray()
+    while len(body) <= limit:
+        chunk = request.read(limit + 1 - len(body))
+        if not chunk:
+            break
+        body.extend(chunk)
+    if len(body) > limit:
+        return JsonResponse({"error": "Request body too large"}, status=413)
+    try:
+        payload = json.loads(body or b"{}", object_pairs_hook=_unique_json_object)
+    except (ValueError, RecursionError):
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    if not isinstance(payload, dict):
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    return payload
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 def api_create_item(request: HttpRequest) -> JsonResponse:
     if not _api_request_is_authorized(request):
         return JsonResponse({"error": "Unauthorized"}, status=401)
 
-    try:
-        payload = json.loads(request.body or b"{}", object_pairs_hook=_unique_json_object)
-    except (ValueError, RecursionError):
-        return JsonResponse({"error": "Invalid JSON"}, status=400)
-    if not isinstance(payload, dict):
-        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    payload = _read_capture_payload(request)
+    if isinstance(payload, JsonResponse):
+        return payload
 
     fields = {}
     for name in (
@@ -875,12 +902,9 @@ def api_update_item(request: HttpRequest, pk: int) -> JsonResponse:
     if not _api_request_is_authorized(request):
         return JsonResponse({"error": "Unauthorized"}, status=401)
 
-    try:
-        payload = json.loads(request.body or b"{}", object_pairs_hook=_unique_json_object)
-    except (ValueError, RecursionError):
-        return JsonResponse({"error": "Invalid JSON"}, status=400)
-    if not isinstance(payload, dict):
-        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    payload = _read_capture_payload(request)
+    if isinstance(payload, JsonResponse):
+        return payload
 
     kind = str(payload.get("kind") or "").strip()
     if kind not in ItemKind.values:

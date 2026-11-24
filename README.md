@@ -324,7 +324,10 @@ instant. Both are normalized to UTC before capture and must fit years 1–9999 i
 and the current Django timezone so detail pages can render them.
 Malformed dates and conversions outside that range return `400` with
 `{"error":"Invalid original_published_at"}`.
-Both POST and PATCH authenticate before parsing JSON. Malformed JSON, invalid JSON byte
+Both POST and PATCH authenticate before reading the body. The JSON body is limited
+to 1 MiB (1,048,576 bytes), or the Django upload memory limit if lower. Oversized
+bodies return `413` with `{"error":"Request body too large"}` before JSON decoding.
+Malformed JSON, invalid JSON byte
 encodings, duplicate object members (including nested unknown fields), and non-object
 bodies return `400` with `{"error":"Invalid JSON"}`;
 valid UTF-8, UTF-16, and UTF-32 JSON retain support.

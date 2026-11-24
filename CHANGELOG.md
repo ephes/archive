@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- After archived audio storage fails to open, return 404 for a withdrawn or
+  replaced publication and retain 502 for a still-current publication.
+
 - Close lazy S3 storage wrappers after range reader setup, including failed
   setup. Keep object reads lazy and preserve metadata errors.
 

@@ -171,6 +171,37 @@ def test_archived_audio_rechecks_publication_after_storage_open(
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("method", ["get", "head"])
+@pytest.mark.parametrize(
+    ("change", "status"),
+    [
+        ({"is_public": False}, 404),
+        ({"archived_audio_path": "items/1/audio/replacement.mp3"}, 404),
+        ({}, 502),
+    ],
+)
+def test_archived_audio_rechecks_publication_after_failed_storage_open(
+    client, monkeypatch, method, change, status
+):
+    item, url = _publish("item-archived-audio")
+    initial = client.head(url)
+    etag = initial["ETag"]
+    initial.close()
+
+    def fail_storage_open(name, mode):
+        if change:
+            Item.objects.filter(pk=item.pk).update(**change)
+        raise OSError("Synthetic storage failure")
+
+    monkeypatch.setattr(storages["archive_media"], "open", fail_storage_open)
+    response = getattr(client, method)(url, headers={"If-None-Match": etag})
+
+    assert response.status_code == status
+    assert response["Cache-Control"] == "no-store"
+    assert "ETag" not in response
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("route", ROUTES)
 def test_new_object_generation_changes_the_validator(client, route):
     item, url = _publish(route)

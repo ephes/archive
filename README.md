@@ -35,11 +35,13 @@ Public endpoints:
   backend can be retried immediately. This is at least as restrictive as private
   caller policies. Successful public delivery uses `Cache-Control: public, no-cache`:
   caches may store the audio but must revalidate every reuse with the origin, which
-  rechecks that the item is still public. After opening storage, the archived audio
-  route checks that the item is still public and that its archived path, size and
-  content type still match. If the check fails, it closes the file and returns
-  `404` with `no-store` before evaluating conditional request headers. The strong
-  `ETag` binds the route, item, stored object key, recorded size and content type.
+  rechecks that the item is still public. After a storage open attempt, the archived
+  audio route checks that the item is still public and that its archived path,
+  size and content type still match. If the check fails, it closes any acquired
+  file and returns `404` with `no-store` before evaluating conditional request
+  headers. An open failure for a still-current item returns `502` with `no-store`.
+  The strong `ETag` binds the route, item, stored object key, recorded size and
+  content type.
   Archived audio opened with the S3 range reader also uses the opened object's ETag,
   so a same-size replacement at the same key gets a fresh HTTP validator. Other
   readers rely on a new storage key for each published generation. A matching

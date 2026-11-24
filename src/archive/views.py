@@ -577,24 +577,27 @@ def item_archived_audio(request: HttpRequest, pk: int) -> HttpResponse:
     if not item.has_archived_audio:
         raise Http404("Archived audio is not available")
 
+    # Storage open can block while publication or the archive metadata changes.
+    current_audio = Item.objects.filter(
+        pk=pk,
+        is_public=True,
+        archived_audio_path=item.archived_audio_path,
+        archived_audio_size_bytes=item.archived_audio_size_bytes,
+        archived_audio_content_type=item.archived_audio_content_type,
+    )
     try:
         audio_file = open_archived_audio(item)
     except MediaArchivalError:
+        if not current_audio.exists():
+            raise Http404("Archived audio is not available") from None
         return HttpResponse(
             "Archived audio is temporarily unavailable.",
             status=502,
             headers={"Cache-Control": "no-store"},
         )
 
-    # Storage open can block while publication or the archive metadata changes.
     try:
-        if not Item.objects.filter(
-            pk=pk,
-            is_public=True,
-            archived_audio_path=item.archived_audio_path,
-            archived_audio_size_bytes=item.archived_audio_size_bytes,
-            archived_audio_content_type=item.archived_audio_content_type,
-        ).exists():
+        if not current_audio.exists():
             raise Http404("Archived audio is not available")
     except BaseException:
         with suppress(Exception):

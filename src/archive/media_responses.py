@@ -152,15 +152,15 @@ def ranged_file_response(
                 return finalize(HttpResponse("Audio is temporarily unavailable.", status=502))
 
         if byte_range is None:
-            if lazy_head:
-                # FileResponse's header inference can seek and load a lazy file.
-                # Give it an empty reader that still owns the opened handle.
+            if lazy_head or (request.method == "GET" and size > 0):
+                # Bound known-length GETs and keep lazy HEADs from loading the file.
+                filename = getattr(file_handle, "name", "")
                 response = FileResponse(
-                    _LimitedReader(file_handle, 0),
+                    _LimitedReader(file_handle, 0 if lazy_head else size),
                     content_type=content_type,
-                    filename=getattr(file_handle, "name", ""),
+                    filename=filename if isinstance(filename, str) else "",
                 )
-                if available is not None:
+                if lazy_head and available is not None:
                     response["Content-Length"] = str(available)
             else:
                 response = FileResponse(file_handle, content_type=content_type)

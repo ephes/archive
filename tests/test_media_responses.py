@@ -355,7 +355,7 @@ def test_response_file_probe_failure_releases_handle(monkeypatch, fault):
             ranged_file_response(
                 RequestFactory().get("/media"),
                 file_handle=handle,
-                size=9,
+                size=0,  # For an unknown length, FileResponse still probes the original handle.
                 content_type="audio/mpeg",
                 cache_control="public",
             )

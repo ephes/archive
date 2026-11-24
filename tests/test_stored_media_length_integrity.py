@@ -125,28 +125,55 @@ def test_matching_lengths_keep_validated_responses(
     assert len(observed_closes) == 1
 
 
-def test_truncated_open_file_fails_during_range_stream(db, tmp_path):
+@pytest.mark.parametrize("partial", [False, True], ids=["full", "range"])
+def test_truncated_open_file_fails_during_stream(db, tmp_path, partial):
     with (tmp_path / "audio.mp3").open("w+b", buffering=0) as handle:
         handle.write(PAYLOAD)
+        handle.seek(0)
         response = ranged_file_response(
-            RequestFactory().get("/media", headers={"Range": "bytes=2-7"}),
+            RequestFactory().get("/media", headers={"Range": "bytes=2-7"} if partial else {}),
             file_handle=handle,
             size=len(PAYLOAD),
             content_type="audio/mpeg",
             cache_control="public",
         )
         try:
-            assert response.status_code == 206
-            assert response["Content-Length"] == "6"
-            assert response["Content-Range"] == "bytes 2-7/17"
+            assert response.status_code == (206 if partial else 200)
+            assert response["Content-Length"] == ("6" if partial else str(len(PAYLOAD)))
+            assert response.get("Content-Range") == ("bytes 2-7/17" if partial else None)
             response.block_size = 2
             stream = iter(response.streaming_content)
-            assert next(stream) == PAYLOAD[2:4]
+            start = 2 if partial else 0
+            assert next(stream) == PAYLOAD[start : start + 2]
 
-            handle.truncate(5)
-            assert next(stream) == PAYLOAD[4:5]
+            handle.truncate(start + 3)
+            assert next(stream) == PAYLOAD[start + 2 : start + 3]
             with pytest.raises(OSError, match="^Archived media ended before its recorded length$"):
                 next(stream)
+            assert not handle.closed
+        finally:
+            response.close()
+        assert handle.closed
+
+
+def test_growing_open_file_stays_within_full_response_length(db, tmp_path):
+    path = tmp_path / "audio.mp3"
+    path.write_bytes(PAYLOAD)
+    with path.open("rb", buffering=0) as handle:
+        response = ranged_file_response(
+            RequestFactory().get("/media"),
+            file_handle=handle,
+            size=len(PAYLOAD),
+            content_type="audio/mpeg",
+            cache_control="public",
+        )
+        try:
+            assert response.status_code == 200
+            assert response["Content-Length"] == str(len(PAYLOAD))
+            assert response["Content-Disposition"] == 'inline; filename="audio.mp3"'
+            with path.open("ab") as writer:
+                writer.write(b"-appended")
+            assert b"".join(response.streaming_content) == PAYLOAD
             assert not handle.closed
         finally:
             response.close()

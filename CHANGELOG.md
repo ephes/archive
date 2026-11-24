@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Enforce the advertised byte count on full stored-audio GETs. File growth
+  cannot add bytes to the response, and premature EOF raises a streaming error.
+
 - Reject `NaN`, `Infinity`, and `-Infinity` in upstream JSON before consuming
   responses, using the existing invalid-JSON diagnostics.
 

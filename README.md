@@ -804,11 +804,12 @@ text as the TTS input when it can fetch it and falls back to stored summary/note
 currently reuses the summary-source extractor, so it still inherits the 1 MiB raw source download cap and
 falls back to stored summary/notes text for oversized, blocked, or otherwise unreadable pages (summaries
 use the first 1 MiB of an oversized page instead; article audio never reads a cut-off article). The final
-submitted script is capped by `ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS` before submission. Archive stores the
-private artifact reference and exposes the finished audio through a public item-scoped proxy URL on the
-detail page. Podcast episodes with a direct remote audio source are also archived asynchronously into the
-configured archive-media storage backend and then served through a stable item-scoped Archive URL for
-playback and podcast enclosures.
+submitted script is capped by `ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS` before submission.
+When the script exceeds the cap, Archive builds only the trimmed prefix and applies the
+word-boundary rule to it. Archive stores the private artifact reference and exposes the finished
+audio through a public item-scoped proxy URL on the detail page. Podcast episodes with a direct
+remote audio source are also archived asynchronously into the configured archive-media storage backend
+and then served through a stable item-scoped Archive URL for playback and podcast enclosures.
 Video items with a direct downloadable media URL (`.mp4`, `.m4v`, `.mov`, or `.webm`) are archived into the
 same storage backend, then processed with `ffmpeg` to produce a stable local MP3 enclosure under
 `/items/<id>/audio/`. YouTube page URLs (`youtube.com/watch`, `youtube.com/shorts`, `youtube.com/live`,
@@ -816,11 +817,12 @@ same storage backend, then processed with `ffmpeg` to produce a stable local MP3
 downloader. Archive now ships `yt-dlp[default]` plus `bgutil-ytdlp-pot-provider` so modern YouTube bot-check
 flows can resolve playable formats without requiring browser cookies in the common case, and it archives
 YouTube pages as audio-first local enclosures instead of downloading a full local video file first. Vimeo and
-other non-direct video pages are still unsupported. Oversized archived uploaded video
-transcription is still deferred because Voxhelm's staged batch input currently supports audio only. Failed
-media archival jobs now
-retry with the same bounded backoff pattern as summary generation (5 minutes, 30 minutes, 2 hours) before
-remaining failed for operator review.
+other non-direct video pages are still unsupported. Nested FFmpeg calls with a timeout
+reject diagnostics when the final drain and process wait reach or exceed their deadline.
+Oversized archived uploaded video transcription is still deferred because Voxhelm's staged batch
+input currently supports audio only. Failed media archival jobs retry with the same bounded backoff
+pattern as summary generation (5 minutes, 30 minutes, 2 hours) before remaining failed for operator
+review.
 The worker also persists when an item first entered `processing` and now re-queues stale `processing`
 states during normal loop iterations instead of only recovering them on worker startup. The same stale
 window is enforced against the currently running item, so a transcript or summary path that stops making

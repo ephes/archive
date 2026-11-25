@@ -5,6 +5,7 @@ without network access, so a yt-dlp refactor that bypasses the bound fails here.
 """
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -116,3 +117,50 @@ def test_nested_ffmpeg_failure_keeps_ytdlp_error(monkeypatch, tmp_path):
 
 def test_child_budget_matches_parent_budget():
     assert video_page_download.MAX_DIAGNOSTIC_BYTES == MAX_DIAGNOSTIC_BYTES
+
+
+@pytest.mark.parametrize(
+    ("phase", "finished_at"), [("eof", 9), ("eof", 10), ("eof", 11), ("wait", 11)]
+)
+def test_nested_ffmpeg_rejects_completion_at_or_after_deadline(phase, finished_at, monkeypatch):
+    clock = [0]
+    read = os.read
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(write_fd, "wb") as writer:
+        writer.write(b"synthetic output")
+
+    def timed_read(fd, size):
+        data = read(fd, size)
+        if not data and phase == "eof":
+            clock[0] = finished_at
+        return data
+
+    class CompletedProcess:
+        args = ("ffmpeg",)
+        returncode = 0
+        stderr = None
+
+        def __init__(self, *args, **kwargs):
+            self.stdout = os.fdopen(read_fd, "rb")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.stdout.close()
+
+        def wait(self, *, timeout):
+            if phase == "wait":
+                clock[0] = finished_at
+            return self.returncode
+
+    monkeypatch.setattr(video_page_download, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(video_page_download.os, "read", timed_read)
+
+    run = video_page_download.BoundedPopen.run.__func__
+    if finished_at < 10:
+        assert run(CompletedProcess, "ffmpeg", timeout=10) == (b"synthetic output", b"", 0)
+    else:
+        with pytest.raises(subprocess.TimeoutExpired) as caught:
+            run(CompletedProcess, "ffmpeg", timeout=10)
+        assert caught.value.timeout == 10

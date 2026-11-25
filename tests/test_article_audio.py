@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import tracemalloc
 
 import pytest
 
@@ -92,6 +93,39 @@ def test_build_article_audio_script_applies_max_chars() -> None:
     assert len(script) <= 32
     assert script.startswith("Article headline")
     assert script != "Article headline\n\nOriginal article body text that keeps going."
+
+
+@pytest.mark.parametrize("title", [" \u2003A title \n", " \t"])
+def test_article_audio_caps_match_the_complete_script_prefix(title):
+    item = Item(kind=ItemKind.ARTICLE, title=title, long_summary=" \tBody\ttext words.\u2003")
+    complete = "\n\n".join(part for part in (title.strip(), "Body\ttext words.") if part)
+    assert build_article_audio_script(item) == complete
+
+    for cap in range(-3, len(complete) + 2):
+        expected = complete
+        if len(complete) > cap:
+            expected = complete[:cap].rstrip()
+            boundary = max(expected.rfind(char) for char in (" ", "\n", "\t"))
+            if boundary > 0:
+                expected = expected[:boundary].rstrip()
+        assert build_article_audio_script(item, max_chars=cap) == expected, cap
+
+
+def test_capped_article_audio_script_avoids_copying_a_large_note():
+    item = Item(
+        kind=ItemKind.ARTICLE,
+        title=" Synthetic title ",
+        notes=" \u2003" + "body " * 1_000_000 + "\n",
+    )
+    tracemalloc.start()
+    try:
+        script = build_article_audio_script(item, max_chars=32)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert script == "Synthetic title\n\nbody body"
+    assert peak < 64 * 1024
 
 
 @pytest.mark.django_db

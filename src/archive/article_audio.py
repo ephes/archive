@@ -5,6 +5,7 @@ import json
 import logging
 from dataclasses import dataclass
 from http.client import HTTPException
+from itertools import chain
 from tempfile import NamedTemporaryFile
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
@@ -74,20 +75,45 @@ def build_article_audio_script(
     if item.kind != ItemKind.ARTICLE:
         return ""
 
-    body = (
-        source_text.strip()
-        or item.long_summary.strip()
-        or item.short_summary.strip()
-        or item.notes.strip()
-    )
-    if not body:
+    stored_bodies = (getattr(item, field) for field in ("long_summary", "short_summary", "notes"))
+    for body in chain((source_text,), stored_bodies):
+        body_start, body_end = _script_part_bounds(body)
+        if body_start < body_end:
+            break
+    else:
         return ""
 
-    parts = [part for part in (item.title.strip(), body) if part]
-    script = "\n\n".join(parts).strip()
-    if max_chars is not None:
-        script = _truncate_script(script, max_chars=max_chars)
-    return script
+    title = item.title
+    title_start, title_end = _script_part_bounds(title)
+    parts = []
+    if title_start < title_end:
+        parts.extend([(title, title_start, title_end), ("\n\n", 0, 2)])
+    parts.append((body, body_start, body_end))
+
+    length = sum(end - start for _, start, end in parts)
+    if max_chars is None or max_chars >= length:
+        return "".join(text[start:end] for text, start, end in parts)
+
+    # Match slicing for direct callers that pass a negative cap, too.
+    remaining = max_chars if max_chars >= 0 else max(0, length + max_chars)
+    prefix = []
+    for text, start, end in parts:
+        if remaining == 0:
+            break
+        stop = min(end, start + remaining)
+        prefix.append(text[start:stop])
+        remaining -= stop - start
+    return _trim_partial_script("".join(prefix))
+
+
+def _script_part_bounds(value: str) -> tuple[int, int]:
+    """Find the stripped span without copying the text."""
+    start, end = 0, len(value)
+    while start < end and value[start].isspace():
+        start += 1
+    while end > start and value[end - 1].isspace():
+        end -= 1
+    return start, end
 
 
 def generate_item_article_audio(item: Item, timeout: int = 30) -> ArticleAudioJobUpdate:
@@ -277,12 +303,8 @@ def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
         ) from None
 
 
-def _truncate_script(value: str, *, max_chars: int) -> str:
-    normalized = value.strip()
-    if len(normalized) <= max_chars:
-        return normalized
-
-    truncated = normalized[:max_chars].rstrip()
+def _trim_partial_script(prefix: str) -> str:
+    truncated = prefix.rstrip()
     whitespace_positions = [truncated.rfind(char) for char in (" ", "\n", "\t")]
     last_whitespace = max(whitespace_positions)
     if last_whitespace > 0:

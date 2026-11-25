@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reject nested FFmpeg results that finish draining or waiting at or after the deadline.
+- Build only the admitted article-audio script prefix when the text exceeds the cap.
+
 - Keep authenticated transport receipts small by forwarding only bounded
   Content-Type and Content-Length metadata from successful responses.
 - Check authenticated request framing against the staged request body before

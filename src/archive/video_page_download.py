@@ -6,7 +6,7 @@ import selectors
 import subprocess
 import sys
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from time import monotonic
 
 import yt_dlp
@@ -60,8 +60,11 @@ class BoundedPopen(ytdlp_ffmpeg.Popen):
                 remaining = None if deadline is None else max(deadline - monotonic(), 0)
                 process.wait(timeout=remaining)
             except BaseException:
-                process.kill(timeout=None)
+                with suppress(OSError, subprocess.TimeoutExpired):
+                    process.kill(timeout=None)
                 raise
+        if deadline is not None and monotonic() >= deadline:
+            raise subprocess.TimeoutExpired(process.args, timeout or 0)
         if text:
             return (
                 _decode(stdout, encoding, errors),

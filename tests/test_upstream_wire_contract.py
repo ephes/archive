@@ -213,9 +213,7 @@ def test_staged_length_checked_before_transport(actual, monkeypatch, settings):
         Path(options["path"]).write_text('{"id": "upload-a"}')
         return SimpleNamespace(
             returncode=0,
-            stdout=json.dumps(
-                {"headers": [["Content-Type", "application/json"]]}
-            ),
+            stdout=json.dumps({"headers": [["Content-Type", "application/json"]]}),
         )
 
     monkeypatch.setattr(upstream_http.subprocess, "run", run)

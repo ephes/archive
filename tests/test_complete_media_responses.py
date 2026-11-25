@@ -386,9 +386,7 @@ def test_complete_json_is_admitted(synthetic_authenticated_response, status):
 
 
 @pytest.mark.parametrize("close_raises", [False, True], ids=["closed", "close-fails"])
-def test_http_error_status_survives_unreadable_body(
-    synthetic_authenticated_response, close_raises
-):
+def test_http_error_status_survives_unreadable_body(synthetic_authenticated_response, close_raises):
     exchanges = synthetic_authenticated_response(
         {
             "status": 500,

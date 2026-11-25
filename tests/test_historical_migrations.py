@@ -98,6 +98,83 @@ connections.close_all()
 ''')
 
 
+def test_public_week_index_populated_upgrade_rollback_and_work(tmp_path):
+    run_journey(tmp_path, r'''
+import json
+from datetime import UTC, datetime, timedelta
+
+import django
+from django.db import connection
+from django.db.migrations.executor import MigrationExecutor
+from django.test import RequestFactory
+from django.test.utils import CaptureQueriesContext
+
+django.setup()
+from archive.models import Item
+from archive.views import weekly_items_json
+
+pre = [("archive", "0023_item_archive_public_feed_order")]
+executor = MigrationExecutor(connection)
+latest = executor.loader.graph.leaf_nodes("archive")
+executor.migrate(pre)
+now = datetime(2026, 7, 1, 12, tzinfo=UTC)
+rows = Item.objects.bulk_create([
+    Item(original_url=f"https://example.test/week/{n}", title=f"Synthetic {n}",
+         shared_at=now + timedelta(seconds=n // 4),
+         published_at=now, is_public=n % 120 == 0 or n == 5881)
+    for n in range(8000)
+])
+expected = [row for row in rows if row.is_public]
+assert expected[49].shared_at == expected[50].shared_at
+factory = RequestFactory()
+
+def read_week():
+    url = "/feeds/week/2026-W27.json"
+    ids = []
+    measurements = []
+    while url:
+        ticks = 0
+        def progress():
+            nonlocal ticks
+            ticks += 1
+            return 0
+
+        connection.connection.set_progress_handler(progress, 100)
+        try:
+            with CaptureQueriesContext(connection) as queries:
+                response = weekly_items_json(factory.get(url), "2026-W27")
+        finally:
+            connection.connection.set_progress_handler(None, 0)
+        assert response.status_code == 200
+        assert len(queries) == 1
+        with connection.cursor() as cursor:
+            cursor.execute("EXPLAIN QUERY PLAN " + queries[0]["sql"])
+            plan = str(cursor.fetchall())
+        measurements.append((plan, ticks))
+
+        payload = json.loads(response.content)
+        ids.extend(item["id"] for item in payload["items"])
+        url = payload["next"]
+        if url:
+            assert len(ids) == 50
+    assert len(measurements) == 2
+    assert ids == [row.pk for row in expected]
+    return measurements
+
+baseline = read_week()
+MigrationExecutor(connection).migrate(latest)
+for (plan, ticks), (baseline_plan, baseline_ticks) in zip(read_week(), baseline, strict=True):
+    assert "archive_public_week_order" not in baseline_plan, baseline_plan
+    assert "archive_public_week_order" in plan, plan
+    assert "USE TEMP B-TREE" not in plan, plan
+    assert ticks * 3 < baseline_ticks, (ticks, baseline_ticks)
+
+MigrationExecutor(connection).migrate(pre)
+assert [plan for plan, _ in read_week()] == [plan for plan, _ in baseline]
+connection.close()
+''')
+
+
 @pytest.mark.parametrize("number", [5, 6, 7, 8, 17])
 def test_historical_data_migrations_use_selected_database(tmp_path, number):
     run_journey(tmp_path, r'''

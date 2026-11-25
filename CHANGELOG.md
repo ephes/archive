@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Index public sharing timestamps for initial and cursor pages of the weekly JSON feed.
 - Reuse podcast eligibility decisions through page hydration and enclosure rendering.
 - Exclude tab- and Unicode-whitespace-only titles from general RSS pagination.
 - Redirect numbered first RSS and podcast pages before querying feed items.

@@ -210,6 +210,11 @@ changes to `shared_at` may move items between pages. Read an unchanged week to g
 every public item exactly once. External consumers must deploy the pagination update
 alongside the app; there is no unbounded compatibility mode.
 
+Migration 0024 adds a partial SQLite index on public items' `shared_at` for both the
+initial and cursor pages. Equal timestamps follow item ID order. Apply migrations
+before rollout. Reversing 0024 drops the partial index and keeps the general
+`shared_at` index and item data.
+
 Partial model saves also persist a newly derived publication date, including
 `save(update_fields=["is_public"])`. An empty `update_fields` remains a no-op;
 unrelated columns are never added to the partial write.

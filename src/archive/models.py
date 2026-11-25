@@ -179,6 +179,11 @@ class Item(models.Model):
         ordering = ("-shared_at", "-id")
         indexes = [
             models.Index(
+                fields=["shared_at"],
+                condition=models.Q(is_public=True),
+                name="archive_public_week_order",
+            ),
+            models.Index(
                 fields=["-published_at", "-id"],
                 condition=models.Q(is_public=True, published_at__isnull=False),
                 name="archive_public_feed_order",

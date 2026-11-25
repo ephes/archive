@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Honor the saved article-audio poll deadline while processing other stages on the same item.
 - Match Unicode and ASCII IDNA spellings of the same host in `reclassify_items --host`.
 - Recover legacy processing rows without a claim timestamp in the bounded worker pass.
 - Claim retries that become due while waiting for the SQLite writer lock.

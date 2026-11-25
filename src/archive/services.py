@@ -315,6 +315,10 @@ def enrich_item_metadata(
                         continue
                     if stage == "transcript" and not _transcript_poll_due(item, timezone.now()):
                         continue
+                    if stage == "article_audio" and not _article_audio_poll_due(
+                        item, timezone.now()
+                    ):
+                        continue
                     setattr(item, field, EnrichmentStatus.PROCESSING)
                     item.processing_started_at = started_at
                     item.save(using=using, update_fields=[field, "processing_started_at"])
@@ -1422,9 +1426,15 @@ def _claimable_article_audio_query(now: datetime) -> Q:
 def _article_audio_should_start(item: Item, now: datetime) -> bool:
     if item.article_audio_status != EnrichmentStatus.PENDING:
         return False
-    if item.article_audio_poll_at is not None and item.article_audio_poll_at > now:
-        return False
-    return _supports_article_audio(item) and _article_audio_source_ready(item)
+    return (
+        _article_audio_poll_due(item, now)
+        and _supports_article_audio(item)
+        and _article_audio_source_ready(item)
+    )
+
+
+def _article_audio_poll_due(item: Item, now: datetime) -> bool:
+    return item.article_audio_poll_at is None or item.article_audio_poll_at <= now
 
 
 def _summary_should_refresh_from_transcript(item: Item) -> bool:

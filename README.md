@@ -830,7 +830,8 @@ falls back to stored summary/notes text for oversized, blocked, or otherwise unr
 use the first 1 MiB of an oversized page instead; article audio never reads a cut-off article). The final
 script is capped by `ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS`. New jobs require a positive
 limit before Archive fetches the source page. Polling a saved job uses its job ID and
-the configured credential independently of the script limit.
+the configured credential independently of the script limit. The worker observes
+the saved poll deadline even when another stage on the same item runs first.
 When the script exceeds the cap, Archive builds only the trimmed prefix and applies the
 word-boundary rule to it. Archive stores the private artifact reference and exposes the finished
 audio through a public item-scoped proxy URL on the detail page. Podcast episodes with a direct

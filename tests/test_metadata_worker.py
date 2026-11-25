@@ -210,3 +210,60 @@ def test_worker_output_uses_item_identity_without_url_secrets(monkeypatch, caplo
     assert "Processed 1 item(s)." in stdout.getvalue()
     for sentinel in (url, "USER_SENTINEL", "PASS_SENTINEL", "QUERY_SENTINEL"):
         assert sentinel not in output
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("due_during_metadata", [False, True])
+def test_worker_checks_article_audio_poll_deadline_after_metadata(
+    monkeypatch, settings, due_during_metadata
+):
+    from test_attempt_ownership import idle_item
+
+    from archive import article_audio, services
+    from archive.models import ItemKind
+
+    now = timezone.now()
+    poll_at = now + timedelta(seconds=60)
+    item = idle_item(
+        kind=ItemKind.ARTICLE,
+        enrichment_status=EnrichmentStatus.PENDING,
+        long_summary="Synthetic article summary",
+        article_audio_status=EnrichmentStatus.PENDING,
+        article_audio_job_id="saved-job",
+        article_audio_poll_at=poll_at,
+    )
+    settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = "synthetic-test-token"
+    polls = []
+    monkeypatch.setattr(services.timezone, "now", lambda: now)
+
+    def finish_metadata(item, timeout):
+        nonlocal now
+        assert item.article_audio_status == EnrichmentStatus.PENDING
+        item.enrichment_status = EnrichmentStatus.COMPLETE
+        item.save(update_fields=["enrichment_status"])
+        if due_during_metadata:
+            now = poll_at
+        return True
+
+    def poll(*, job_id, **kwargs):
+        polls.append(job_id)
+        return article_audio.ArticleAudioJobUpdate(job_id, "running")
+
+    monkeypatch.setattr(services, "_enrich_item_metadata_fields", finish_metadata)
+    monkeypatch.setattr(article_audio, "_poll_synthesis_job", poll)
+    call_command("run_metadata_worker", once=True, limit=1)
+    item.refresh_from_db()
+    assert item.enrichment_status == EnrichmentStatus.COMPLETE
+    assert item.article_audio_status == EnrichmentStatus.PENDING
+    if not due_during_metadata:
+        assert polls == []
+        assert item.article_audio_poll_at == poll_at
+        now = poll_at + timedelta(seconds=1)
+        call_command("run_metadata_worker", once=True, limit=1)
+        item.refresh_from_db()
+
+    assert polls == ["saved-job"]
+    assert item.article_audio_job_id == "saved-job"
+    assert item.article_audio_poll_at == now + timedelta(
+        seconds=settings.ARCHIVE_ARTICLE_AUDIO_POLL_SECONDS
+    )

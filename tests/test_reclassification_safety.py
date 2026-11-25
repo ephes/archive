@@ -66,6 +66,28 @@ def test_replay_host_matches_hostname_across_ports(selector, urls):
     assert adjacent.pk not in changed_ids
 
 
+@pytest.mark.parametrize("selector", ["example.test", " EXAMPLE.test. "])
+def test_replay_host_matches_with_or_without_dns_root_dot(selector):
+    plain, fqdn, adjacent = Item.objects.bulk_create(
+        [
+            Item(original_url="https://example.test/story", classification_engine_version=0),
+            Item(original_url="https://EXAMPLE.test.:8443/story", classification_engine_version=0),
+            Item(
+                original_url="https://adjacent.example.test./story", classification_engine_version=0
+            ),
+        ]
+    )
+    stdout = StringIO()
+
+    call_command("reclassify_items", "--host", selector, stdout=stdout)
+
+    report = stdout.getvalue()
+    assert "Summary: inspected=2 changed=2 unchanged=0 mode=dry-run skipped=0" in report
+    assert f"WOULD UPDATE item {plain.pk}:" in report
+    assert f"WOULD UPDATE item {fqdn.pk}:" in report
+    assert f"item {adjacent.pk}:" not in report
+
+
 @pytest.mark.parametrize("selector", ["example.test:8443", "[2001:db8::1]:8443", "2001:db8::1"])
 def test_replay_rejects_host_with_port_or_unbracketed_ipv6(selector, django_assert_num_queries):
     with django_assert_num_queries(0):

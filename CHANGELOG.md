@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Match DNS hostnames with or without a trailing root dot in `reclassify_items --host`.
 - Recognize numbered Markdown list markers in podcast-feed eligibility for generated article audio.
 - Use four-digit ISO week-years in week tokens for dates before year 1000.
 - Index public sharing timestamps for initial and cursor pages of the weekly JSON feed.

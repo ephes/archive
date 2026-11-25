@@ -60,7 +60,7 @@ def normalize_host_selector(value: str) -> str:
     if not host:
         raise CommandError("--host must not be blank.")
     if re.fullmatch(r"[\w.-]+", host):
-        return host.lower()
+        return host.lower().removesuffix(".")
     if re.fullmatch(r"\[[\w.:%-]+\]", host):
         try:
             return IPv6Address(host[1:-1]).compressed
@@ -88,7 +88,10 @@ class Command(BaseCommand):
             "--host",
             action="append",
             default=[],
-            help="Match an original URL hostname across ports. Bracket IPv6 addresses.",
+            help=(
+                "Match an original URL hostname across ports and optional DNS root dots. "
+                "Bracket IPv6 addresses."
+            ),
         )
         parser.add_argument(
             "--rule",
@@ -269,6 +272,8 @@ class Command(BaseCommand):
             host = urlparse(original_url).hostname
             if host and ":" in host:
                 host = IPv6Address(host).compressed
+            elif host:
+                host = host.removesuffix(".")
         except ValueError:
             raise CommandError(f"Cannot select item {item_id}: invalid URL.") from None
         return host in allowed_hosts

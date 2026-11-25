@@ -1,6 +1,7 @@
 """Exercise lazy copies through the public endpoint and a fake Voxhelm HTTP server."""
 
 import io
+import logging
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -12,7 +13,12 @@ from django.core.files.base import ContentFile
 from django.core.files.storage import storages
 from django.urls import reverse
 
-from archive.article_audio import ArticleAudioJobUpdate, store_generated_article_audio
+from archive import article_audio
+from archive.article_audio import (
+    ArticleAudioGenerationError,
+    ArticleAudioJobUpdate,
+    store_generated_article_audio,
+)
 from archive.media_storage import referenced_archive_media_paths
 from archive.models import EnrichmentStatus, Item, ItemKind, PendingArchiveMediaUpload
 from archive.services import enrich_item_article_audio
@@ -356,6 +362,54 @@ def test_interrupted_publication_compensation_preserves_committed_copy(
     files = list(Path(storage.location).rglob("*.mp3"))
     assert len(files) == int(after_commit)
     assert not PendingArchiveMediaUpload.objects.exists()
+
+
+def test_publication_refusal_survives_cleanup_and_log_failures(article, settings, monkeypatch):
+    settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = "synthetic-token"
+    storage = storages["archive_media"]
+
+    class Response(io.BytesIO):
+        headers = Message()
+
+    response = Response(b"ID3-synthetic-audio")
+    response.headers["Content-Type"] = "audio/mpeg"
+    monkeypatch.setattr(article_audio, "urlopen", lambda *args, **kwargs: response)
+
+    refusal = ArticleAudioGenerationError("Synthetic publication refusal")
+
+    def refuse_publication(*args, **kwargs):
+        raise refusal
+
+    retirement_attempts = []
+
+    def fail_delete(name):
+        retirement_attempts.append(name)
+        raise OSError("Synthetic backend cleanup failure")
+
+    diagnostics = []
+
+    class FailingHandler(logging.Handler):
+        def emit(self, record):
+            diagnostics.append(record)
+            raise RuntimeError("Synthetic diagnostic failure")
+
+    monkeypatch.setattr(article_audio, "release_pending_archive_media_paths", refuse_publication)
+    monkeypatch.setattr(storage, "delete", fail_delete)
+    monkeypatch.setattr(article_audio.logger, "handlers", [FailingHandler()])
+
+    with pytest.raises(ArticleAudioGenerationError) as error:
+        store_generated_article_audio(article)
+
+    assert error.value is refusal
+    reservation = PendingArchiveMediaUpload.objects.get(owner_item_id=article.pk)
+    name = reservation.prefix + "speech.mp3"
+    assert retirement_attempts == [name]
+    assert storage.exists(name)
+    article.refresh_from_db()
+    assert not article.article_audio_file
+    [record] = diagnostics
+    assert record.args == (article.pk,)
+    assert record.exc_info is None
 
 
 def test_mp3_alias_normalized_for_response_and_feed(client, article, settings, monkeypatch):

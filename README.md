@@ -804,7 +804,9 @@ text as the TTS input when it can fetch it and falls back to stored summary/note
 currently reuses the summary-source extractor, so it still inherits the 1 MiB raw source download cap and
 falls back to stored summary/notes text for oversized, blocked, or otherwise unreadable pages (summaries
 use the first 1 MiB of an oversized page instead; article audio never reads a cut-off article). The final
-submitted script is capped by `ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS` before submission.
+script is capped by `ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS`. New jobs require a positive
+limit before Archive fetches the source page. Polling a saved job uses its job ID and
+the configured credential independently of the script limit.
 When the script exceeds the cap, Archive builds only the trimmed prefix and applies the
 word-boundary rule to it. Archive stores the private artifact reference and exposes the finished
 audio through a public item-scoped proxy URL on the detail page. Podcast episodes with a direct
@@ -1638,9 +1640,11 @@ Article copies use the same upload reservations and reference-aware deletion gua
 as source media: item deletion and `cleanup_archive_media_orphans` cover both. Concurrent
 backfills may download independently, but only one copy is published and redundant
 uploads are discarded. Failed uploads are discarded through the reference-aware guard, even if publication
-was interrupted. If compensation cannot verify the database, or the process is killed,
-a protected reservation can remain; follow the reservation recovery procedure above. To intentionally regenerate
-article audio, clear its stored file/size/type as well as its artifact/job state first.
+was interrupted. If compensation fails, the original copy error still applies.
+Archive attempts a warning containing the item ID. If a protected reservation
+remains after a cleanup failure or interruption, follow the reservation recovery
+procedure above. To regenerate article audio, first clear its stored file, size,
+type, artifact and job state.
 
 
 Stored-audio HTTP regression journeys use synthetic files and a loopback Django WSGI

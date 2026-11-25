@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from contextlib import suppress
 from dataclasses import dataclass
 from http.client import HTTPException
 from itertools import chain
@@ -125,11 +126,11 @@ def generate_item_article_audio(item: Item, timeout: int = 30) -> ArticleAudioJo
     if job_id:
         return _poll_synthesis_job(job_id=job_id, timeout=timeout, api_key=api_key)
 
-    extracted_source_text = _best_effort_article_audio_source_text(item=item, timeout=timeout)
     script_max_chars = settings.ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS
     if script_max_chars <= 0:
         raise ArticleAudioGenerationError("Article audio script max chars must be positive")
 
+    extracted_source_text = _best_effort_article_audio_source_text(item=item, timeout=timeout)
     script = build_article_audio_script(
         item,
         source_text=extracted_source_text,
@@ -286,7 +287,9 @@ def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
                         owns_reservation=True,
                     )
                 except Exception:
-                    logger.exception("Failed to discard unpublished article audio %s", stored_name)
+                    # Keep the primary failure and leave cleanup to reconciliation.
+                    with suppress(Exception):
+                        logger.warning("Article audio upload cleanup failed for item %s", item.pk)
             raise
     except HTTPError as exc:
         raise ArticleAudioGenerationError(

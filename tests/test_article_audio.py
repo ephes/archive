@@ -276,6 +276,26 @@ def test_generate_item_article_audio_falls_back_to_long_summary_when_extraction_
     assert update.state == "queued"
 
 
+@pytest.mark.parametrize("limit", [0, -1])
+def test_generate_item_article_audio_rejects_invalid_script_limit_before_extraction(
+    monkeypatch, settings, limit
+):
+    item = Item(original_url="https://example.test/article", kind=ItemKind.ARTICLE)
+    settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = "tts-token"
+    settings.ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS = limit
+    monkeypatch.setattr(
+        "archive.article_audio.extract_summary_source_from_url",
+        lambda *args, **kwargs: pytest.fail("source extraction ran before configuration check"),
+    )
+    monkeypatch.setattr(
+        "archive.article_audio.urlopen",
+        lambda *args, **kwargs: pytest.fail("invalid configuration reached Voxhelm"),
+    )
+
+    with pytest.raises(ArticleAudioGenerationError, match="script max chars must be positive"):
+        generate_item_article_audio(item)
+
+
 @pytest.mark.django_db
 def test_generate_item_article_audio_polls_existing_job(monkeypatch, settings) -> None:
     item = Item.objects.create(
@@ -287,6 +307,12 @@ def test_generate_item_article_audio_polls_existing_job(monkeypatch, settings) -
     )
     settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = "tts-token"
     settings.ARCHIVE_ARTICLE_AUDIO_API_BASE = "https://voxhelm.example.test/v1"
+
+    settings.ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS = 0
+    monkeypatch.setattr(
+        "archive.article_audio.extract_summary_source_from_url",
+        lambda *args, **kwargs: pytest.fail("polling should skip source extraction"),
+    )
 
     def fake_urlopen(request, timeout):
         assert timeout == 30

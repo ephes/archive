@@ -4,6 +4,8 @@
 
 - Page selected admin reprocessing IDs before loading current items under row locks.
 - Preserve the public article-audio retry response if the warning fails.
+- Reject a nonpositive article-audio script limit before fetching source text for a new job.
+- Preserve article-audio copy errors when cleanup and its warning both fail.
 
 - Require autocommit for reclassification apply so reported row updates are committed.
 - Escape and bound legacy kind and rule values in reclassification output.

@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import json
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.request import Request
 
 import pytest
 from django.core.files.storage import storages
 
+from archive import media_archival
 from archive.media_archival import MediaArchivalError, archive_item_audio
 from archive.media_storage import iter_archive_media_object_names
 from archive.models import Item, ItemKind
@@ -239,3 +244,52 @@ def test_remote_transcription_failure_keeps_fixed_diagnostic(media_server, setti
     with pytest.raises(TranscriptionGenerationError) as caught:
         generate_item_transcript(item, timeout=2)
     assert str(caught.value) == "Media download failed: HTTP 404"
+
+
+def test_direct_media_response_close_failure_keeps_one_receipt_and_removes_stage(monkeypatch):
+    script = """
+import runpy, sys
+from email.message import Message
+from io import BytesIO
+from types import SimpleNamespace
+main = runpy.run_path(sys.argv[1])['main']
+
+class Response(BytesIO):
+    headers = Message()
+    headers['Content-Type'] = 'audio/mpeg'
+    headers['Content-Length'] = '5'
+    def getcode(self): return 200
+    def geturl(self): return 'https://example.test/audio.mp3'
+    def __exit__(self, *args):
+        super().__exit__(*args)
+        raise OSError('synthetic response close fault ' + 'x' * 10000)
+
+main.__globals__['_load_safe_fetch'] = lambda: SimpleNamespace(
+    open_public_url=lambda *args, **kwargs: Response(b'audio')
+)
+raise SystemExit(main())
+"""
+    staged = []
+
+    def run(command, **kwargs):
+        assert command[-1].endswith("direct_media_download.py")
+        path = Path(json.loads(kwargs["input"])["path"])
+        staged.append(path)
+        result = subprocess.run([sys.executable, "-I", "-c", script, command[-1]], **kwargs)
+        assert path.read_bytes() == b"audio"
+        assert result.returncode == 1
+        receipt = json.loads(result.stdout)
+        assert receipt["safe_error"] == "transport error (OSError)"
+        assert len(result.stdout) < 1024
+        return result
+
+    monkeypatch.setattr(media_archival, "run_download", run)
+    with pytest.raises(
+        MediaArchivalError, match="^Media download failed: synthetic response close"
+    ):
+        with media_archival._open_direct_media(
+            Request("https://example.test/audio.mp3"), timeout=5, max_bytes=32
+        ):
+            pytest.fail("download published despite a failed response close")
+    assert len(staged) == 1
+    assert not staged[0].parent.exists()

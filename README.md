@@ -736,7 +736,9 @@ Optional worker flags for the Milestone 6 slice:
 Direct media downloads run urllib in a small isolated subprocess, which is killed
 and reaped when its elapsed budget runs out. Trickle responses cannot extend the
 budget by resetting socket timeouts. Failed or timed-out downloads remove their
-temporary files before any storage upload. Only HTTP/HTTPS sources and redirects
+temporary files before any storage upload. The helper sends one receipt after
+response cleanup. A close failure produces a bounded error receipt and the parent
+discards the staged download. Only HTTP/HTTPS sources and redirects
 are accepted; the configured byte limit still applies. Video extraction has its
 own timeout; the download budget does not include extraction or storage writes.
 Full direct-media downloads require HTTP 200 without `Content-Range`, a nonempty

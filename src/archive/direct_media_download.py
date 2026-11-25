@@ -10,6 +10,8 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
+_ERROR_TEXT_LIMIT = 500
+
 
 def supports_metadata_content_type(content_type: str) -> bool:
     """Admit normalized HTML and XML media types, including structured XML."""
@@ -69,6 +71,8 @@ def _full_media_length(response) -> int | None:
 
 def main() -> int:
     blocked: type[BaseException] | None = None
+    exit_code = 1
+    info: dict[str, str | int | bool]
     try:
         options = json.load(sys.stdin)
         request = Request(options["url"], headers=options["headers"])
@@ -99,44 +103,32 @@ def main() -> int:
                     raise ValueError("Media source is empty")
                 if expected_size is not None and size != expected_size:
                     raise ValueError("Media source download was incomplete")
-            print(
-                json.dumps(
-                    {
-                        "url": response.geturl(),
-                        "content_type": content_type,
-                        "charset": response.headers.get_content_charset() or "utf-8",
-                    }
-                )
-            )
+            info = {
+                "url": response.geturl(),
+                "content_type": content_type,
+                "charset": response.headers.get_content_charset() or "utf-8",
+            }
     except HTTPError as exc:
-        print(
-            json.dumps(
-                {
-                    "error": str(exc),
-                    "http_status": exc.code,
-                    "safe_error": _safe_error(exc, blocked),
-                }
-            )
-        )
-        return 1
+        info = {
+            "error": str(exc)[:_ERROR_TEXT_LIMIT],
+            "http_status": exc.code,
+            "safe_error": _safe_error(exc, blocked),
+        }
     except URLError as exc:
-        print(
-            json.dumps(
-                {
-                    "error": str(exc),
-                    "url_reason": str(exc.reason),
-                    "safe_error": _safe_error(exc, blocked),
-                }
-            )
-        )
-        return 1
+        info = {
+            "error": str(exc)[:_ERROR_TEXT_LIMIT],
+            "url_reason": str(exc.reason)[:_ERROR_TEXT_LIMIT],
+            "safe_error": _safe_error(exc, blocked),
+        }
     except _LimitExceeded as exc:
-        print(json.dumps({"error": str(exc), "limit_exceeded": True}))
-        return 1
+        info = {"error": str(exc), "limit_exceeded": True}
     except Exception as exc:
-        print(json.dumps({"error": str(exc), "safe_error": _safe_error(exc, blocked)}))
-        return 1
-    return 0
+        info = {"error": str(exc)[:_ERROR_TEXT_LIMIT], "safe_error": _safe_error(exc, blocked)}
+    else:
+        exit_code = 0
+
+    print(json.dumps(info))
+    return exit_code
 
 
 if __name__ == "__main__":

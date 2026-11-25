@@ -157,11 +157,26 @@ def test_rss_feed_archive_uses_fixed_size_item_windows(client) -> None:
 
 
 @pytest.mark.django_db
-def test_rss_feed_page_1_redirects_to_canonical_feed_url(client) -> None:
-    response = client.get(reverse("archive:rss-feed-page", kwargs={"page": 1}))
+@pytest.mark.parametrize("feed", ["rss", "podcast"])
+def test_first_feed_page_alias_redirects_without_queries(
+    client, django_assert_num_queries, feed: str
+) -> None:
+    Item.objects.create(
+        original_url="https://example.com/alias",
+        title="Archived episode",
+        short_summary="Podcast summary",
+        kind=ItemKind.PODCAST_EPISODE,
+        archived_audio_path="items/1/audio/source.mp3",
+    )
+    canonical_url = reverse(f"archive:{feed}-feed")
+    with django_assert_num_queries(0):
+        response = client.get(reverse(f"archive:{feed}-feed-page", kwargs={"page": 1}))
 
     assert response.status_code == 301
-    assert response["Location"] == reverse("archive:rss-feed")
+    assert response["Location"] == canonical_url
+    canonical = client.get(canonical_url)
+    assert canonical.status_code == 200
+    assert parse_channel(canonical.content).findtext("item/title") == "Archived episode"
 
 
 @pytest.mark.django_db
@@ -623,11 +638,3 @@ def test_podcast_feed_archive_uses_fixed_size_item_windows(client) -> None:
     assert ("next", "http://testserver/feeds/podcast/page/2.xml") in main_links
     assert ("self", "http://testserver/feeds/podcast/page/2.xml") in archive_links
     assert ("previous", "http://testserver/feeds/podcast.xml") in archive_links
-
-
-@pytest.mark.django_db
-def test_podcast_feed_page_1_redirects_to_canonical_feed_url(client) -> None:
-    response = client.get(reverse("archive:podcast-feed-page", kwargs={"page": 1}))
-
-    assert response.status_code == 301
-    assert response["Location"] == reverse("archive:podcast-feed")

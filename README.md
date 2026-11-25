@@ -83,6 +83,11 @@ Public endpoints:
 - `/api/health/` unauthenticated JSON processing health for monitoring (step counts and timestamps
   only, see [Processing health](#processing-health))
 
+## Public feeds
+
+The numbered first page (`/feeds/rss/page/1.xml` or `/feeds/podcast/page/1.xml`)
+permanently redirects to its canonical feed URL before any feed item lookup.
+
 ## Public search
 
 `/search/?q=<terms>&page=<n>` returns 20 public results per page. SQLite counts matches

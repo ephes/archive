@@ -239,9 +239,6 @@ def _render_feed(
     feed_image_path: str | None = None,
 ) -> HttpResponse:
     page = page_obj.number
-    if page == 1 and request.path != reverse(canonical_view_name):
-        return redirect(canonical_view_name, permanent=True)
-
     if page_obj.paginator.count == 0:
         if page != 1:
             raise Http404("Unknown feed page")
@@ -423,6 +420,8 @@ def robots_txt(request: HttpRequest) -> HttpResponse:
 
 @require_GET
 def rss_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
+    if page == 1 and request.path != reverse("archive:rss-feed"):
+        return redirect("archive:rss-feed", permanent=True)
     with snapshot_read_transaction():
         return _render_feed(
             request,
@@ -437,6 +436,8 @@ def rss_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
 
 @require_GET
 def podcast_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
+    if page == 1 and request.path != reverse("archive:podcast-feed"):
+        return redirect("archive:podcast-feed", permanent=True)
     with snapshot_read_transaction():
         return _render_feed(
             request,

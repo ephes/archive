@@ -40,6 +40,21 @@ def diagnostic_origin(url: str) -> str:
         return "[URL omitted]"
 
 
+def _diagnostic_classification_value(value: str) -> str:
+    remaining = 160
+    parts: list[str] = []
+    for char in value:
+        rendered = char if char.isprintable() and char != "\\" else ascii(char)[1:-1]
+        if len(rendered) > remaining:
+            if remaining == 0:
+                parts.pop()
+            parts.append("…")
+            break
+        parts.append(rendered)
+        remaining -= len(rendered)
+    return "".join(parts)
+
+
 def normalize_host_selector(value: str) -> str:
     host = value.strip()
     if not host:
@@ -111,7 +126,7 @@ class Command(BaseCommand):
             "--apply",
             action="store_true",
             help=(
-                "Persist kind/rule/evidence/version updates for matching items. "
+                "Persist kind/rule/evidence/version updates in autocommit mode. "
                 "Does not queue metadata, archival, transcript, summary, or article-audio work."
             ),
         )
@@ -144,6 +159,11 @@ class Command(BaseCommand):
         if not options["all"] and not selectors_used:
             raise CommandError("Provide a selector such as --item-id/--host/--rule, or use --all.")
 
+        if options["apply"] and not transaction.get_autocommit():
+            raise CommandError(
+                "--apply requires autocommit. Run it after the outer transaction ends."
+            )
+
         mode = "apply" if options["apply"] else "dry-run"
         changed = 0
         unchanged = 0
@@ -152,7 +172,7 @@ class Command(BaseCommand):
             # Decide from the current row, holding the lock through normalization
             # and publication. SQLite rejects a competing write during this read
             # transaction rather than allowing a stale publication.
-            with transaction.atomic() if options["apply"] else nullcontext():
+            with transaction.atomic(durable=True) if options["apply"] else nullcontext():
                 current = Item.objects.filter(pk=item_id)
                 if options["apply"]:
                     current = current.select_for_update()
@@ -220,8 +240,8 @@ class Command(BaseCommand):
             lines.append(f"UNCHANGED item {item.pk}: {diagnostic_origin(item.original_url)}")
             lines.append(
                 "  - "
-                f"kind={item.kind}; "
-                f"rule={item.classification_rule or 'none'}; "
+                f"kind={_diagnostic_classification_value(item.kind)}; "
+                f"rule={_diagnostic_classification_value(item.classification_rule or 'none')}; "
                 f"engine_version={item.classification_engine_version}"
             )
 
@@ -320,10 +340,14 @@ class Command(BaseCommand):
         descriptions: list[str] = []
 
         if item.kind != decision.kind:
-            descriptions.append(f"kind: {item.kind} -> {decision.kind}")
+            descriptions.append(
+                f"kind: {_diagnostic_classification_value(item.kind)}"
+                f" -> {_diagnostic_classification_value(decision.kind)}"
+            )
         if item.classification_rule != decision.rule:
             descriptions.append(
-                f"rule: {item.classification_rule or 'none'} -> {decision.rule or 'none'}"
+                f"rule: {_diagnostic_classification_value(item.classification_rule or 'none')}"
+                f" -> {_diagnostic_classification_value(decision.rule or 'none')}"
             )
 
         current_selected_media = selected_media_from_evidence(item.classification_evidence)

@@ -53,6 +53,7 @@ def test_replay_rejects_blank_explicit_host_before_inventory(selectors, django_a
         ),
     ],
 )
+@pytest.mark.django_db(transaction=True)
 def test_replay_host_matches_hostname_across_ports(selector, urls):
     first, second, adjacent = Item.objects.bulk_create(
         [Item(original_url=url, classification_engine_version=0) for url in urls]
@@ -72,6 +73,7 @@ def test_replay_rejects_host_with_port_or_unbracketed_ipv6(selector, django_asse
             call_command("reclassify_items", "--host", selector, "--apply", stdout=StringIO())
 
 
+@pytest.mark.django_db(transaction=True)
 def test_replay_uses_edits_and_completed_work_after_selection(monkeypatch):
     item = Item.objects.create(original_url="https://example.com/story", kind=ItemKind.LINK)
     select = reclassify_items.Command._matching_items
@@ -103,22 +105,21 @@ def test_replay_uses_edits_and_completed_work_after_selection(monkeypatch):
     assert item.media_archive_status == EnrichmentStatus.COMPLETE
 
 
+@pytest.mark.django_db(transaction=True)
 def test_replay_decides_and_saves_in_one_transaction(monkeypatch):
     Item.objects.create(original_url="https://example.com/story")
     classify = reclassify_items.classify_item
     save = Item.save
-    # pytest-django's outer test transaction is not the command's row transaction.
-    depth = len(transaction.get_connection().atomic_blocks)
     phases = []
 
     def check_classify(**kwargs):
         phases.append("classify")
-        assert len(transaction.get_connection().atomic_blocks) == depth + 1
+        assert len(transaction.get_connection().atomic_blocks) == 1
         return classify(**kwargs)
 
     def check_save(self, *args, **kwargs):
         phases.append("save")
-        assert len(transaction.get_connection().atomic_blocks) == depth + 1
+        assert len(transaction.get_connection().atomic_blocks) == 1
         return save(self, *args, **kwargs)
 
     monkeypatch.setattr(reclassify_items, "classify_item", check_classify)
@@ -247,6 +248,7 @@ connections.close_all()
 
 
 @pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.django_db(transaction=True)
 def test_replay_diagnostics_hide_private_url_components(apply):
     url = "https://test-user:test-password@example.com/private-token.mp3?signature=secret-query#secret-frag"
     item = Item.objects.create(original_url=url, audio_url=url)
@@ -266,6 +268,7 @@ def test_replay_diagnostics_hide_private_url_components(apply):
 
 
 @pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.django_db(transaction=True)
 def test_replay_stops_at_starting_horizon_despite_new_batches(monkeypatch, apply):
     Item.objects.bulk_create([Item(original_url=f"https://example.com/{n}") for n in range(400)])
     original_ids = set(Item.objects.values_list("pk", flat=True))
@@ -299,6 +302,7 @@ def test_replay_stops_at_starting_horizon_despite_new_batches(monkeypatch, apply
 
 @pytest.mark.parametrize("apply", [False, True])
 @pytest.mark.parametrize("host_filter", [False, True])
+@pytest.mark.django_db(transaction=True)
 def test_replay_malformed_legacy_url_has_fixed_diagnostic(apply, host_filter):
     item = Item.objects.create(original_url="https://[private-token]/private-path?signature=secret")
     args = [
@@ -399,15 +403,15 @@ connections.close_all()
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.django_db(transaction=True)
 def test_replay_checks_selectors_inside_row_transaction(monkeypatch):
     item = Item.objects.create(original_url="https://example.test/story")
     match = reclassify_items.Command._matches_current_selectors
-    depth = len(transaction.get_connection().atomic_blocks)
     checked = []
 
     def check(self, current, options):
         checked.append(current.pk)
-        assert len(transaction.get_connection().atomic_blocks) == depth + 1
+        assert len(transaction.get_connection().atomic_blocks) == 1
         return match(self, current, options)
 
     monkeypatch.setattr(reclassify_items.Command, "_matches_current_selectors", check)
@@ -415,6 +419,7 @@ def test_replay_checks_selectors_inside_row_transaction(monkeypatch):
     assert checked == [item.pk]
 
 
+@pytest.mark.django_db(transaction=True)
 def test_replay_damaged_url_preserves_override_and_valid_independent_audio():
     item = Item.objects.create(
         original_url="https://[synthetic-secret]/private-path",
@@ -431,3 +436,57 @@ def test_replay_damaged_url_preserves_override_and_valid_independent_audio():
     assert "synthetic-secret" not in output.getvalue()
     assert "private-path" not in output.getvalue()
     assert "inspected=1 changed=1" in output.getvalue()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_replay_apply_refuses_outer_atomic_before_inventory(django_assert_num_queries):
+    item = Item.objects.create(
+        original_url="https://example.test/story", classification_engine_version=0
+    )
+    output = StringIO()
+    args = ("reclassify_items", "--item-id", str(item.pk))
+    with transaction.atomic():
+        with django_assert_num_queries(0), pytest.raises(CommandError, match="autocommit"):
+            call_command(*args, "--apply", stdout=output)
+        assert output.getvalue() == ""
+        call_command(*args, stdout=output)
+        assert "WOULD UPDATE" in output.getvalue()
+        item.refresh_from_db()
+        assert item.classification_engine_version == 0
+
+    class CommitCheckingOutput(StringIO):
+        def write(self, value):
+            if value.startswith("UPDATED "):
+                assert transaction.get_autocommit()
+                item.refresh_from_db()
+                assert item.classification_engine_version > 0
+            return super().write(value)
+
+    committed_output = CommitCheckingOutput()
+    call_command(*args, "--apply", stdout=committed_output)
+    assert f"UPDATED item {item.pk}" in committed_output.getvalue()
+
+
+def test_replay_escapes_and_bounds_legacy_classification_diagnostics():
+    kind = "legacy\r\n\x1b"
+    rule = "legacy\n\x1b[31m\r" + "\u2028" * 45 + "tail"
+    item = Item.objects.create(
+        original_url="https://example.test/story", kind=kind, classification_rule=rule
+    )
+    output = StringIO()
+    call_command("reclassify_items", "--item-id", str(item.pk), stdout=output)
+
+    rendered = output.getvalue()
+    assert "\r" not in rendered
+    assert "\x1b" not in rendered
+    assert "\u2028" not in rendered
+    lines = rendered.splitlines()
+    assert f"WOULD UPDATE item {item.pk}: https://example.test/[redacted]" in lines
+    assert r"  - kind: legacy\r\n\x1b -> link" in lines
+    [rule_line] = [line for line in lines if line.startswith("  - rule: ")]
+    assert rule_line.startswith(r"  - rule: legacy\n\x1b[31m\r\u2028")
+    assert rule_line.endswith("… -> default_link")
+    assert len(rule_line.removeprefix("  - rule: ").removesuffix(" -> default_link")) <= 160
+    item.refresh_from_db()
+    assert item.kind == kind
+    assert item.classification_rule == rule

@@ -1187,8 +1187,12 @@ are reported as `SKIPPED ...: selector changed` and counted separately as `skipp
 as inspected or changed. The selection limit still caps initial matches; skipped rows do
 not cause replacement selection beyond that cap. Deleted rows are skipped.
 Each selection batch is fully fetched before processing,
-so no live selection cursor pins a stale SQLite snapshot. Dry-runs use current rows
-without write transactions; apply-mode output is emitted after each row commits.
+so no live selection cursor pins a stale SQLite snapshot. Apply requires autocommit before
+the scan and emits each row's output after its write transaction commits. Callers embedding
+the command should invoke apply after their transaction ends. Dry runs also work inside a
+transaction and use current rows without opening a write transaction. The report escapes
+non-printable characters in kind and rule values and caps each displayed value at 160
+characters. This display limit leaves stored values and classification comparisons intact.
 The command does not delete stored media.
 
 - use `just manage reclassify_items --item-id <id>` for a dry-run replay of one or more items

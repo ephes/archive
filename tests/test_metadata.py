@@ -967,7 +967,7 @@ def test_reclassify_items_host_filter_limits_replay_scope() -> None:
     assert "Summary: inspected=1 changed=1 unchanged=0 mode=dry-run" in output
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_reclassify_items_apply_updates_classification_without_requeueing_downstream_work() -> None:
     item = Item.objects.create(
         original_url="https://example.com/story",
@@ -1004,7 +1004,7 @@ def test_reclassify_items_apply_updates_classification_without_requeueing_downst
     assert item.media_archive_error == "download failed"
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_reclassify_items_preserves_operator_override_in_apply_mode() -> None:
     item = Item.objects.create(
         original_url="https://castro.fm/episode/ubOf93",
@@ -1075,7 +1075,7 @@ def test_reclassify_items_normalize_downstream_dry_run_reports_stale_status_clea
     assert item.transcript_status == EnrichmentStatus.FAILED
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_reclassify_items_apply_with_normalize_downstream_cleans_unsupported_statuses() -> None:
     item = Item.objects.create(
         original_url="https://example.com/story",
@@ -1130,7 +1130,7 @@ def test_reclassify_items_apply_with_normalize_downstream_cleans_unsupported_sta
     assert claim_pending_item() is None
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_reclassify_items_normalize_downstream_does_not_queue_newly_eligible_work() -> None:
     item = Item.objects.create(
         original_url="https://example.com/story",
@@ -1163,7 +1163,7 @@ def test_reclassify_items_normalize_downstream_does_not_queue_newly_eligible_wor
     assert claim_pending_item() is None
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_reclassify_items_apply_with_normalize_downstream_cleans_materialized_statuses() -> None:
     item = Item.objects.create(
         original_url="https://example.com/story",

@@ -37,7 +37,7 @@ def test_limit_rejected_before_database_or_storage_work(
         )
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("limit, count", [(1, 1), (None, 3)])
 def test_positive_and_omitted_limit_are_deterministic(limit, count):
     items = [Item.objects.create(original_url=f"https://example.com/{n}") for n in range(3)]

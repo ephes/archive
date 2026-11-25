@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Require autocommit for reclassification apply so reported row updates are committed.
+- Escape and bound legacy kind and rule values in reclassification output.
+
 - Reject nested FFmpeg results that finish draining or waiting at or after the deadline.
 - Build only the admitted article-audio script prefix when the text exceeds the cap.
 

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from django.apps import apps as django_apps
-from django.db import connection
+from django.db import DatabaseError, connection, transaction
 from test_media_publication import fake_video_download
 
 from archive.models import (
@@ -137,7 +137,30 @@ def test_success_clears_the_failing_state() -> None:
     assert youtube["last_success_age_seconds"] == 3600
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+def test_pruning_failure_preserves_committed_success(monkeypatch, caplog) -> None:
+    _record(YOUTUBE, False, 2, hours_ago=1)
+    calls = []
+
+    def fail_pruning(*, cutoff, using):
+        calls.append((cutoff, using, connection.in_atomic_block))
+        raise DatabaseError("synthetic prune failure")
+
+    monkeypatch.setattr("archive.processing_health._prune_events", fail_pruning)
+    with transaction.atomic():
+        _record(YOUTUBE, True, 3, hours_ago=0)
+
+    assert ProcessingEvent.objects.filter(step=YOUTUBE, succeeded=True, occurred_at=NOW).exists()
+    state = ProcessingStepState.objects.get(step=YOUTUBE)
+    assert state.last_success_at == NOW
+    assert state.failing_since is None
+    assert not ProcessingFailureItem.objects.filter(step=YOUTUBE).exists()
+    assert calls == [(NOW - timedelta(days=30), "default", False)]
+    assert "Could not prune expired processing health events" in caplog.messages
+    assert "Could not record processing health" not in caplog.text
+
+
+@pytest.mark.django_db(transaction=True)
 def test_events_are_pruned_after_retention_but_state_is_kept() -> None:
     _record(YOUTUBE, True, 1, hours_ago=31 * 24)
     _record(ProcessingStep.METADATA, True, 2, hours_ago=0)
@@ -147,7 +170,7 @@ def test_events_are_pruned_after_retention_but_state_is_kept() -> None:
     assert youtube["last_success_age_seconds"] == 31 * 24 * 3600
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_pruning_compacts_the_events_of_an_ongoing_failure_streak() -> None:
     _record(YOUTUBE, True, 1, hours_ago=40 * 24)
     _record(YOUTUBE, False, 2, hours_ago=39 * 24)
@@ -454,7 +477,7 @@ connection.close()
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_retention_backlog_drains_in_bounded_batches_without_changing_health() -> None:
     # A long-running streak outlives the event history that supplied its members.
     _record(YOUTUBE, False, 7, hours_ago=40 * 24)

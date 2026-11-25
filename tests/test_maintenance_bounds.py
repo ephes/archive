@@ -52,7 +52,7 @@ def test_positive_and_omitted_limit_are_deterministic(limit, count):
     assert f"inspected={count}" in output.getvalue()
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_thousands_of_old_retries_compact_without_losing_exact_streaks():
     ProcessingStepState.objects.create(step="summary", failing_since=OLD, last_failure_at=OLD)
     ProcessingFailureItem.objects.bulk_create(

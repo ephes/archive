@@ -980,8 +980,10 @@ An explicit `now` passed to `processing_health_snapshot` sets the event window a
 the reference for age calculations. Latest timestamps and streak membership
 reflect the current durable state in the read snapshot.
 
-Each outcome prunes at most 100 events older than 30 days, oldest timestamp first
-(then primary key). Repeated outcomes drain a retention backlog; expired events
+After each outcome commits, the worker prunes at most 100 events older than 30 days
+on the same database, oldest timestamp first (then primary key). A pruning failure
+logs `Could not prune expired processing health events` and leaves the committed
+outcome and streak state available. Repeated outcomes drain a retention backlog; expired events
 may remain between passes, without contributing to the 24-hour totals. Separate
 durable membership stores one row per
 distinct item in each ongoing failure streak, so repeated retries cannot grow old event
@@ -1242,7 +1244,9 @@ is retained. Exceeding either budget stops extraction with a fixed private-safe
 error. Failed extraction uploads neither source video nor audio, removes its
 owned temporary files, and preserves existing archived media for retry.
 
-FFmpeg and yt-dlp run in owned POSIX sessions. Every return path, including a
+FFmpeg and yt-dlp run in owned POSIX sessions. Media command supervision requires
+a finite positive timeout and rejects invalid budgets before preparing stdin
+or launching the command. Every return path after launch, including a
 successful wrapper exit, retires the process group with TERM followed after at
 most 0.2 seconds by KILL, and reaps the direct child with a bounded one-second
 wait before temporary-directory cleanup. Exit observation does not reap the

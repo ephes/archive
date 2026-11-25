@@ -7,10 +7,27 @@ import sys
 from pathlib import Path
 from time import monotonic, sleep
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from archive.media_archival import _extract_audio_with_ffmpeg
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), float("-inf"), 0.0, -1.0])
+def test_invalid_timeout_is_rejected_before_allocating_stdin_or_launching(monkeypatch, timeout):
+    from archive import media_process
+
+    allocate = Mock(wraps=media_process.TemporaryFile)
+    launch = Mock(side_effect=AssertionError("attempted to launch with an invalid timeout"))
+    monkeypatch.setattr(media_process, "TemporaryFile", allocate)
+    monkeypatch.setattr(media_process.subprocess, "Popen", launch)
+
+    with pytest.raises(media_process.MediaProcessError, match="^timed out$"):
+        media_process.run_media_command(["synthetic-media-command"], timeout=timeout)
+
+    allocate.assert_not_called()
+    launch.assert_not_called()
 
 
 def _alive(pid):

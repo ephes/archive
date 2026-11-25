@@ -13,6 +13,7 @@ never item titles, URLs or error messages.
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -103,7 +104,18 @@ def _record_step_outcome(
         ProcessingEvent.objects.using(using).create(
             step=step, succeeded=succeeded, item_id=item_id, occurred_at=occurred_at
         )
+        transaction.on_commit(
+            lambda: _prune_after_outcome(occurred_at=occurred_at, using=using),
+            using=using,
+        )
+
+
+def _prune_after_outcome(*, occurred_at: datetime, using: str) -> None:
+    try:
         _prune_events(cutoff=occurred_at - EVENT_RETENTION, using=using)
+    except Exception:
+        with suppress(Exception):
+            logger.warning("Could not prune expired processing health events")
 
 
 def _prune_events(*, cutoff: datetime, using: str = "default") -> None:

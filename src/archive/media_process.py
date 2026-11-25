@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import math
 import os
 import select
 import selectors
@@ -45,9 +46,9 @@ def run_media_command(
     ``max_output_dir_file_bytes`` each of those files. All are polled
     while the command runs and checked once more after it exits.
     """
-    deadline = monotonic() + timeout
-    if timeout <= 0:
+    if not math.isfinite(timeout) or timeout <= 0:
         raise MediaProcessError("timed out")
+    deadline = monotonic() + timeout
     with TemporaryFile() as request:
         request.write(input_data)
         request.seek(0)

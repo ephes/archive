@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Prune expired processing health events after the outcome commits, preserving
+  the recorded event and streak update if retention cleanup fails.
+- Reject nonfinite media command timeouts before preparing stdin or launching
+  the supervised process.
+
 - Reject overlong S3 chunks before writing to the destination buffer or advancing
   the range reader.
 - Preserve S3 range-read errors and explicit close when body cleanup and its

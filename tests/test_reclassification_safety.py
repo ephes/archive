@@ -113,6 +113,28 @@ def test_replay_matches_unicode_and_ascii_idna_hosts(selector):
     assert changed == {unicode_host.pk, ascii_host.pk}
 
 
+@pytest.mark.parametrize("stored_host", ["ü" * 64 + ".test", "bad\u3000name.test"])
+@pytest.mark.django_db(transaction=True)
+def test_replay_skips_stored_host_rejected_by_idna(stored_host):
+    rejected, wanted = Item.objects.bulk_create(
+        [
+            Item(original_url=f"https://{stored_host}/story", classification_engine_version=0),
+            Item(original_url="https://wanted.test/story", classification_engine_version=0),
+        ]
+    )
+    stdout = StringIO()
+    call_command("reclassify_items", "--host", "wanted.test", stdout=stdout)
+    report = stdout.getvalue()
+    assert f"WOULD UPDATE item {wanted.pk}:" in report
+    assert f"item {rejected.pk}:" not in report
+
+    call_command("reclassify_items", "--host", "wanted.test", "--apply", stdout=StringIO())
+    changed = set(
+        Item.objects.exclude(classification_engine_version=0).values_list("pk", flat=True)
+    )
+    assert changed == {wanted.pk}
+
+
 @pytest.mark.parametrize(
     "selector",
     [

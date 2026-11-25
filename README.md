@@ -1249,6 +1249,7 @@ The command does not delete stored media.
   nonblank after trimming whitespace. Hostnames match across ports. DNS names match
   case-insensitively across Unicode and ASCII IDNA spellings and with or without
   one trailing root dot. Invalid selectors are rejected before scanning items.
+  A stored hostname that the IDNA codec rejects never matches a DNS selector.
   Use a hostname without a port,
   or a bracketed IPv6 address such as `--host '[2001:db8::1]'`.
 - use `--limit N` for a strictly positive cap after filtering; zero/negative values

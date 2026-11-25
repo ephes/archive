@@ -278,12 +278,16 @@ class Command(BaseCommand):
         try:
             host = urlparse(original_url).hostname
             if host and ":" in host:
-                host = IPv6Address(host).compressed
-            elif host:
-                host = _normalize_dns_host(host)
+                return IPv6Address(host).compressed in allowed_hosts
         except ValueError:
             raise CommandError(f"Cannot select item {item_id}: invalid URL.") from None
-        return host in allowed_hosts
+        if not host:
+            return False
+        try:
+            # A stored host the IDNA codec rejects cannot equal any normalized selector.
+            return _normalize_dns_host(host) in allowed_hosts
+        except ValueError:
+            return False
 
     def _matching_items(self, options: dict[str, Any]) -> Iterator[int]:
         queryset = Item.objects.order_by("id")

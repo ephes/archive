@@ -16,7 +16,6 @@ class ReadableResponse(Protocol):
 
 
 MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024
-MAX_API_ERROR_BYTES = 64 * 1024
 
 
 def read_api_response(response: ReadableResponse) -> bytes:

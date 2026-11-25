@@ -7,7 +7,6 @@ import pytest
 
 from archive import article_audio, summaries, transcriptions
 from archive.api_responses import (
-    MAX_API_ERROR_BYTES,
     MAX_API_RESPONSE_BYTES,
     InvalidAPIJSON,
     decode_api_json,
@@ -70,8 +69,8 @@ def test_success_body_limit(monkeypatch, module, error, call):
 
 
 @pytest.mark.parametrize("module,error,call", CALLS)
-def test_error_body_limit(monkeypatch, module, error, call):
-    response = Response(b"x" * (MAX_API_ERROR_BYTES + 100))
+def test_error_body_is_not_read(monkeypatch, module, error, call):
+    response = Response(b"synthetic diagnostic")
     failure = HTTPError("https://api.example/", 500, "failed", response.headers, response)
 
     def fail(*args, **kwargs):
@@ -82,7 +81,7 @@ def test_error_body_limit(monkeypatch, module, error, call):
         call()
     assert response.sizes == []
     assert response.closed
-    assert "x" not in str(caught.value)
+    assert "synthetic diagnostic" not in str(caught.value)
 
 
 @pytest.mark.parametrize("module", [article_audio, transcriptions])
@@ -93,9 +92,9 @@ def test_normal_json_and_exact_limit(monkeypatch, module):
     assert response.sizes == [MAX_API_RESPONSE_BYTES + 1]
 
 
-def test_audio_artifact_error_body_limit(monkeypatch, settings):
+def test_audio_artifact_error_body_is_not_read(monkeypatch, settings):
     settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = "test"
-    response = Response(b"x" * (MAX_API_ERROR_BYTES + 100))
+    response = Response(b"synthetic diagnostic")
     failure = HTTPError("https://api.example/", 500, "failed", response.headers, response)
 
     def fail(*args, **kwargs):

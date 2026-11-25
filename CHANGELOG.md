@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve upstream HTTP error statuses without reading or staging error bodies.
+
 - Page selected admin reprocessing IDs before loading current items under row locks.
 - Preserve the public article-audio retry response if the warning fails.
 - Reject a nonpositive article-audio script limit before fetching source text for a new job.

@@ -1464,11 +1464,11 @@ error and retry behavior. The transport child checks the complete response heade
 and forwards only Content-Type and Content-Length from successful responses.
 If Content-Type is present, it must appear once. The value's parameters are
 preserved. Duplicate fields are rejected before media format checks or body reads.
-The transport refuses receipts whose serialized headers exceed 4 KiB. HTTP errors
-retain their status and read at most 64 KiB for diagnostics. Binary
-article-audio downloads retain their separate configured media limit. Authenticated
+The transport refuses receipts whose serialized headers exceed 4 KiB. The child
+reports an HTTP error by status alone and closes the response without reading
+its body. Binary article-audio downloads retain their separate configured media limit. Authenticated
 exchanges run in a disposable transport process with one elapsed timeout covering
-DNS, connect, same-origin redirects, response reads (including errors), and
+DNS, connect, same-origin redirects, successful response reads, and
 transport teardown. Timeout kills and reaps that process; no timed-out request
 thread remains. Each transcription pass has one monotonic elapsed budget
 (the worker's `--transcription-timeout`, 1800 seconds by default; a pass that stages archived
@@ -1616,9 +1616,9 @@ headers, invalid/ambiguous lengths, content type and declared oversized length a
 rejected before reading the body; empty or mismatched bodies fail at EOF. The
 transport refuses incomplete staging before the parent can upload it, removes
 temporary downloads and preserves any previously published copy. Without a declared
-length, a nonempty EOF within the cap is accepted. JSON responses and HTTP error
-diagnostics retain their separate 8 MiB and 64 KiB bounds. Expiry closes the upstream
-and removes temporary downloads. For a still-eligible item, backfill failure returns
+length, a nonempty EOF within the cap is accepted. JSON responses have a separate
+8 MiB limit. Expiry closes the upstream and removes temporary downloads. For a
+still-eligible item, backfill failure returns
 a `no-store` `503` with `Retry-After: 60` even if the warning cannot be logged.
 Retrying can create the copy later. Anonymous requests start at
 most one copy per item and artifact in a 60-second window (tracked in the default
@@ -1674,8 +1674,8 @@ only to new submissions; previously recorded jobs remain usable.
 
 Successful summary, transcription and article-audio JSON exchanges reject HTTP 206,
 `Content-Range`, invalid or ambiguous `Content-Length`, and bodies whose byte count
-differs from the advertised length. Upstream HTTP error bodies are read only up to
-64 KiB for diagnostics. JSON responses decode UTF-8 strictly.
+differs from the advertised length. For an upstream HTTP error, the parent receives
+the status as an `HTTPError` with an empty body. JSON responses decode UTF-8 strictly.
 Duplicate object members at any nesting level (including escaped key aliases),
 nonstandard numeric literals (`NaN`, `Infinity`, `-Infinity`), numbers that overflow to
 infinity, malformed encoding, JSON recursion and integer-decoding limits become

@@ -214,7 +214,7 @@ def test_staged_length_checked_before_transport(actual, monkeypatch, settings):
         return SimpleNamespace(
             returncode=0,
             stdout=json.dumps(
-                {"headers": [["Content-Type", "application/json"]], "is_error": False}
+                {"headers": [["Content-Type", "application/json"]]}
             ),
         )
 
@@ -439,7 +439,7 @@ def test_authenticated_body_uses_admitted_staged_length(declared, monkeypatch):
         assert options["headers"]["Authorization"] == "Bearer SYNTHETIC"
         assert Path(options["data_path"]).read_bytes() == b"abc"
         Path(options["path"]).write_bytes(b"ok")
-        return SimpleNamespace(returncode=0, stdout=json.dumps({"headers": [], "is_error": False}))
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"headers": []}))
 
     monkeypatch.setattr(upstream_http.subprocess, "run", run)
     request = Request(
@@ -475,7 +475,7 @@ def test_authenticated_requests_admit_only_bodies_within_the_byte_cap(use_chunks
         calls.append(Path(options["data_path"]).read_bytes())
         assert options["headers"]["Content-length"] == "3"
         Path(options["path"]).write_bytes(b"ok")
-        return SimpleNamespace(returncode=0, stdout=json.dumps({"headers": [], "is_error": False}))
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"headers": []}))
 
     monkeypatch.setattr(upstream_http.subprocess, "run", run)
 

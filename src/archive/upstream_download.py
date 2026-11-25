@@ -3,7 +3,7 @@
 import importlib.util
 import json
 import sys
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from email.message import Message
 from pathlib import Path
 from urllib.error import HTTPError
@@ -75,17 +75,21 @@ def _exchange(stack) -> int:
                 else None
             ),
         )
-        is_error = False
         try:
             response = _load_transport()._open_authenticated_url(
                 request, timeout=options["timeout"]
             )
         except HTTPError as exc:
-            response = exc
-            is_error = True
+            try:
+                print(json.dumps({"http_error": exc.code}), flush=True)
+            finally:
+                # Cleanup cannot replace an already classified HTTP failure.
+                with suppress(Exception):
+                    exc.close()
+            return 0
         with response:
             status = response.code
-            limit = 64 * 1024 if is_error else options["max_bytes"]
+            limit = options["max_bytes"]
             audio_mode = options.get("audio")
             representation = "Article audio artifact" if audio_mode else "API response"
             limit_error = (
@@ -93,29 +97,25 @@ def _exchange(stack) -> int:
                 if audio_mode
                 else "API response exceeded the 8 MiB limit"
             )
-            expected_size = None
-            # HTTP errors are classified by status and need no response headers.
-            headers = []
-            if not is_error:
-                if (
-                    "Content-Range" in response.headers
-                    or status == 206
-                    or (audio_mode and status != 200)
-                ):
-                    raise UpstreamResponseError(
-                        "Article audio artifact did not return a complete HTTP 200 representation"
-                        if audio_mode
-                        else "API response did not return a complete representation"
-                    )
-                expected_size = _content_length(response, representation)
-                headers = _receipt_headers(response.headers)
-                if audio_mode and response.headers.get_content_type().lower() not in {
-                    "audio/mpeg",
-                    "audio/mp3",
-                }:
-                    raise UpstreamResponseError("Article audio artifact is not MP3 audio")
-                if expected_size is not None and expected_size > limit:
-                    raise UpstreamResponseError(limit_error)
+            if (
+                "Content-Range" in response.headers
+                or status == 206
+                or (audio_mode and status != 200)
+            ):
+                raise UpstreamResponseError(
+                    "Article audio artifact did not return a complete HTTP 200 representation"
+                    if audio_mode
+                    else "API response did not return a complete representation"
+                )
+            expected_size = _content_length(response, representation)
+            headers = _receipt_headers(response.headers)
+            if audio_mode and response.headers.get_content_type().lower() not in {
+                "audio/mpeg",
+                "audio/mp3",
+            }:
+                raise UpstreamResponseError("Article audio artifact is not MP3 audio")
+            if expected_size is not None and expected_size > limit:
+                raise UpstreamResponseError(limit_error)
             size = 0
             with Path(options["path"]).open("wb") as output:
                 while size <= limit:
@@ -124,20 +124,14 @@ def _exchange(stack) -> int:
                         break
                     size += len(chunk)
                     if size > limit:
-                        if is_error:
-                            output.write(chunk[: len(chunk) - (size - limit)])
-                            break
                         raise UpstreamResponseError(limit_error)
                     output.write(chunk)
-                    if is_error and size == limit:
-                        break
-            if not is_error and audio_mode and not size:
+            if audio_mode and not size:
                 raise UpstreamResponseError("Article audio artifact is empty")
             if expected_size is not None and size != expected_size:
                 raise UpstreamResponseError(f"{representation} download was incomplete")
             info = {
                 "status": status,
-                "is_error": is_error,
                 "headers": headers,
             }
         print(json.dumps(info))

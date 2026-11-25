@@ -69,7 +69,7 @@ def open_authenticated_url(
     """Bound DNS, headers, redirects, bodies and child teardown by one deadline.
 
     Only the disposable stdlib transport process performs network I/O. Killing and
-    reaping it also closes its sockets, including a stalled resolver or error read.
+    reaping it also closes its sockets, including a stalled resolver.
     Bodies stay on disk; credentials travel over stdin, never command arguments.
     The request cap includes framing such as multipart headers. Use
     max_request_bytes to set it independently of the response cap (max_bytes).
@@ -138,17 +138,16 @@ def open_authenticated_url(
             raise OSError("Upstream transport failed") from exc
         if result.returncode:
             raise OSError(info.get("error", "Upstream transport failed"))
+        if "http_error" in info:
+            raise HTTPError(
+                request.full_url,
+                info["http_error"],
+                "Upstream error",
+                Message(),
+                BytesIO(),
+            )
         headers = Message()
         for key, value in info["headers"]:
             headers[key] = value
-        if info["is_error"]:
-            # The diagnostic body is already bounded and the child has closed.
-            raise HTTPError(
-                request.full_url,
-                info["status"],
-                "Upstream error",
-                headers,
-                BytesIO(path.read_bytes()),
-            )
         with path.open("rb") as source:
             yield SimpleNamespace(headers=headers, read=source.read)

@@ -11,7 +11,7 @@ import pytest
 from archive import transcriptions, upstream_http
 
 
-@pytest.mark.parametrize("stage", ["dns", "headers", "body", "error", "close"])
+@pytest.mark.parametrize("stage", ["dns", "headers", "body", "close"])
 def test_authenticated_exchange_deadline(monkeypatch, tmp_path, stage):
     marker = tmp_path / "entered"
     helper = Path(upstream_http.__file__).with_name("upstream_download.py")
@@ -20,7 +20,6 @@ import runpy, sys, time
 from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.error import HTTPError
 ns = runpy.run_path(sys.argv[1])
 marker = Path(sys.argv[2])
 stage = sys.argv[3]
@@ -36,15 +35,12 @@ class Response:
     def __exit__(self, *args):
         if stage == 'close': stall()
     def read(self, n):
-        if stage in ('body', 'error'): stall()
+        if stage == 'body': stall()
         return b''
 def open_url(request, timeout):
     assert request.get_header('Authorization') == 'Bearer SYNTHETIC'
     if stage in ('dns', 'headers'): stall()
-    response = Response()
-    if stage == 'error':
-        raise HTTPError(request.full_url, 500, 'Synthetic', response.headers, response)
-    return response
+    return Response()
 ns['main'].__globals__['_load_transport'] = lambda: SimpleNamespace(
     _open_authenticated_url=open_url)
 raise SystemExit(ns['main']())
@@ -188,7 +184,6 @@ def open_url(request, timeout):
     assert request.get_header('Content-length') == str(len(b'synthetic request'))
     assert request.get_header('Authorization') == 'Bearer SYNTHETIC'
     body = b'x' * (9 * 1024 * 1024) if case == 'media' else b'response'
-    if case in ('307', '500'): body = b'e' * 70000
     response = Response(body)
     if case in ('307', '500'):
         raise HTTPError(request.full_url, int(case), 'Synthetic', response.headers, response)
@@ -229,7 +224,7 @@ raise SystemExit(ns['main']())
                 pytest.fail("HTTP error accepted")
         with caught.value as response:
             assert response.code == int(case)
-            assert response.read() == b"e" * 65536
+            assert response.read() == b""
     elif case.startswith("duplicate-type"):
         with pytest.raises(OSError, match="ambiguous Content-Type"):
             with upstream_http.open_authenticated_url(request, timeout=5, **options):

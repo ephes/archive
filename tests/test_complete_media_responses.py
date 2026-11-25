@@ -37,6 +37,12 @@ class Response(BytesIO):
     def read(self, n=-1):
         assert not config.get('no_read'), 'body must be refused before reading'
         return super().read(n)
+    def close(self):
+        super().close()
+        if config.get('http_error'):
+            print('error response closed', file=sys.stderr)
+        if config.get('close_raises'):
+            raise OSError('synthetic close failure')
     def __exit__(self, *args):
         super().__exit__(*args)
         assert self.closed
@@ -379,8 +385,9 @@ def test_complete_json_is_admitted(synthetic_authenticated_response, status):
     assert not exchanges[0][1].parent.exists()
 
 
-def test_http_error_body_is_bounded_without_success_framing_checks(
-    synthetic_authenticated_response,
+@pytest.mark.parametrize("close_raises", [False, True], ids=["closed", "close-fails"])
+def test_http_error_status_survives_unreadable_body(
+    synthetic_authenticated_response, close_raises
 ):
     exchanges = synthetic_authenticated_response(
         {
@@ -388,7 +395,8 @@ def test_http_error_body_is_bounded_without_success_framing_checks(
             "http_error": True,
             "content_type": "application/json",
             "headers": [("Content-Range", "bytes 0-2/100"), ("Content-Length", "100")],
-            "body": "e" * 70000,
+            "no_read": True,
+            "close_raises": close_raises,
         }
     )
     request = Request("https://example.test/v1/artifact")
@@ -397,9 +405,13 @@ def test_http_error_body_is_bounded_without_success_framing_checks(
             pytest.fail("HTTP error admitted")
     with caught.value as response:
         assert response.code == 500
-        assert response.read() == b"e" * 65536
-    assert exchanges[0][0].returncode == 0
-    assert not exchanges[0][1].parent.exists()
+        assert response.read() == b""
+        assert not response.headers
+    result, path = exchanges[0]
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {"http_error": 500}
+    assert result.stderr == "error response closed\n"
+    assert not path.parent.exists()
 
 
 @pytest.mark.parametrize("authenticated", [False, True])

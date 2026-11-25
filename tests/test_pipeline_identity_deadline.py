@@ -253,10 +253,9 @@ def test_storage_staging_deadline_closes_source_without_starting_transport(clock
     assert source.closed
 
 
-def test_synthesis_identity_hashes_the_submitted_payload(monkeypatch, settings):
+def test_synthesis_identity_hashes_the_submitted_payload(monkeypatch):
     import hashlib
 
-    settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = "synthetic"
     captured = []
 
     def request(req, **kw):
@@ -270,6 +269,6 @@ def test_synthesis_identity_hashes_the_submitted_payload(monkeypatch, settings):
 
     monkeypatch.setattr(audio, "urlopen", request)
     item = Item(pk=1)
-    audio._submit_synthesis_job(item, "words", timeout=10)
-    audio._submit_synthesis_job(item, "words", timeout=10)
+    audio._submit_synthesis_job(item, "words", timeout=10, api_key="synthetic")
+    audio._submit_synthesis_job(item, "words", timeout=10, api_key="synthetic")
     assert captured[0] == captured[1] == audio._task_ref_for_script(item, "words")

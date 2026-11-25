@@ -121,8 +121,9 @@ def generate_item_article_audio(item: Item, timeout: int = 30) -> ArticleAudioJo
     if not api_key:
         raise ArticleAudioGenerationError("Article audio generation is not configured")
 
-    if item.article_audio_job_id.strip():
-        return _poll_synthesis_job(job_id=item.article_audio_job_id.strip(), timeout=timeout)
+    job_id = item.article_audio_job_id.strip()
+    if job_id:
+        return _poll_synthesis_job(job_id=job_id, timeout=timeout, api_key=api_key)
 
     extracted_source_text = _best_effort_article_audio_source_text(item=item, timeout=timeout)
     script_max_chars = settings.ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS
@@ -137,7 +138,7 @@ def generate_item_article_audio(item: Item, timeout: int = 30) -> ArticleAudioJo
     if not script:
         raise ArticleAudioGenerationError("Item does not have article-audio source text yet")
 
-    return _submit_synthesis_job(item=item, text=script, timeout=timeout)
+    return _submit_synthesis_job(item=item, text=script, timeout=timeout, api_key=api_key)
 
 
 def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
@@ -351,7 +352,9 @@ def _best_effort_article_audio_source_text(item: Item, timeout: int) -> str:
     return source.extracted_text.strip()
 
 
-def _submit_synthesis_job(item: Item, text: str, timeout: int) -> ArticleAudioJobUpdate:
+def _submit_synthesis_job(
+    item: Item, text: str, timeout: int, *, api_key: str
+) -> ArticleAudioJobUpdate:
     payload = _synthesis_job_payload(item, text)
     # Hash this exact request snapshot so every output-affecting field participates.
     payload["task_ref"] = _synthesis_task_ref(item, payload)
@@ -360,7 +363,7 @@ def _submit_synthesis_job(item: Item, text: str, timeout: int) -> ArticleAudioJo
         _api_url("jobs"),
         data=request_body,
         headers={
-            "Authorization": f"Bearer {settings.ARCHIVE_ARTICLE_AUDIO_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
         method="POST",
@@ -374,14 +377,14 @@ def _submit_synthesis_job(item: Item, text: str, timeout: int) -> ArticleAudioJo
     return _parse_job_update(payload)
 
 
-def _poll_synthesis_job(job_id: str, timeout: int) -> ArticleAudioJobUpdate:
+def _poll_synthesis_job(job_id: str, timeout: int, *, api_key: str) -> ArticleAudioJobUpdate:
     try:
         job_id = wire_id(job_id)
     except ValueError:
         raise ArticleAudioGenerationError("Invalid upstream job identifier") from None
     request = Request(
         _api_url(f"jobs/{job_id}"),
-        headers={"Authorization": f"Bearer {settings.ARCHIVE_ARTICLE_AUDIO_API_KEY}"},
+        headers={"Authorization": f"Bearer {api_key}"},
     )
     payload = _request_json(
         request=request,

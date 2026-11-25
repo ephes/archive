@@ -314,6 +314,55 @@ def test_generate_item_article_audio_polls_existing_job(monkeypatch, settings) -
 
 
 @pytest.mark.django_db
+def test_article_audio_generation_and_download_use_the_same_credential(monkeypatch, settings):
+    origin = "https://voxhelm.example.test"
+    jobs = "/v1/jobs"
+    job = f"{jobs}/job-123"
+    artifact = f"{job}/artifacts/speech.mp3"
+    item = Item.objects.create(
+        original_url="https://example.test/article",
+        kind=ItemKind.ARTICLE,
+        long_summary="Synthetic article.",
+    )
+    settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = " \t synthetic-token \n"
+    settings.ARCHIVE_ARTICLE_AUDIO_API_BASE = f"{origin}/v1"
+    requests = []
+    responses = {
+        ("POST", jobs): {"id": "job-123", "state": "queued"},
+        ("GET", job): {
+            "id": "job-123",
+            "state": "succeeded",
+            "result": {"artifacts": {DEFAULT_AUDIO_FORMAT: artifact}},
+        },
+    }
+
+    def fake_urlopen(request, timeout, **kwargs):
+        method = request.get_method()
+        url = request.full_url
+        requests.append((method, url, request.get_header("Authorization")))
+        if url == origin + artifact:
+            return _FakeResponse(b"ID3-audio", content_type="audio/mpeg", url=url)
+        payload = responses[method, url.removeprefix(origin)]
+        return _FakeResponse(json.dumps(payload).encode(), content_type="application/json", url=url)
+
+    monkeypatch.setattr(
+        "archive.article_audio.extract_summary_source_from_url", lambda *a, **kw: SummarySource()
+    )
+    monkeypatch.setattr("archive.article_audio.urlopen", fake_urlopen)
+
+    item.article_audio_job_id = generate_item_article_audio(item).job_id
+    item.article_audio_artifact_path = generate_item_article_audio(item).artifact_path
+    item.save(update_fields=["article_audio_job_id", "article_audio_artifact_path"])
+    store_generated_article_audio(item)
+
+    assert requests == [
+        ("POST", origin + jobs, "Bearer synthetic-token"),
+        ("GET", origin + job, "Bearer synthetic-token"),
+        ("GET", origin + artifact, "Bearer synthetic-token"),
+    ]
+
+
+@pytest.mark.django_db
 def test_store_generated_article_audio_fetches_artifact(monkeypatch, settings) -> None:
     item = Item.objects.create(
         original_url="https://example.com/article",

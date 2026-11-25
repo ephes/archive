@@ -8,6 +8,7 @@
 - Reject nested FFmpeg results that finish draining or waiting at or after the deadline.
 - Build only the admitted article-audio script prefix when the text exceeds the cap.
 - Preserve complete words at the article-audio script character limit.
+- Use the trimmed article-audio credential for job submission, polling and downloads.
 
 - Keep authenticated transport receipts small by forwarding only bounded
   Content-Type and Content-Length metadata from successful responses.

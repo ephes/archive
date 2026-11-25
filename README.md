@@ -1639,6 +1639,9 @@ HEAD without body reads, and storage-reader cleanup after a client disconnects.
 
 ### Synthesis task identity
 
+Article-audio submission, polling and artifact downloads strip surrounding
+whitespace from `ARCHIVE_ARTICLE_AUDIO_API_KEY` before using it as a bearer token.
+
 The script character cap keeps complete words when it lands at a word boundary.
 If the cap splits a word, the script ends at the preceding complete word when
 one fits. A first word longer than the cap is kept as a capped prefix.

@@ -88,7 +88,9 @@ def test_replay_host_matches_with_or_without_dns_root_dot(selector):
     assert f"item {adjacent.pk}:" not in report
 
 
-@pytest.mark.parametrize("selector", ["example.test:8443", "[2001:db8::1]:8443", "2001:db8::1"])
+@pytest.mark.parametrize(
+    "selector", ["example.test:8443", "[2001:db8::1]:8443", "2001:db8::1", ".", " . ", "..", "a.."]
+)
 def test_replay_rejects_host_with_port_or_unbracketed_ipv6(selector, django_assert_num_queries):
     with django_assert_num_queries(0):
         with pytest.raises(CommandError, match="--host requires a hostname without a port"):

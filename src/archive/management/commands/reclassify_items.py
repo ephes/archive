@@ -60,7 +60,10 @@ def normalize_host_selector(value: str) -> str:
     if not host:
         raise CommandError("--host must not be blank.")
     if re.fullmatch(r"[\w.-]+", host):
-        return host.lower().removesuffix(".")
+        name = host.lower().removesuffix(".")
+        if name and not name.endswith("."):
+            return name
+        raise CommandError("--host requires a hostname without a port (bracket IPv6 addresses).")
     if re.fullmatch(r"\[[\w.:%-]+\]", host):
         try:
             return IPv6Address(host[1:-1]).compressed

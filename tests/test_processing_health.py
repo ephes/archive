@@ -257,6 +257,7 @@ def test_success_clears_the_failing_state() -> None:
 
 @pytest.mark.django_db(transaction=True)
 def test_pruning_failure_preserves_committed_success(monkeypatch, caplog) -> None:
+    monkeypatch.setattr("archive.processing_health.timezone.now", lambda: NOW)
     _record(YOUTUBE, False, 2, hours_ago=1)
     calls = []
 
@@ -278,8 +279,38 @@ def test_pruning_failure_preserves_committed_success(monkeypatch, caplog) -> Non
     assert "Could not record processing health" not in caplog.text
 
 
+@pytest.mark.django_db(databases=["default", "secondary"], transaction=True)
+def test_delayed_outcome_prunes_on_its_database_without_resetting_the_streak(monkeypatch):
+    using = "secondary"
+    clock = NOW
+    monkeypatch.setattr("archive.processing_health.timezone.now", lambda: clock)
+    failure_at = NOW - timedelta(hours=1)
+    old_success_at = NOW - timedelta(days=40)
+    record_step_outcome(YOUTUBE, succeeded=False, item_id=1, now=failure_at, using=using)
+    before = processing_health_snapshot(NOW, using=using)["steps"][YOUTUBE]
+
+    events = ProcessingEvent.objects.using(using)
+    expires_before_commit = events.create(
+        step=YOUTUBE, succeeded=True, occurred_at=NOW - timedelta(days=30)
+    )
+    sentinel = ProcessingEvent.objects.create(
+        step=YOUTUBE, succeeded=True, occurred_at=old_success_at
+    )
+
+    with transaction.atomic(using=using):
+        record_step_outcome(YOUTUBE, succeeded=True, item_id=2, now=old_success_at, using=using)
+        assert events.filter(item_id=2, occurred_at=old_success_at).exists()
+        clock = NOW + timedelta(seconds=1)
+
+    assert not events.filter(item_id=2).exists()
+    assert not events.filter(pk=expires_before_commit.pk).exists()
+    assert ProcessingEvent.objects.filter(pk=sentinel.pk).exists()
+    assert processing_health_snapshot(NOW, using=using)["steps"][YOUTUBE] == before
+
+
 @pytest.mark.django_db(transaction=True)
-def test_events_are_pruned_after_retention_but_state_is_kept() -> None:
+def test_events_are_pruned_after_retention_but_state_is_kept(monkeypatch) -> None:
+    monkeypatch.setattr("archive.processing_health.timezone.now", lambda: NOW)
     _record(YOUTUBE, True, 1, hours_ago=31 * 24)
     _record(ProcessingStep.METADATA, True, 2, hours_ago=0)
 
@@ -289,7 +320,8 @@ def test_events_are_pruned_after_retention_but_state_is_kept() -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-def test_pruning_compacts_the_events_of_an_ongoing_failure_streak() -> None:
+def test_pruning_compacts_the_events_of_an_ongoing_failure_streak(monkeypatch) -> None:
+    monkeypatch.setattr("archive.processing_health.timezone.now", lambda: NOW)
     _record(YOUTUBE, True, 1, hours_ago=40 * 24)
     _record(YOUTUBE, False, 2, hours_ago=39 * 24)
     _record(YOUTUBE, False, 3, hours_ago=38 * 24)
@@ -629,9 +661,11 @@ connection.close()
 
 
 @pytest.mark.django_db(transaction=True)
-def test_retention_backlog_drains_in_bounded_batches_without_changing_health() -> None:
+def test_retention_backlog_drains_in_bounded_batches_without_changing_health(monkeypatch) -> None:
     # A long-running streak outlives the event history that supplied its members.
+    monkeypatch.setattr("archive.processing_health.timezone.now", lambda: NOW - timedelta(days=40))
     _record(YOUTUBE, False, 7, hours_ago=40 * 24)
+    monkeypatch.setattr("archive.processing_health.timezone.now", lambda: NOW)
     old = NOW - timedelta(days=31)
     backlog = ProcessingEvent.objects.bulk_create(
         ProcessingEvent(step=YOUTUBE, succeeded=False, item_id=7, occurred_at=old)

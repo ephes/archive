@@ -1026,7 +1026,9 @@ If recording an outcome fails, the worker attempts to log the failure. An except
 from that diagnostic still allows the item update to commit.
 
 After each outcome commits, the worker prunes at most 100 events older than 30 days
-on the same database, oldest timestamp first (then primary key). A pruning failure
+on the same database, oldest timestamp first (then primary key). The retention
+cutoff uses the clock at pruning time. Delayed outcomes retain their observation
+timestamp and may expire as soon as they commit. A pruning failure
 logs `Could not prune expired processing health events` and leaves the committed
 outcome and streak state available. Repeated outcomes drain a retention backlog; expired events
 may remain between passes, without contributing to the 24-hour totals. Separate

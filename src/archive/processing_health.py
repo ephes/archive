@@ -109,14 +109,14 @@ def _record_step_outcome(
             step=step, succeeded=succeeded, item_id=item_id, occurred_at=occurred_at
         )
         transaction.on_commit(
-            lambda: _prune_after_outcome(occurred_at=occurred_at, using=using),
+            lambda: _prune_after_outcome(using=using),
             using=using,
         )
 
 
-def _prune_after_outcome(*, occurred_at: datetime, using: str) -> None:
+def _prune_after_outcome(*, using: str) -> None:
     try:
-        _prune_events(cutoff=occurred_at - EVENT_RETENTION, using=using)
+        _prune_events(cutoff=timezone.now() - EVENT_RETENTION, using=using)
     except Exception:
         with suppress(Exception):
             logger.warning("Could not prune expired processing health events")

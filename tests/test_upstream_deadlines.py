@@ -141,6 +141,10 @@ def test_poll_does_not_admit_a_transcript_normalized_after_deadline(monkeypatch,
         "oversized-header",
         "irrelevant-headers",
         "oversized-receipt",
+        "duplicate-type-audio-first",
+        "duplicate-type-text-first",
+        "parameterized-type",
+        "missing-type",
     ],
 )
 def test_real_child_transport_round_trip(monkeypatch, case):
@@ -159,7 +163,15 @@ class Response(BytesIO):
     code = 200
     headers = Message()
     audio_cases = ('media', 'oversized-header', 'irrelevant-headers')
-    headers['Content-Type'] = 'audio/mpeg' if case in audio_cases else 'text/plain'
+    if case != 'missing-type':
+        headers['Content-Type'] = 'audio/mpeg' if case in audio_cases else 'text/plain'
+    if case == 'duplicate-type-audio-first':
+        headers.replace_header('Content-Type', 'audio/mpeg')
+        headers['content-type'] = 'text/plain'
+    if case == 'duplicate-type-text-first':
+        headers['content-type'] = 'audio/mpeg'
+    if case == 'parameterized-type':
+        headers.replace_header('Content-Type', 'audio/mpeg; name="speech.mp3"')
     if case == 'irrelevant-headers':
         headers['cOnTeNt-LeNgTh'] = '8'
         for i in range(50):
@@ -169,6 +181,7 @@ class Response(BytesIO):
     if case == 'oversized-header': headers['Content-Length'] = '999999999'
     def read(self, n=-1):
         assert case not in ('wrong-type', 'oversized-header'), 'must reject before reading'
+        assert not case.startswith('duplicate-type'), 'must reject before reading'
         return super().read(n)
 def open_url(request, timeout):
     assert request.data.read() == b'synthetic request'
@@ -201,7 +214,14 @@ raise SystemExit(ns['main']())
     options = {"max_bytes": 10 * 1024 * 1024, "audio": True} if case == "media" else {}
     if case == "limit":
         options = {"max_bytes": 3}
-    if case in ("wrong-type", "oversized-header", "irrelevant-headers"):
+    if case in (
+        "wrong-type",
+        "oversized-header",
+        "irrelevant-headers",
+        "duplicate-type-audio-first",
+        "duplicate-type-text-first",
+        "parameterized-type",
+    ):
         options = {"audio": True}
     if case in ("307", "500"):
         with pytest.raises(HTTPError) as caught:
@@ -210,6 +230,10 @@ raise SystemExit(ns['main']())
         with caught.value as response:
             assert response.code == int(case)
             assert response.read() == b"e" * 65536
+    elif case.startswith("duplicate-type"):
+        with pytest.raises(OSError, match="ambiguous Content-Type"):
+            with upstream_http.open_authenticated_url(request, timeout=5, **options):
+                pytest.fail("ambiguous Content-Type accepted")
     elif case in ("limit", "wrong-type", "oversized-header", "oversized-receipt"):
         with pytest.raises(OSError, match=("not MP3" if case == "wrong-type" else "exceeded")):
             with upstream_http.open_authenticated_url(request, timeout=5, **options):
@@ -217,6 +241,11 @@ raise SystemExit(ns['main']())
     else:
         with upstream_http.open_authenticated_url(request, timeout=5, **options) as response:
             assert response.read() == (b"x" * (9 * 1024 * 1024) if case == "media" else b"response")
+            if case == "parameterized-type":
+                assert response.headers["Content-Type"] == 'audio/mpeg; name="speech.mp3"'
+                assert response.headers.get_content_type() == "audio/mpeg"
+            if case == "missing-type":
+                assert "Content-Type" not in response.headers
             if case == "irrelevant-headers":
                 assert response.headers.get_content_type() == "audio/mpeg"
                 assert response.headers["Content-Length"] == "8"

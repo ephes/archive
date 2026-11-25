@@ -1459,7 +1459,9 @@ Summary, transcription (including plain-text transcripts), and article-audio JSO
 API responses are capped at 8 MiB. Larger responses fail with the stage's existing
 error and retry behavior. The transport child checks the complete response headers
 and forwards only Content-Type and Content-Length from successful responses.
-It refuses their receipt if the serialized headers exceed 4 KiB. HTTP errors
+If Content-Type is present, it must appear once. The value's parameters are
+preserved. Duplicate fields are rejected before media format checks or body reads.
+The transport refuses receipts whose serialized headers exceed 4 KiB. HTTP errors
 retain their status and read at most 64 KiB for diagnostics. Binary
 article-audio downloads retain their separate configured media limit. Authenticated
 exchanges run in a disposable transport process with one elapsed timeout covering

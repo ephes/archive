@@ -43,9 +43,11 @@ def _content_length(response, representation: str) -> int | None:
 def _receipt_headers(headers: Message) -> list[tuple[str, str]]:
     selected = []
     for name in ("Content-Type", "Content-Length"):
-        value = headers.get(name)
-        if value is not None:
-            selected.append((name, value))
+        values = headers.get_all(name, [])
+        if len(values) > 1:
+            raise UpstreamResponseError(f"Upstream response has an ambiguous {name}")
+        if values:
+            selected.append((name, values[0]))
     # Bound input to the JSON encoder as well as its escaped output.
     if (
         sum(len(value) for _, value in selected) > _RECEIPT_HEADER_LIMIT
@@ -92,6 +94,8 @@ def _exchange(stack) -> int:
                 else "API response exceeded the 8 MiB limit"
             )
             expected_size = None
+            # HTTP errors are classified by status and need no response headers.
+            headers = []
             if not is_error:
                 if (
                     "Content-Range" in response.headers
@@ -104,6 +108,7 @@ def _exchange(stack) -> int:
                         else "API response did not return a complete representation"
                     )
                 expected_size = _content_length(response, representation)
+                headers = _receipt_headers(response.headers)
                 if audio_mode and response.headers.get_content_type().lower() not in {
                     "audio/mpeg",
                     "audio/mp3",
@@ -111,8 +116,6 @@ def _exchange(stack) -> int:
                     raise UpstreamResponseError("Article audio artifact is not MP3 audio")
                 if expected_size is not None and expected_size > limit:
                     raise UpstreamResponseError(limit_error)
-            # HTTP errors are classified by status and need no response headers.
-            headers = [] if is_error else _receipt_headers(response.headers)
             size = 0
             with Path(options["path"]).open("wb") as output:
                 while size <= limit:

@@ -16,6 +16,7 @@
   contacting the upstream service.
 - Cap authenticated request bodies before staging each chunk. Archived-audio
   uploads use the admitted multipart request length as their cap.
+- Refuse duplicate Content-Type fields in successful authenticated upstream responses.
 
 - Admit only HTML and XML media types for metadata downloads, including structured
   `+xml` types such as XHTML, RSS and Atom.

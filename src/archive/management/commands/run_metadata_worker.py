@@ -112,7 +112,7 @@ class Command(BaseCommand):
                 self.stderr.write(
                     "Recovered "
                     f"{recovered} stale processing item(s) during worker runtime "
-                    f"(older than {stale_processing_after}s)."
+                    f"(without a claim timestamp or older than {stale_processing_after}s)."
                 )
             processed = 0
             unsuccessful = 0

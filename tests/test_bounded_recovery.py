@@ -29,10 +29,13 @@ def test_stale_recovery_is_bounded_ordered_and_resumable():
     legacy = idle_item(summary_status=Status.PROCESSING)
     Item.objects.filter(pk=legacy.pk).update(processing_started_at=None)
     boundary = idle_item(summary_status=Status.PROCESSING, processing_started_at=cutoff)
-    ordered = sorted([*stale, boundary], key=lambda row: (row.processing_started_at, row.pk))
-    for batch, remaining in enumerate((106, 6, 0)):
+    ordered = [
+        legacy,
+        *sorted([*stale, boundary], key=lambda row: (row.processing_started_at, row.pk)),
+    ]
+    for batch, remaining in enumerate((107, 7, 0)):
         assert services.recover_stale_processing_items(stale_before=cutoff) == min(
-            100, 206 - batch * 100
+            100, 207 - batch * 100
         )
         assert (
             Item.objects.filter(
@@ -40,7 +43,7 @@ def test_stale_recovery_is_bounded_ordered_and_resumable():
             ).count()
             == remaining
         )
-        for row in ordered[: min(206, (batch + 1) * 100)]:
+        for row in ordered[: (batch + 1) * 100]:
             row.refresh_from_db()
             assert row.processing_started_at is None
             assert all(getattr(row, f"{stage}_status") != Status.PROCESSING for stage in STAGES)
@@ -54,15 +57,19 @@ def test_stale_recovery_is_bounded_ordered_and_resumable():
     fresh.refresh_from_db()
     legacy.refresh_from_db()
     assert fresh.processing_started_at == cutoff + timedelta(microseconds=1)
-    assert fresh.summary_status == legacy.summary_status == Status.PROCESSING
+    assert fresh.summary_status == Status.PROCESSING
+    assert legacy.summary_status == Status.PENDING
 
 
 @pytest.mark.django_db
-def test_stale_recovery_does_not_reset_a_reclaimed_attempt(monkeypatch):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_stale_recovery_does_not_reset_a_reclaimed_attempt(monkeypatch, legacy):
     cutoff = timezone.now()
     row = idle_item(
         summary_status=Status.PROCESSING, processing_started_at=cutoff - timedelta(hours=2)
     )
+    if legacy:
+        Item.objects.filter(pk=row.pk).update(processing_started_at=None)
     recover = services._recover_processing_items
     interleaved = []
     replacement = cutoff - timedelta(hours=1)  # Still stale, but a different attempt.

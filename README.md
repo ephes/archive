@@ -854,14 +854,14 @@ states during normal loop iterations instead of only recovering them on worker s
 window is enforced against the currently running item, so a transcript or summary path that stops making
 progress no longer strands the row in `processing` indefinitely. Startup uses the same age cutoff
 and preserves fresh leases held by other workers. Each recovery pass resets at most
-100 items, oldest processing timestamp first (then primary key), and matches each
-selected attempt's timestamp again when updating. Continuous worker iterations
-drain larger backlogs; `--once` recovers only one batch. Newer/reclaimed attempts
-and rows without timestamps are left untouched. Choose a stale window longer than
-legitimate per-item processing; this is age-based recovery, not a heartbeat
-or ownership lock. After a crash, recent work waits until that window expires. To deliberately
-recover all abandoned work sooner (including legacy rows without a lease timestamp), stop all
-workers first, then run this from the repository root and restart them:
+100 items. Legacy processing rows without a claim timestamp are recovered first,
+followed by the oldest timestamps, with ties broken by primary key. The worker
+rechecks each selected timestamp (including a missing timestamp) before resetting
+the row. Continuous worker iterations drain larger backlogs, and `--once` recovers
+one batch. Choose a stale window longer than legitimate per-item processing.
+After a crash, recent timestamped work waits until that window expires.
+To deliberately recover all abandoned work sooner, stop all workers first, then run
+this from the repository root and restart them:
 
 ```bash
 (cd src/django && uv run python manage.py shell -c \

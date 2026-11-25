@@ -608,3 +608,53 @@ for step in steps:
         "item_id", flat=True)) == set(range(1, count + 1))
 connections.close_all()
 '''.replace("COUNT", str(count)))
+
+
+def test_worker_recovers_processing_row_created_before_claim_timestamp(tmp_path):
+    run_journey(tmp_path, r'''
+import django
+from django.core.management import call_command
+from django.db import connection
+from django.db.migrations.executor import MigrationExecutor
+from django.utils import timezone
+from unittest.mock import patch
+
+django.setup()
+from archive.models import EnrichmentStatus as Status, Item
+
+pre = [("archive", "0011_item_search_fts")]
+executor = MigrationExecutor(connection)
+executor.migrate(pre)
+HistoricalItem = executor.loader.project_state(pre).apps.get_model("archive", "Item")
+legacy_id = HistoricalItem.objects.create(
+    original_url="https://example.test/legacy", enrichment_status="processing",
+    summary_status="complete", transcript_status="complete", media_archive_status="complete",
+    notes="Saved legacy notes",
+).pk
+MigrationExecutor(connection).migrate(executor.loader.graph.leaf_nodes("archive"))
+assert Item.objects.get(pk=legacy_id).processing_started_at is None
+
+now = timezone.now()
+active = Item.objects.create(
+    original_url="https://example.test/active", enrichment_status=Status.PROCESSING,
+    processing_started_at=now,
+)
+claimed = []
+
+def finish(*, item, **kwargs):
+    claimed.append(item.pk)
+    assert item.processing_started_at is not None
+    item.enrichment_status = Status.COMPLETE
+    item.save(update_fields=["enrichment_status"])
+    return True
+
+with patch("archive.management.commands.run_metadata_worker.enrich_item_metadata", finish):
+    call_command("run_metadata_worker", once=True, stale_processing_after=120)
+assert claimed == [legacy_id], claimed
+legacy = Item.objects.get(pk=legacy_id)
+assert legacy.enrichment_status == Status.COMPLETE
+assert legacy.notes == "Saved legacy notes"
+active.refresh_from_db()
+assert active.enrichment_status == Status.PROCESSING
+assert active.processing_started_at == now
+''')

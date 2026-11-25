@@ -836,13 +836,16 @@ STALE_RECOVERY_BATCH_SIZE = 100
 
 def recover_stale_processing_items(*, stale_before: datetime) -> int:
     """Recover one oldest-first batch; later worker passes drain the backlog."""
+    unowned_or_stale = Q(processing_started_at__isnull=True) | Q(
+        processing_started_at__lte=stale_before
+    )
     using = router.db_for_write(Item)
     with transaction.atomic(using=using):
         attempts = list(
             Item.objects.using(using)
             .select_for_update()
-            .filter(_processing_item_query(), processing_started_at__lte=stale_before)
-            .order_by("processing_started_at", "pk")
+            .filter(_processing_item_query(), unowned_or_stale)
+            .order_by(F("processing_started_at").asc(nulls_first=True), "pk")
             .values_list("pk", "processing_started_at")[:STALE_RECOVERY_BATCH_SIZE]
         )
         if not attempts:
@@ -850,9 +853,7 @@ def recover_stale_processing_items(*, stale_before: datetime) -> int:
         selected = Q()
         for pk, started_at in attempts:
             selected |= Q(pk=pk, processing_started_at=started_at)
-        return _recover_processing_items(
-            selected & _processing_item_query() & Q(processing_started_at__lte=stale_before)
-        )
+        return _recover_processing_items(selected & _processing_item_query() & unowned_or_stale)
 
 
 def _processing_item_query() -> Q:

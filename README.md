@@ -832,6 +832,9 @@ script is capped by `ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS`. New jobs require a
 limit before Archive fetches the source page. Polling a saved job uses its job ID and
 the configured credential independently of the script limit. The worker observes
 the saved poll deadline even when another stage on the same item runs first.
+New jobs require nonblank stored summary or notes text. The worker skips text
+containing only whitespace, including Unicode whitespace, until usable text is
+available. A due saved job can still be polled when those fields are blank.
 When the script exceeds the cap, Archive builds only the trimmed prefix and applies the
 word-boundary rule to it. Archive stores the private artifact reference and exposes the finished
 audio through a public item-scoped proxy URL on the detail page. Podcast episodes with a direct

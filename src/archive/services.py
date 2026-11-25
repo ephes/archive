@@ -736,7 +736,7 @@ def enrich_item_article_audio(item: Item, timeout: int = 30) -> bool:
     if (
         item.has_generated_article_audio
         or not _supports_article_audio(item)
-        or not _article_audio_source_ready(item)
+        or not _article_audio_ready(item)
     ):
         using = item._state.db or router.db_for_write(Item, instance=item)
         with transaction.atomic(using=using):
@@ -1413,12 +1413,19 @@ def _media_archive_should_start(item: Item, now: datetime) -> bool:
 
 
 def _claimable_article_audio_query(now: datetime) -> Q:
-    has_script_source = ~Q(long_summary="") | ~Q(short_summary="") | ~Q(notes="")
+    # SQLite's Django regex uses Python's Unicode whitespace rules, as does script admission.
+    nonblank = r"\S"
+    has_job_or_source = (
+        Q(article_audio_job_id__regex=nonblank)
+        | Q(long_summary__regex=nonblank)
+        | Q(short_summary__regex=nonblank)
+        | Q(notes__regex=nonblank)
+    )
     return (
         Q(article_audio_status=EnrichmentStatus.PENDING)
         & Q(kind=ItemKind.ARTICLE)
         & Q(summary_status=EnrichmentStatus.COMPLETE)
-        & has_script_source
+        & has_job_or_source
         & (Q(article_audio_poll_at__isnull=True) | Q(article_audio_poll_at__lte=now))
     )
 
@@ -1429,7 +1436,7 @@ def _article_audio_should_start(item: Item, now: datetime) -> bool:
     return (
         _article_audio_poll_due(item, now)
         and _supports_article_audio(item)
-        and _article_audio_source_ready(item)
+        and _article_audio_ready(item)
     )
 
 
@@ -1458,8 +1465,10 @@ def _supports_media_archive(item: Item) -> bool:
     return can_archive_audio(item)
 
 
-def _article_audio_source_ready(item: Item) -> bool:
-    return item.summary_status == EnrichmentStatus.COMPLETE and can_generate_article_audio(item)
+def _article_audio_ready(item: Item) -> bool:
+    return item.summary_status == EnrichmentStatus.COMPLETE and (
+        bool(item.article_audio_job_id.strip()) or can_generate_article_audio(item)
+    )
 
 
 def _next_article_audio_poll_at() -> datetime:

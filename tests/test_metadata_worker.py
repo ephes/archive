@@ -267,3 +267,83 @@ def test_worker_checks_article_audio_poll_deadline_after_metadata(
     assert item.article_audio_poll_at == now + timedelta(
         seconds=settings.ARCHIVE_ARTICLE_AUDIO_POLL_SECONDS
     )
+
+
+@pytest.mark.django_db
+def test_worker_skips_blank_article_audio_sources_until_edited(monkeypatch):
+    from test_attempt_ownership import idle_item
+
+    from archive import article_audio, services
+    from archive.models import ItemKind
+
+    older = idle_item(
+        original_url="https://example.test/older",
+        shared_at=timezone.now() - timedelta(days=1),
+        kind=ItemKind.ARTICLE,
+        title="A headline alone is insufficient",
+        long_summary=" \t\n",
+        short_summary="\u2003\xa0\x85",
+        notes="\x1f\u3000\r",
+        article_audio_job_id=" \t",
+        article_audio_status=EnrichmentStatus.PENDING,
+    )
+    newer = idle_item(
+        original_url="https://example.test/newer",
+        kind=ItemKind.ARTICLE,
+        notes="Usable source",
+        article_audio_status=EnrichmentStatus.PENDING,
+    )
+    submitted = []
+
+    def submit(*, item, timeout):
+        assert article_audio.can_generate_article_audio(item)
+        submitted.append(item.pk)
+        return article_audio.ArticleAudioJobUpdate(f"job-{item.pk}", "queued")
+
+    monkeypatch.setattr(services, "generate_item_article_audio", submit)
+    for _ in range(2):
+        call_command("run_metadata_worker", once=True, limit=1)
+    assert submitted == [newer.pk]
+    older.refresh_from_db()
+    assert older.article_audio_status == EnrichmentStatus.PENDING
+    assert older.processing_started_at is None
+
+    older.notes = "\u2003Now usable\xa0"
+    older.save(update_fields=["notes"])
+    call_command("run_metadata_worker", once=True, limit=1)
+    assert submitted == [newer.pk, older.pk]
+
+
+@pytest.mark.django_db
+def test_worker_polls_saved_article_audio_job_with_blank_sources(monkeypatch, settings):
+    from test_attempt_ownership import idle_item
+
+    from archive import article_audio, services
+    from archive.models import ItemKind
+
+    now = timezone.now()
+    poll_at = now + timedelta(seconds=30)
+    item = idle_item(
+        kind=ItemKind.ARTICLE,
+        notes="\t\u2003",
+        article_audio_status=EnrichmentStatus.PENDING,
+        article_audio_job_id=" saved-job ",
+        article_audio_poll_at=poll_at,
+    )
+    settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = "synthetic-test-token"
+    polls = []
+    monkeypatch.setattr(services.timezone, "now", lambda: now)
+
+    def poll(*, job_id, **kwargs):
+        polls.append(job_id)
+        return article_audio.ArticleAudioJobUpdate(job_id, "running")
+
+    monkeypatch.setattr(article_audio, "_poll_synthesis_job", poll)
+    call_command("run_metadata_worker", once=True, limit=1)
+    assert polls == []
+    now = poll_at
+    call_command("run_metadata_worker", once=True, limit=1)
+    assert polls == ["saved-job"]
+    item.refresh_from_db()
+    assert item.article_audio_status == EnrichmentStatus.PENDING
+    assert item.article_audio_poll_at > now

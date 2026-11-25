@@ -778,9 +778,12 @@ Pending reconciliation measures age and schedules the next poll after locking an
 the item row. Because the job lives in the database, a worker restart or deploy picks the
 polling up again. A job made for an older source
 (the archived audio changed) is not resumed; the current audio is uploaded instead. Summaries generated while
-the job runs are refreshed from the transcript once it arrives. Archive then reads the job's segment JSON and rejects the
-transcript as incomplete when a stretch of audio longer than `ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS`
-(10 minutes) has no segment with a positive span. Zero-length segments carry no coverage
+the job runs are refreshed from the transcript once it arrives. Archive reads the job's segment
+JSON, normalizes the artifact and result text once each for comparison, and requires nonempty
+matching text before checking coverage. It rejects the transcript as incomplete when a stretch
+of audio longer than `ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS`
+(10 minutes) has no segment with a positive span. Archive sorts its interval list in place
+and measures coverage across the union of overlapping spans. Zero-length segments carry no coverage
 and an artifact with only zero-length segments fails admission. whisper.cpp splits long audio
 across processors and ignores a worker thread that fails, so a job can succeed with whole parts
 of the audio missing (item 408, a 3:09 h

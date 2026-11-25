@@ -476,11 +476,8 @@ def _check_batch_transcript_coverage(
         invalid_payload_error=TranscriptionJobFailed,
     )
     artifact_text = payload.get("text")
-    if (
-        not isinstance(artifact_text, str)
-        or not _normalize_transcript(artifact_text)
-        or _normalize_transcript(artifact_text) != _normalize_transcript(completed.transcript)
-    ):
+    normalized = _normalize_transcript(artifact_text) if isinstance(artifact_text, str) else ""
+    if not normalized or normalized != _normalize_transcript(completed.transcript):
         raise TranscriptionJobFailed("Batch transcription artifact text does not match its result")
     # Verbose JSON need not carry an ID, but supplied job identity must agree.
     for key in ("job_id", "id"):
@@ -540,9 +537,10 @@ def find_transcript_gaps(
     if not intervals:
         raise TranscriptionGenerationError("Batch transcription segments lacked a positive span")
 
+    intervals.sort()
     gaps: list[tuple[float, float]] = []
     covered_until = 0.0
-    for start, end in sorted(intervals):
+    for start, end in intervals:
         if start - covered_until > max_gap_seconds:
             gaps.append((covered_until, start))
         covered_until = max(covered_until, end)

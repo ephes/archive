@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Normalize batch transcript evidence text once per value during coverage validation.
+- Sort coverage intervals in place to reduce peak allocation on large transcripts.
+
 - Prune expired processing health events after the outcome commits, preserving
   the recorded event and streak update if retention cleanup fails.
 - Reject nonfinite media command timeouts before preparing stdin or launching

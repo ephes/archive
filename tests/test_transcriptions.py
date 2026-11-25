@@ -585,6 +585,26 @@ def test_gap_check_preserves_threshold_and_input_order() -> None:
     assert segments == [{"start": 20, "end": 25}, {"start": 5, "end": 10}]
 
 
+def test_gap_check_orders_large_interval_inventory_without_a_sorted_copy(monkeypatch) -> None:
+    from archive import transcriptions
+
+    segments = [
+        {"start": start, "end": end}
+        for block_start in (10, 10_000)
+        for start in range(block_start, block_start + 4096, 2)
+        for end in (start + 1, start + 3)
+    ]
+    bounds = {"max_gap_seconds": 5.0, "media_duration_seconds": 14_117.0}
+    expected = [(0.0, 10.0), (4107.0, 10_000.0), (14_097.0, 14_117.0)]
+    assert find_transcript_gaps(segments, **bounds) == expected
+
+    def reject_sorted_copy(*args, **kwargs):
+        pytest.fail("coverage must not copy the interval list for sorting")
+
+    monkeypatch.setattr(transcriptions, "sorted", reject_sorted_copy, raising=False)
+    assert find_transcript_gaps(segments[::-1], **bounds) == expected
+
+
 @pytest.mark.parametrize("text", [None, {}, [], True, 12, 1.5, "", "  "])
 def test_batch_result_requires_nonempty_string_text(text) -> None:
     from archive.transcriptions import _parse_batch_transcription_job_update
@@ -667,6 +687,50 @@ def test_enabled_coverage_requires_json_artifact(monkeypatch, settings, artifact
     assert isinstance(update, BatchTranscriptionJobUpdate)
     with pytest.raises(TranscriptionGenerationError, match="segment artifact"):
         _check_batch_transcript_coverage(completed=update, timeout=1)
+
+
+@pytest.mark.parametrize(
+    ("artifact_text", "matches", "expected_calls"),
+    [
+        ("  Synthetic\tline\r\n\r\n\r\n Proof  ", True, 2),
+        ("  Different text  ", False, 2),
+        (" \t\r\n ", False, 1),
+        (None, False, 0),
+    ],
+)
+def test_coverage_normalizes_each_admitted_text_once(
+    monkeypatch, settings, artifact_text, matches, expected_calls
+) -> None:
+    from archive import transcriptions
+
+    settings.ARCHIVE_TRANSCRIPTION_MAX_GAP_SECONDS = 600
+    settings.ARCHIVE_TRANSCRIPTION_API_BASE = "https://voxhelm.example.test/v1"
+    completed = transcriptions.BatchTranscriptionJobUpdate(
+        job_id="job-synthetic",
+        state="succeeded",
+        transcript="Synthetic line\n\nProof",
+        json_artifact_path="/v1/jobs/job-synthetic/transcript.json",
+    )
+    payload = {
+        "text": artifact_text,
+        "segments": [{"start": 0, "end": 1}] if matches else None,
+    }
+    monkeypatch.setattr(transcriptions, "_request_json", lambda **kwargs: payload)
+    normalize = transcriptions._normalize_transcript
+    calls: list[str] = []
+
+    def track_normalization(value: str) -> str:
+        calls.append(value)
+        return normalize(value)
+
+    monkeypatch.setattr(transcriptions, "_normalize_transcript", track_normalization)
+    if matches:
+        transcriptions._check_batch_transcript_coverage(completed=completed, timeout=1)
+    else:
+        with pytest.raises(TranscriptionJobFailed, match="artifact text does not match its result"):
+            transcriptions._check_batch_transcript_coverage(completed=completed, timeout=1)
+
+    assert calls == [artifact_text, completed.transcript][:expected_calls]
 
 
 @pytest.mark.parametrize("segments", [None, [], {}, "segments"])

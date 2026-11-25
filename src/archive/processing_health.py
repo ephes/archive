@@ -52,7 +52,10 @@ def record_step_outcome(
     now: datetime | None = None,
     using: str | None = None,
 ) -> None:
-    """Record one attempted step run; never raises into the processing path."""
+    """Record one supported step run without raising into the processing path."""
+
+    if step not in ProcessingStep.values:
+        return
 
     try:
         _record_step_outcome(
@@ -139,11 +142,17 @@ def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:
         window_start = reference - HEALTH_WINDOW
     except (OverflowError, ValueError):
         raise ValueError("Invalid processing health reference clock") from None
+    supported_steps = ProcessingStep.values
     with snapshot_read_transaction():
-        states = {state.step: state for state in ProcessingStepState.objects.all()}
+        states = {
+            state.step: state
+            for state in ProcessingStepState.objects.filter(step__in=supported_steps)
+        }
         counts: dict[tuple[str, bool], int] = {
             (row["step"], row["succeeded"]): row["total"]
-            for row in ProcessingEvent.objects.filter(occurred_at__range=(window_start, reference))
+            for row in ProcessingEvent.objects.filter(
+                step__in=supported_steps, occurred_at__range=(window_start, reference)
+            )
             .values("step", "succeeded")
             .annotate(total=Count("id"))
         }
@@ -160,7 +169,7 @@ def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:
             }
 
     steps: dict[str, dict[str, Any]] = {}
-    for step in ProcessingStep.values:
+    for step in supported_steps:
         state = states.get(step)
         last_success_at = state.last_success_at if state else None
         last_failure_at = state.last_failure_at if state else None

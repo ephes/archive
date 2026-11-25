@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 from datetime import UTC, datetime, timedelta, timezone
+from sqlite3 import SQLITE_LIMIT_VARIABLE_NUMBER
 from types import SimpleNamespace
 
 import pytest
@@ -63,6 +64,45 @@ def test_snapshot_reports_every_step_with_empty_state() -> None:
             "failing_for_seconds": 0,
             "failing_items": 0,
         }
+
+
+@pytest.mark.django_db
+def test_snapshot_ignores_historical_unknown_steps_under_sqlite_parameter_limit() -> None:
+    obsolete_steps = [f"obsolete_{i}" for i in range(12)]
+    ProcessingStepState.objects.bulk_create(
+        ProcessingStepState(step=step, last_failure_at=NOW, failing_since=NOW)
+        for step in obsolete_steps
+    )
+    ProcessingFailureItem.objects.bulk_create(
+        ProcessingFailureItem(step=step, item_id=1) for step in obsolete_steps
+    )
+    ProcessingEvent.objects.bulk_create(
+        ProcessingEvent(step=step, succeeded=False, item_id=1, occurred_at=NOW)
+        for step in obsolete_steps
+    )
+    _record(YOUTUBE, False, 1, hours_ago=1)
+
+    sqlite_connection = connection.connection
+    previous_limit = sqlite_connection.setlimit(
+        SQLITE_LIMIT_VARIABLE_NUMBER, len(ProcessingStep.values) + 2
+    )
+    try:
+        steps = processing_health_snapshot(now=NOW)["steps"]
+    finally:
+        sqlite_connection.setlimit(SQLITE_LIMIT_VARIABLE_NUMBER, previous_limit)
+
+    assert set(steps) == set(ProcessingStep.values)
+    assert steps[YOUTUBE]["failures"] == 1
+    assert steps[YOUTUBE]["failing_items"] == 1
+    assert ProcessingStepState.objects.filter(step__in=obsolete_steps).count() == 12
+    assert ProcessingFailureItem.objects.filter(step__in=obsolete_steps).count() == 12
+    assert ProcessingEvent.objects.filter(step__in=obsolete_steps).count() == 12
+
+
+@pytest.mark.django_db
+def test_recording_unknown_step_does_not_write_health_rows(django_assert_num_queries) -> None:
+    with django_assert_num_queries(0):
+        _record("obsolete", False, 1, hours_ago=1)
 
 
 @pytest.mark.django_db

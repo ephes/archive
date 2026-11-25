@@ -943,8 +943,8 @@ In production, ops-control's `just archive-reprocess` runs it on macmini.
 monitor (Nyxmon on macmini polls `http://127.0.0.1:10041/api/health/`) can notice when one
 silently stops succeeding. It needs no authentication and exposes only step names, counts and
 timestamps: no item IDs, titles, URLs or error messages. Responses carry
-`Cache-Control: no-store`. A request costs a handful of indexed queries on two small tables,
-independent of the number of items.
+`Cache-Control: no-store`. A request uses up to three data queries for step state, recent
+event totals, and active streak membership.
 
 ```json
 {
@@ -973,6 +973,8 @@ independent of the number of items.
 The steps are `metadata` (metadata extraction), `media_archive_youtube` (audio downloaded from
 a YouTube page through `yt-dlp`), `media_archive_other` (every other audio/video archival),
 `transcript`, `summary` (summaries and tags) and `article_audio`. Every step is always present.
+Snapshots query only supported steps, and the worker ignores outcomes for other identifiers.
+Historical rows for obsolete steps stay subject to the existing retention policy.
 The worker records one outcome per attempted run; skipped work (nothing to archive, an item
 that already has a transcript) is not an attempt. Each retry is its own attempt, so one item
 whose media archival keeps failing produces four failures (the first try plus three retries

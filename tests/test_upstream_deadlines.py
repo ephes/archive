@@ -130,7 +130,18 @@ def test_poll_does_not_admit_a_transcript_normalized_after_deadline(monkeypatch,
 
 @pytest.mark.parametrize(
     "case",
-    ["success", "iterable", "307", "500", "limit", "media", "wrong-type", "oversized-header"],
+    [
+        "success",
+        "iterable",
+        "307",
+        "500",
+        "limit",
+        "media",
+        "wrong-type",
+        "oversized-header",
+        "irrelevant-headers",
+        "oversized-receipt",
+    ],
 )
 def test_real_child_transport_round_trip(monkeypatch, case):
     from urllib.error import HTTPError
@@ -147,8 +158,14 @@ case = sys.argv[2]
 class Response(BytesIO):
     code = 200
     headers = Message()
-    headers['Content-Type'] = (
-        'audio/mpeg' if case in ('media', 'oversized-header') else 'text/plain')
+    audio_cases = ('media', 'oversized-header', 'irrelevant-headers')
+    headers['Content-Type'] = 'audio/mpeg' if case in audio_cases else 'text/plain'
+    if case == 'irrelevant-headers':
+        headers['cOnTeNt-LeNgTh'] = '8'
+        for i in range(50):
+            headers[f'X-Synthetic-{i}'] = 'x' * 4096
+    if case == 'oversized-receipt':
+        headers.replace_header('Content-Type', 'text/plain; name=' + 'x' * 4096)
     if case == 'oversized-header': headers['Content-Length'] = '999999999'
     def read(self, n=-1):
         assert case not in ('wrong-type', 'oversized-header'), 'must reject before reading'
@@ -170,7 +187,10 @@ raise SystemExit(ns['main']())
     real_run = subprocess.run
 
     def run(command, **kwargs):
-        return real_run([sys.executable, "-I", "-c", script, str(helper), case], **kwargs)
+        result = real_run([sys.executable, "-I", "-c", script, str(helper), case], **kwargs)
+        if case == "irrelevant-headers":
+            assert len(result.stdout) < 256
+        return result
 
     monkeypatch.setattr(subprocess, "run", run)
     request = Request(
@@ -181,7 +201,7 @@ raise SystemExit(ns['main']())
     options = {"max_bytes": 10 * 1024 * 1024, "audio": True} if case == "media" else {}
     if case == "limit":
         options = {"max_bytes": 3}
-    if case in ("wrong-type", "oversized-header"):
+    if case in ("wrong-type", "oversized-header", "irrelevant-headers"):
         options = {"audio": True}
     if case in ("307", "500"):
         with pytest.raises(HTTPError) as caught:
@@ -190,10 +210,14 @@ raise SystemExit(ns['main']())
         with caught.value as response:
             assert response.code == int(case)
             assert response.read() == b"e" * 65536
-    elif case in ("limit", "wrong-type", "oversized-header"):
+    elif case in ("limit", "wrong-type", "oversized-header", "oversized-receipt"):
         with pytest.raises(OSError, match=("not MP3" if case == "wrong-type" else "exceeded")):
             with upstream_http.open_authenticated_url(request, timeout=5, **options):
                 pytest.fail("invalid body accepted")
     else:
         with upstream_http.open_authenticated_url(request, timeout=5, **options) as response:
             assert response.read() == (b"x" * (9 * 1024 * 1024) if case == "media" else b"response")
+            if case == "irrelevant-headers":
+                assert response.headers.get_content_type() == "audio/mpeg"
+                assert response.headers["Content-Length"] == "8"
+                assert "X-Synthetic-0" not in response.headers

@@ -4,9 +4,12 @@ import importlib.util
 import json
 import sys
 from contextlib import ExitStack
+from email.message import Message
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request
+
+_RECEIPT_HEADER_LIMIT = 4096
 
 
 class UpstreamResponseError(OSError):
@@ -37,6 +40,21 @@ def _content_length(response, representation: str) -> int | None:
         raise UpstreamResponseError(f"{representation} has an invalid Content-Length") from None
 
 
+def _receipt_headers(headers: Message) -> list[tuple[str, str]]:
+    selected = []
+    for name in ("Content-Type", "Content-Length"):
+        value = headers.get(name)
+        if value is not None:
+            selected.append((name, value))
+    # Bound input to the JSON encoder as well as its escaped output.
+    if (
+        sum(len(value) for _, value in selected) > _RECEIPT_HEADER_LIMIT
+        or len(json.dumps(selected)) > _RECEIPT_HEADER_LIMIT
+    ):
+        raise UpstreamResponseError("Upstream response metadata exceeded receipt limit")
+    return selected
+
+
 def main() -> int:
     with ExitStack() as stack:
         return _exchange(stack)
@@ -55,8 +73,6 @@ def _exchange(stack) -> int:
                 else None
             ),
         )
-        if options["data_path"] is not None and not request.has_header("Content-length"):
-            request.add_header("Content-Length", str(Path(options["data_path"]).stat().st_size))
         is_error = False
         try:
             response = _load_transport()._open_authenticated_url(
@@ -95,6 +111,8 @@ def _exchange(stack) -> int:
                     raise UpstreamResponseError("Article audio artifact is not MP3 audio")
                 if expected_size is not None and expected_size > limit:
                     raise UpstreamResponseError(limit_error)
+            # HTTP errors are classified by status and need no response headers.
+            headers = [] if is_error else _receipt_headers(response.headers)
             size = 0
             with Path(options["path"]).open("wb") as output:
                 while size <= limit:
@@ -117,7 +135,7 @@ def _exchange(stack) -> int:
             info = {
                 "status": status,
                 "is_error": is_error,
-                "headers": list(response.headers.items()),
+                "headers": headers,
             }
         print(json.dumps(info))
         return 0

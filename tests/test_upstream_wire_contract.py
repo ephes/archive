@@ -421,3 +421,40 @@ def test_audio_poll_accepts_finite_json_numbers(monkeypatch, settings):
 
     assert (update.job_id, update.state) == ("job-a", "queued")
     assert response.closed
+
+
+@pytest.mark.parametrize("declared", ["2", "4", "+3", "3, 3", "3", "03", None])
+def test_authenticated_body_uses_admitted_staged_length(declared, monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from urllib.request import Request
+
+    from archive import upstream_http
+
+    calls = []
+
+    def run(command, **kwargs):
+        options = json.loads(kwargs["input"])
+        calls.append(options["headers"]["Content-length"])
+        assert options["headers"]["Authorization"] == "Bearer SYNTHETIC"
+        assert Path(options["data_path"]).read_bytes() == b"abc"
+        Path(options["path"]).write_bytes(b"ok")
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"headers": [], "is_error": False}))
+
+    monkeypatch.setattr(upstream_http.subprocess, "run", run)
+    request = Request(
+        "https://api.test/",
+        data=iter([b"a", b"bc"]),
+        headers={"Authorization": "Bearer SYNTHETIC"},
+    )
+    if declared is not None:
+        request.add_header("Content-Length", declared)
+    if declared in ("3", "03", None):
+        with upstream_http.open_authenticated_url(request, timeout=5) as response:
+            assert response.read() == b"ok"
+        assert calls == ["3"]
+    else:
+        with pytest.raises(OSError, match="Content-Length"):
+            with upstream_http.open_authenticated_url(request, timeout=5):
+                pytest.fail("invalid framing accepted")
+        assert not calls

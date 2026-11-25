@@ -1436,12 +1436,17 @@ an upload/job; reads stop after at most one excess source byte. Read errors clos
 the source and discard the partial staging file. Multipart filenames allow UTF-8
 up to 255 characters, excluding quotes, backslashes and controls. MIME values
 must be bare `type/subtype` tokens; header parameters are refused. Both length
-calculation and streaming use the same validated UTF-8 prefix.
+calculation and streaming use the same validated UTF-8 prefix. The authenticated
+transport also checks any declared Content-Length against the completed request
+file before starting the child and sends the staged byte count as Content-Length.
 
 
 Summary, transcription (including plain-text transcripts), and article-audio JSON
 API responses are capped at 8 MiB. Larger responses fail with the stage's existing
-error and retry behavior. HTTP error diagnostics read at most 64 KiB. Binary
+error and retry behavior. The transport child checks the complete response headers
+and forwards only Content-Type and Content-Length from successful responses.
+It refuses their receipt if the serialized headers exceed 4 KiB. HTTP errors
+retain their status and read at most 64 KiB for diagnostics. Binary
 article-audio downloads retain their separate configured media limit. Authenticated
 exchanges run in a disposable transport process with one elapsed timeout covering
 DNS, connect, same-origin redirects, response reads (including errors), and

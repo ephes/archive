@@ -72,6 +72,7 @@ def open_authenticated_url(
     with TemporaryDirectory(prefix="archive-upstream-") as directory:
         path = Path(directory) / "body"
         request_path = Path(directory) / "request"
+        request_headers = dict(request.header_items())
         if request.data is not None:
             with request_path.open("wb") as output:
                 if isinstance(request.data, bytes):
@@ -83,9 +84,20 @@ def open_authenticated_url(
                             raise OSError("Upstream exchange exceeded the total timeout")
                 else:
                     raise OSError("Unsupported upstream request body")
+            staged_length = str(request_path.stat().st_size)
+            declared = request_headers.get("Content-length")
+            if declared is not None:
+                declared = declared.strip(" \t")
+                if (
+                    not declared.isascii()
+                    or not declared.isdecimal()
+                    or (declared.lstrip("0") or "0") != staged_length
+                ):
+                    raise OSError("Upstream request Content-Length did not match staged body")
+            request_headers["Content-length"] = staged_length
         options = {
             "url": request.full_url,
-            "headers": dict(request.header_items()),
+            "headers": request_headers,
             "method": request.get_method(),
             "data_path": str(request_path) if request.data is not None else None,
             "path": str(path),

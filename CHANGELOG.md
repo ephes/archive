@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Keep authenticated transport receipts small by forwarding only bounded
+  Content-Type and Content-Length metadata from successful responses.
+- Check authenticated request framing against the staged request body before
+  contacting the upstream service.
+
 - Admit only HTML and XML media types for metadata downloads, including structured
   `+xml` types such as XHTML, RSS and Atom.
 

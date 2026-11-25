@@ -1470,9 +1470,12 @@ Long recordings must pass: archival, staging and the batch job are sized for mul
   stream the bytes they need. An object without an ETag is refused. Every ranged request is
   pinned to the object's ETag from the opening `HeadObject` (`IfMatch`). Before reading
   the body, Archive requires the response to return that ETag and the expected `Content-Range`.
-  The backend's download parameters (for example SSE-C keys) are passed on. A failed
-  read closes its stream and leaves the offset unchanged so a retry starts a fresh
-  ranged request. django-storages' own `S3File` would copy the whole object into
+  The backend's download parameters (for example SSE-C keys) are passed on. A
+  chunk longer than requested fails before modifying the destination buffer. A
+  failed read retires its stream and leaves the offset unchanged so a retry
+  starts a fresh ranged request. The read error survives failures while closing
+  the stream or logging the close failure. Explicit close also leaves the reader
+  closed in that case. django-storages' own `S3File` would copy the whole object into
   memory on first read (`AWS_S3_MAX_MEMORY_SIZE` is 0 by default), which a multi-gigabyte
   recording cannot afford. A range request for a public player reads only the requested bytes.
 - **Disk.** Media work refuses to start unless the temporary directory

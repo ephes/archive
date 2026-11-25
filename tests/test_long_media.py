@@ -215,6 +215,63 @@ def test_s3_range_reader_discards_a_body_that_advances_before_raising(monkeypatc
         assert obj.ranges == ["bytes=0-", "bytes=7-"]
 
 
+@pytest.mark.parametrize("buffer_size", [3, 6])
+def test_s3_range_reader_rejects_overlong_chunks_before_copying(monkeypatch, buffer_size):
+    obj = _FakeS3Object(b"abcdefghij")
+    with S3RangeReader(obj) as reader:
+        assert reader.read(7) == b"abcdefg"
+        body = obj.bodies[0]
+
+        def read_too_much(wanted):
+            assert wanted == 3
+            return b"hijk"
+
+        monkeypatch.setattr(body, "read", read_too_much)
+        sentinel = b"?" * buffer_size
+        buffer = bytearray(sentinel)
+        with pytest.raises(OSError, match="returned more bytes than requested"):
+            reader.readinto(buffer)
+
+        assert buffer == sentinel
+        assert reader.tell() == 7
+        assert body.closed
+        assert reader.read(3) == b"hij"
+        assert obj.ranges == ["bytes=0-", "bytes=7-"]
+
+
+@pytest.mark.parametrize("read_fails", [False, True])
+def test_s3_range_reader_retires_body_when_close_and_warning_fail(monkeypatch, read_fails):
+    obj = _FakeS3Object(b"abcdef")
+    reader = S3RangeReader(obj)
+    assert reader.read(3) == b"abc"
+    body = obj.bodies[0]
+    close_calls = []
+
+    def fail_read(wanted):
+        raise ClientError({"Error": {"Code": "SlowDown", "Message": "private"}}, "GetObject")
+
+    def fail_close():
+        close_calls.append(True)
+        raise OSError("close failed")
+
+    def fail_warning(message):
+        raise RuntimeError("logging unavailable")
+
+    monkeypatch.setattr(body, "read", fail_read)
+    monkeypatch.setattr(body, "close", fail_close)
+    monkeypatch.setattr("archive.media_archival.logger.warning", fail_warning)
+    if read_fails:
+        with pytest.raises(OSError) as caught:
+            reader.read(3)
+        assert str(caught.value) == "Archived media read failed: transport error (ClientError)"
+        assert reader.tell() == 3
+        assert close_calls == [True]
+    reader.close()
+    assert reader.closed
+    reader.close()
+    assert close_calls == [True]
+
+
 def test_s3_range_reader_reports_a_short_object_and_safe_backend_errors():
     class ShortObject(_FakeS3Object):
         def get(self, **kwargs):

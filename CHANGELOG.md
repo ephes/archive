@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Reject overlong S3 chunks before writing to the destination buffer or advancing
+  the range reader.
+- Preserve S3 range-read errors and explicit close when body cleanup and its
+  warning both fail.
+
 - Return a fixed JSON 400 when an authenticated capture request body read fails.
 - Report deferred orphan candidates with unknown ages separately from young objects.
 

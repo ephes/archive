@@ -862,6 +862,8 @@ class S3RangeReader(io.RawIOBase):
             if not data:
                 raise OSError("Archived media ended before its recorded length")
             count = len(data)
+            if count > wanted:
+                raise OSError("Archived media returned more bytes than requested")
             buffer[:count] = data
         except (BotoCoreError, ClientError) as exc:
             self._close_body()
@@ -900,7 +902,8 @@ class S3RangeReader(io.RawIOBase):
             try:
                 body.close()
             except Exception:  # noqa: BLE001 - closing a dropped stream must not mask the caller
-                logger.warning("Closing an archived media stream failed")
+                with suppress(Exception):
+                    logger.warning("Closing an archived media stream failed")
 
 
 class _BoundedFile(io.RawIOBase):

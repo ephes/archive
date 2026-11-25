@@ -24,6 +24,7 @@ from urllib.request import Request
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 
+from archive.direct_media_download import supports_metadata_content_type
 from archive.json_objects import unique_json_object
 from archive.models import Item
 
@@ -285,7 +286,7 @@ def extract_metadata_from_url(url: str, timeout: int = 15) -> ExtractedMetadata:
     try:
         with _open_metadata_url(request, timeout=timeout) as response:
             content_type = response.headers.get_content_type()
-            if content_type and "html" not in content_type and "xml" not in content_type:
+            if not supports_metadata_content_type(content_type):
                 raise MetadataExtractionError(f"Unsupported content type: {content_type}")
             charset = response.headers.get_content_charset() or "utf-8"
             parser = _stream_head_from_response(response, charset, MAX_METADATA_BYTES)

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Admit only HTML and XML media types for metadata downloads, including structured
+  `+xml` types such as XHTML, RSS and Atom.
+
 - Reject direct media responses with a declared length above the byte limit before
   opening the temporary file or reading the body.
 

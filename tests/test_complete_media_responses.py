@@ -28,7 +28,9 @@ config = json.loads(sys.argv[2])
 class Response(BytesIO):
     code = config.get('status', 200)
     headers = Message()
-    headers['Content-Type'] = config.get('content_type', 'audio/mpeg')
+    content_type = config.get('content_type', 'audio/mpeg')
+    if content_type is not None:
+        headers['Content-Type'] = content_type
     for key, value in config.get('headers', []): headers[key] = value
     def getcode(self): return self.code
     def geturl(self): return 'https://example.test/media'
@@ -209,6 +211,59 @@ def test_metadata_keeps_bounded_prefix_contract(synthetic_public_response, monke
     assert metadata.extract_metadata_from_url("https://example.test/page").title == "Prefix"
     assert exchanges[0][0].returncode == 0
     assert not exchanges[0][1].parent.exists()
+
+
+@pytest.mark.parametrize(
+    "content_type,body",
+    [
+        ("Text/HTML; charset=utf-8", "<html><head><title>Metadata</title></head></html>"),
+        (
+            "application/xhtml+xml",
+            '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Metadata</title></head></html>',
+        ),
+        ("text/xml", '<?xml version="1.0"?><doc><title>Metadata</title></doc>'),
+        ("application/xml", '<?xml version="1.0"?><doc><title>Metadata</title></doc>'),
+        (
+            "application/rss+xml",
+            '<rss version="2.0"><channel><title>Metadata</title></channel></rss>',
+        ),
+        (
+            "application/atom+xml",
+            '<feed xmlns="http://www.w3.org/2005/Atom"><title>Metadata</title></feed>',
+        ),
+        ("image/svg+xml", '<svg xmlns="http://www.w3.org/2000/svg"><title>Metadata</title></svg>'),
+    ],
+)
+def test_metadata_reads_html_and_xml_types(synthetic_public_response, content_type, body):
+    synthetic_public_response({"content_type": content_type, "body": body})
+
+    assert metadata.extract_metadata_from_url("https://example.test/page").title == "Metadata"
+
+
+@pytest.mark.parametrize(
+    "content_type,reported_type",
+    [
+        ("application/nothtml", "application/nothtml"),
+        ("application/xml-wrapper", "application/xml-wrapper"),
+        ("application/rss+xml-extra", "application/rss+xml-extra"),
+        ("application/+xml", "application/+xml"),
+        ("application/not xml+xml", "application/not xml+xml"),
+        (None, "text/plain"),
+    ],
+)
+def test_metadata_refuses_unsupported_types_before_read(
+    synthetic_public_response, content_type, reported_type
+):
+    exchanges = synthetic_public_response({"content_type": content_type, "no_read": True})
+    message = f"Unsupported content type: {reported_type}"
+
+    with pytest.raises(metadata.MetadataExtractionError) as caught:
+        metadata.extract_metadata_from_url("https://example.test/page")
+
+    assert str(caught.value) == f"Could not fetch metadata: {message}"
+    result, _ = exchanges[0]
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["error"] == message
 
 
 @pytest.mark.django_db(transaction=True)

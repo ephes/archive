@@ -745,7 +745,10 @@ intact; the normal worker failure/backoff and re-queue procedure applies. Withou
 a declared length, a nonempty EOF within the byte limit is accepted; transport
 checks cannot detect a server that sends a semantically incomplete media file.
 Metadata fetching keeps its separate bounded-prefix contract and does not require
-the complete representation or a matching full-body length.
+the complete representation or a matching full-body length. It accepts `text/html`,
+`text/xml`, `application/xml`, and structured `+xml` media types such as XHTML, RSS
+and Atom. Other types are refused before the body is read. A missing `Content-Type`
+still defaults to `text/plain` and is refused.
 YouTube page downloads have a separate disposable process whose elapsed budget
 also covers retries and postprocessing, in addition to the existing socket timeout.
 

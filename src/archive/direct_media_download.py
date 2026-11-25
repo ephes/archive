@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
+
+
+def supports_metadata_content_type(content_type: str) -> bool:
+    """Admit normalized HTML and XML media types, including structured XML."""
+    # A missing Content-Type defaults to text/plain in HTTPMessage and is refused.
+    return content_type in {"text/html", "text/xml", "application/xml"} or bool(
+        re.fullmatch(r"[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*\+xml", content_type)
+    )
 
 
 class _LimitExceeded(ValueError):
@@ -72,11 +81,7 @@ def main() -> int:
             if expected_size is not None and expected_size > max_bytes:
                 raise _LimitExceeded(max_bytes)
             content_type = response.headers.get_content_type()
-            if (
-                metadata_mode
-                and content_type
-                and not any(kind in content_type for kind in ("html", "xml"))
-            ):
+            if metadata_mode and not supports_metadata_content_type(content_type):
                 raise ValueError(f"Unsupported content type: {content_type}")
             size = 0
             with Path(options["path"]).open("wb") as output:

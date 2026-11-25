@@ -88,8 +88,44 @@ def test_replay_host_matches_with_or_without_dns_root_dot(selector):
     assert f"item {adjacent.pk}:" not in report
 
 
+@pytest.mark.parametrize("selector", [" BÜCHER.test. ", "XN--BCHER-KVA.test"])
+@pytest.mark.django_db(transaction=True)
+def test_replay_matches_unicode_and_ascii_idna_hosts(selector):
+    unicode_host, ascii_host, other = Item.objects.bulk_create(
+        [
+            Item(original_url="https://bücher.test:8443/story", classification_engine_version=0),
+            Item(original_url="https://xn--bcher-kva.test./story", classification_engine_version=0),
+            Item(original_url="https://other.test/story", classification_engine_version=0),
+        ]
+    )
+    stdout = StringIO()
+    call_command("reclassify_items", "--host", selector, stdout=stdout)
+    report = stdout.getvalue()
+    assert f"WOULD UPDATE item {unicode_host.pk}:" in report
+    assert f"WOULD UPDATE item {ascii_host.pk}:" in report
+    assert f"item {other.pk}:" not in report
+    assert not Item.objects.exclude(classification_engine_version=0).exists()
+
+    call_command("reclassify_items", "--host", selector, "--apply", stdout=StringIO())
+    changed = set(
+        Item.objects.exclude(classification_engine_version=0).values_list("pk", flat=True)
+    )
+    assert changed == {unicode_host.pk, ascii_host.pk}
+
+
 @pytest.mark.parametrize(
-    "selector", ["example.test:8443", "[2001:db8::1]:8443", "2001:db8::1", ".", " . ", "..", "a.."]
+    "selector",
+    [
+        "example.test:8443",
+        "[2001:db8::1]:8443",
+        "2001:db8::1",
+        ".",
+        " . ",
+        "..",
+        "a..",
+        "bücher..test",
+        "ü" * 64 + ".test",
+    ],
 )
 def test_replay_rejects_host_with_port_or_unbracketed_ipv6(selector, django_assert_num_queries):
     with django_assert_num_queries(0):

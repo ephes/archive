@@ -55,21 +55,25 @@ def _diagnostic_classification_value(value: str) -> str:
     return "".join(parts)
 
 
+def _normalize_dns_host(host: str) -> str:
+    name = host.encode("idna").decode("ascii").lower().removesuffix(".")
+    if not re.fullmatch(r"[\w.-]+", name) or name.endswith("."):
+        raise ValueError("invalid hostname")
+    return name
+
+
 def normalize_host_selector(value: str) -> str:
     host = value.strip()
     if not host:
         raise CommandError("--host must not be blank.")
-    if re.fullmatch(r"[\w.-]+", host):
-        name = host.lower().removesuffix(".")
-        if name and not name.endswith("."):
-            return name
-        raise CommandError("--host requires a hostname without a port (bracket IPv6 addresses).")
-    if re.fullmatch(r"\[[\w.:%-]+\]", host):
-        try:
+    try:
+        if re.fullmatch(r"\[[\w.:%-]+\]", host):
             return IPv6Address(host[1:-1]).compressed
-        except ValueError:
-            pass
-    raise CommandError("--host requires a hostname without a port (bracket IPv6 addresses).")
+        return _normalize_dns_host(host)
+    except ValueError:
+        raise CommandError(
+            "--host requires a hostname without a port (bracket IPv6 addresses)."
+        ) from None
 
 
 class Command(BaseCommand):
@@ -92,7 +96,7 @@ class Command(BaseCommand):
             action="append",
             default=[],
             help=(
-                "Match an original URL hostname across ports and optional DNS root dots. "
+                "Match an original URL hostname across ports, IDNA spellings and DNS root dots. "
                 "Bracket IPv6 addresses."
             ),
         )
@@ -276,7 +280,7 @@ class Command(BaseCommand):
             if host and ":" in host:
                 host = IPv6Address(host).compressed
             elif host:
-                host = host.removesuffix(".")
+                host = _normalize_dns_host(host)
         except ValueError:
             raise CommandError(f"Cannot select item {item_id}: invalid URL.") from None
         return host in allowed_hosts

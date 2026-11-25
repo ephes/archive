@@ -1243,8 +1243,9 @@ The command does not delete stored media.
 - use selectors such as `--host <host>`, `--rule <rule>`, `--empty-rule`, `--empty-evidence`, or
   `--stale-only` to narrow a historical replay pass. Every explicit `--host` must be
   nonblank after trimming whitespace. Hostnames match across ports. DNS names match
-  case-insensitively with or without one trailing root dot; a selector that is only dots or
-  ends in two dots is rejected. Use a hostname without a port,
+  case-insensitively across Unicode and ASCII IDNA spellings and with or without
+  one trailing root dot. Invalid selectors are rejected before scanning items.
+  Use a hostname without a port,
   or a bracketed IPv6 address such as `--host '[2001:db8::1]'`.
 - use `--limit N` for a strictly positive cap after filtering; zero/negative values
   fail before selection or mutation. Omitting the limit inspects all matches.

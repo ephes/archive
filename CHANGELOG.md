@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reject direct media responses with a declared length above the byte limit before
+  opening the temporary file or reading the body.
+
 - Normalize batch transcript evidence text once per value during coverage validation.
 - Sort coverage intervals in place to reduce peak allocation on large transcripts.
 

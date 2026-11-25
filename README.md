@@ -737,8 +737,10 @@ are accepted; the configured byte limit still applies. Video extraction has its
 own timeout; the download budget does not include extraction or storage writes.
 Full direct-media downloads require HTTP 200 without `Content-Range`, a nonempty
 body and, when supplied, one valid nonnegative `Content-Length` matching the bytes
-read through EOF. Unrequested partial responses, ambiguous lengths and premature
-EOF fail before extraction or storage upload. Previously archived objects remain
+read through EOF. A declared length above the download's byte limit is refused
+before opening the temporary output or reading the body. The byte limit also
+applies to the bytes actually read. Unrequested partial responses, ambiguous lengths
+and premature EOF fail before extraction or storage upload. Previously archived objects remain
 intact; the normal worker failure/backoff and re-queue procedure applies. Without
 a declared length, a nonempty EOF within the byte limit is accepted; transport
 checks cannot detect a server that sends a semantically incomplete media file.

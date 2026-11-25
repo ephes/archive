@@ -11,7 +11,10 @@ from urllib.request import Request
 
 
 class _LimitExceeded(ValueError):
-    """The body grew past the caller's byte budget."""
+    """The declared or observed body size exceeds the caller's byte budget."""
+
+    def __init__(self, max_bytes: int) -> None:
+        super().__init__(f"Media source exceeded the configured {max_bytes}-byte archive limit")
 
 
 def _load_safe_fetch():
@@ -65,6 +68,9 @@ def main() -> int:
         with safe_fetch.open_public_url(request, timeout=options["timeout"]) as response:
             metadata_mode = options.get("metadata", False)
             expected_size = None if metadata_mode else _full_media_length(response)
+            max_bytes = options["max_bytes"]
+            if expected_size is not None and expected_size > max_bytes:
+                raise _LimitExceeded(max_bytes)
             content_type = response.headers.get_content_type()
             if (
                 metadata_mode
@@ -74,19 +80,14 @@ def main() -> int:
                 raise ValueError(f"Unsupported content type: {content_type}")
             size = 0
             with Path(options["path"]).open("wb") as output:
-                while not metadata_mode or size < options["max_bytes"]:
-                    read_size = (
-                        min(8192, options["max_bytes"] - size) if metadata_mode else 1024 * 1024
-                    )
+                while not metadata_mode or size < max_bytes:
+                    read_size = min(8192, max_bytes - size) if metadata_mode else 1024 * 1024
                     chunk = response.read(read_size)
                     if not chunk:
                         break
                     size += len(chunk)
-                    if size > options["max_bytes"]:
-                        raise _LimitExceeded(
-                            "Media source exceeded the configured "
-                            f"{options['max_bytes']}-byte archive limit"
-                        )
+                    if size > max_bytes:
+                        raise _LimitExceeded(max_bytes)
                     output.write(chunk)
             if not metadata_mode:
                 if not size:

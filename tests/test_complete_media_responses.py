@@ -167,6 +167,33 @@ def test_public_complete_response_is_published(synthetic_public_response, header
     assert not exchanges[0][1].parent.exists()
 
 
+def test_public_oversized_declared_length_is_refused_before_read(synthetic_public_response):
+    exchanges = synthetic_public_response(
+        {"headers": [("Content-Length", "4")], "body": "abcd", "no_read": True}
+    )
+    request = Request("https://example.test/audio.mp3")
+
+    with pytest.raises(media_archival.MediaSizeLimitError, match="3-byte archive limit"):
+        with media_archival._open_direct_media(request, timeout=2, max_bytes=3):
+            pytest.fail("oversized download must not be opened")
+
+    result, path = exchanges[0]
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {
+        "error": "Media source exceeded the configured 3-byte archive limit",
+        "limit_exceeded": True,
+    }
+    assert not path.parent.exists()
+
+
+def test_public_declared_length_equal_to_limit_is_accepted(synthetic_public_response):
+    synthetic_public_response({"headers": [("Content-Length", "3")]})
+    request = Request("https://example.test/audio.mp3")
+
+    with media_archival._open_direct_media(request, timeout=2, max_bytes=3) as response:
+        assert response.read() == b"abc"
+
+
 def test_metadata_keeps_bounded_prefix_contract(synthetic_public_response, monkeypatch):
     body = "<head><title>Prefix</title></head><body>"
     exchanges = synthetic_public_response(

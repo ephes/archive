@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Validate health snapshot reference clocks and UTC window bounds before querying.
 - Close the SQLite read-snapshot connection directly when rollback fails.
 - Preserve upstream HTTP error statuses without reading or staging error bodies.
 - Page selected admin reprocessing IDs before loading current items under row locks.

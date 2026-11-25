@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import importlib
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 from django.apps import apps as django_apps
 from django.db import DatabaseError, connection, transaction
+from django.test.utils import CaptureQueriesContext
 from test_media_publication import fake_video_download
 
 from archive.models import (
@@ -81,7 +82,27 @@ def test_window_counts_exclude_older_events() -> None:
 
 
 @pytest.mark.django_db
-def test_window_counts_include_both_boundaries_and_exclude_future_events() -> None:
+@pytest.mark.parametrize(
+    "now",
+    [
+        NOW.replace(tzinfo=None),
+        datetime.min.replace(tzinfo=UTC),
+        datetime(1, 1, 2, tzinfo=timezone(timedelta(hours=1))),
+        datetime.max.replace(tzinfo=timezone(timedelta(hours=-1))),
+    ],
+)
+def test_snapshot_rejects_invalid_reference_before_any_query(now):
+    _record(YOUTUBE, True, 1, hours_ago=1)
+
+    with CaptureQueriesContext(connection) as queries:
+        with pytest.raises(ValueError, match="^Invalid processing health reference clock$"):
+            processing_health_snapshot(now)
+    assert len(queries) == 0
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("offset_hours", [0, 3])
+def test_window_counts_include_both_boundaries_and_exclude_future_events(offset_hours) -> None:
     for occurred_at in (
         NOW - timedelta(hours=24, microseconds=1),
         NOW - timedelta(hours=24),
@@ -94,8 +115,11 @@ def test_window_counts_include_both_boundaries_and_exclude_future_events() -> No
     future = NOW + timedelta(seconds=1)
     record_step_outcome(YOUTUBE, succeeded=False, item_id=2, now=future)
 
-    step = processing_health_snapshot(now=NOW)["steps"][YOUTUBE]
+    reference = NOW.astimezone(timezone(timedelta(hours=offset_hours)))
+    snapshot = processing_health_snapshot(now=reference)
+    step = snapshot["steps"][YOUTUBE]
 
+    assert snapshot["generated_at"] == reference.isoformat()
     assert step["successes"] == 2
     assert step["failures"] == 2
     assert step["last_failure_at"] == future.isoformat()

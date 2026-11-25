@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import suppress
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from django.db import router, transaction
@@ -132,12 +132,18 @@ def _prune_events(*, cutoff: datetime, using: str = "default") -> None:
 def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:
     """Bound event totals by now, while reading the current durable streak state."""
     now = now or timezone.now()
-    window_start = now - HEALTH_WINDOW
+    try:
+        if timezone.is_naive(now):
+            raise ValueError
+        reference = now.astimezone(UTC)
+        window_start = reference - HEALTH_WINDOW
+    except (OverflowError, ValueError):
+        raise ValueError("Invalid processing health reference clock") from None
     with snapshot_read_transaction():
         states = {state.step: state for state in ProcessingStepState.objects.all()}
         counts: dict[tuple[str, bool], int] = {
             (row["step"], row["succeeded"]): row["total"]
-            for row in ProcessingEvent.objects.filter(occurred_at__range=(window_start, now))
+            for row in ProcessingEvent.objects.filter(occurred_at__range=(window_start, reference))
             .values("step", "succeeded")
             .annotate(total=Count("id"))
         }
@@ -163,10 +169,10 @@ def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:
             "successes": counts.get((step, True), 0),
             "failures": counts.get((step, False), 0),
             "last_success_at": _isoformat(last_success_at),
-            "last_success_age_seconds": _age_seconds(last_success_at, now),
+            "last_success_age_seconds": _age_seconds(last_success_at, reference),
             "last_failure_at": _isoformat(last_failure_at),
             "failing_since": _isoformat(failing_since),
-            "failing_for_seconds": _age_seconds(failing_since, now) or 0,
+            "failing_for_seconds": _age_seconds(failing_since, reference) or 0,
             "failing_items": failing_counts.get(step, 0),
         }
 

@@ -995,6 +995,9 @@ Per step:
 An explicit `now` passed to `processing_health_snapshot` sets the event window and
 the reference for age calculations. Latest timestamps and streak membership
 reflect the current durable state in the read snapshot.
+The reference must be timezone-aware, with both ends of the elapsed 24-hour
+window representable in UTC. Invalid references raise `ValueError` before any
+snapshot queries run.
 
 After each outcome commits, the worker prunes at most 100 events older than 30 days
 on the same database, oldest timestamp first (then primary key). A pruning failure

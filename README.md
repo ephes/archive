@@ -328,6 +328,8 @@ Malformed dates and conversions outside that range return `400` with
 Both POST and PATCH authenticate before reading the body. The JSON body is limited
 to 1 MiB (1,048,576 bytes), or the Django upload memory limit if lower. Oversized
 bodies return `413` with `{"error":"Request body too large"}` before JSON decoding.
+An interrupted body read returns `400` with `{"error":"Could not read request body"}`
+before any capture or update work.
 Malformed JSON, invalid JSON byte
 encodings, duplicate object members (including nested unknown fields), and non-object
 bodies return `400` with `{"error":"Invalid JSON"}`;
@@ -1321,9 +1323,12 @@ inside one transaction, and deletes only when both are absent. `--min-age-second
 adds an age grace (default 3600); negative values are rejected before any work,
 and zero explicitly disables age grace while retaining reservations and reference
 checks. With grace enabled, unknown or unusable modification times (including naive
-timestamps) retain the object and the sweep continues. Objects exactly at the age
-cutoff are eligible. Dry-run lists snapshot candidates without deleting anything; delete mode
-may skip candidates that are reserved or have become referenced. Expected filesystem
+timestamps) defer the candidate and the sweep continues. The summary reports
+`age_unknown` and `too_young` counts. A nonzero `age_unknown` also emits a fixed
+diagnostic and suppresses the success banner. Objects exactly at the age cutoff
+are eligible. Dry-run lists snapshot candidates without checking age or deleting
+anything. Delete mode may skip candidates that are reserved or have become referenced.
+Expected filesystem
 (`OSError`) and S3 SDK deletion failures retain the failed candidate and continue with
 independent candidates. The final summary includes `failed=<count>`; any such failure
 suppresses the success banner and raises a command error (CLI exit status 1), even if

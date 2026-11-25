@@ -331,6 +331,7 @@ def test_orphan_age_errors_retain_objects_and_continue(monkeypatch):
             raise OverflowError("unusable backend timestamp")
 
     times = {
+        "missing": FileNotFoundError("private storage details"),
         "naive": datetime(2020, 1, 1),
         "not-date": "yesterday",
         "null": None,
@@ -340,13 +341,24 @@ def test_orphan_age_errors_retain_objects_and_continue(monkeypatch):
         "young": now,
         "future": now + timedelta(days=1),
     }
+
+    def modified_time(name):
+        value = times[name]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
     storage = storages["archive_media"]
     for name in times:
         _save_archive_media(name)
     monkeypatch.setattr(command.timezone, "now", lambda: now)
-    monkeypatch.setattr(storage, "get_modified_time", times.__getitem__)
-    call_command("cleanup_archive_media_orphans", "--delete", stdout=StringIO())
+    monkeypatch.setattr(storage, "get_modified_time", modified_time)
+    stdout, stderr = StringIO(), StringIO()
+    call_command("cleanup_archive_media_orphans", "--delete", stdout=stdout, stderr=stderr)
     assert {name for name in times if not storage.exists(name)} == {"old", "cutoff"}
+    assert "deleted=2 mode=delete failed=0 too_young=2 age_unknown=5" in stdout.getvalue()
+    assert "Deleted " not in stdout.getvalue()
+    assert stderr.getvalue() == "Deferred 5 orphaned archive media candidates (age_unknown).\n"
 
 
 @pytest.mark.django_db(transaction=True)

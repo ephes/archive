@@ -41,6 +41,7 @@ class Command(BaseCommand):
         delete_mode = options["delete"]
         mode_label = "delete" if delete_mode else "dry-run"
         orphaned_count = deleted_count = failed_count = 0
+        too_young_count = unknown_age_count = 0
 
         # Spool to disk before doing anything destructive. This gives sorted,
         # unique output with bounded memory and no deletions on incomplete listing.
@@ -71,22 +72,34 @@ class Command(BaseCommand):
             for (path,) in objects:
                 orphaned_count += 1
                 self.stdout.write(f"ORPHAN {path}")
-                if delete_mode and self._is_old_enough(path, min_age):
-                    # Recheck reservations and references in the final transaction.
-                    try:
-                        deleted_count += len(delete_unreferenced_archive_media_paths((path,)))
-                    except (OSError, BotoCoreError, ClientError):
-                        # Supported filesystem/S3 storage failures are independent.
-                        # Database and programming errors must still abort the run.
-                        failed_count += 1
-                        self.stderr.write(
-                            f"Storage deletion failed for candidate {orphaned_count} "
-                            "(storage_delete_failed)."
-                        )
+                if not delete_mode:
+                    continue
+                old_enough = self._is_old_enough(path, min_age)
+                if old_enough is None:
+                    unknown_age_count += 1
+                    continue
+                if not old_enough:
+                    too_young_count += 1
+                    continue
+                # Recheck reservations and references in the final transaction.
+                try:
+                    deleted_count += len(delete_unreferenced_archive_media_paths((path,)))
+                except (OSError, BotoCoreError, ClientError):
+                    # Supported filesystem/S3 storage failures are independent.
+                    # Database and programming errors must still abort the run.
+                    failed_count += 1
+                    self.stderr.write(
+                        f"Storage deletion failed for candidate {orphaned_count} "
+                        "(storage_delete_failed)."
+                    )
 
+        if unknown_age_count:
+            self.stderr.write(
+                f"Deferred {unknown_age_count} orphaned archive media candidates (age_unknown)."
+            )
         if not orphaned_count:
             self.stdout.write("No orphaned archive media objects found.")
-        elif delete_mode and not failed_count:
+        elif delete_mode and not (failed_count or unknown_age_count):
             deleted_label = "object" if deleted_count == 1 else "objects"
             self.stdout.write(
                 self.style.SUCCESS(
@@ -102,7 +115,9 @@ class Command(BaseCommand):
             f"orphaned={orphaned_count} "
             f"deleted={deleted_count} "
             f"mode={mode_label} "
-            f"failed={failed_count}"
+            f"failed={failed_count} "
+            f"too_young={too_young_count} "
+            f"age_unknown={unknown_age_count}"
         )
         if failed_count:
             raise CommandError(
@@ -110,7 +125,7 @@ class Command(BaseCommand):
                 "retry the sweep."
             )
 
-    def _is_old_enough(self, path: str, min_age_seconds: int) -> bool:
+    def _is_old_enough(self, path: str, min_age_seconds: int) -> bool | None:
         if min_age_seconds <= 0:
             return True
         try:
@@ -119,4 +134,4 @@ class Command(BaseCommand):
         except Exception:
             # Unknown age (unsupported backend, object already gone, backend
             # error such as an S3 404): keep the object and continue the sweep.
-            return False
+            return None

@@ -245,6 +245,28 @@ def test_capture_rejects_oversized_body_before_decoding(
         work.assert_not_called()
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize("method", ["POST", "PATCH"])
+def test_interrupted_capture_body_is_rejected_before_work(rf, monkeypatch, no_capture, method):
+    item = Item.objects.create(original_url="https://example.com/existing")
+    before = list(Item.objects.values())
+    path = "/api/items/" if method == "POST" else f"/api/items/{item.pk}/"
+    prefix = b'{"url":"https://example.com/new","kind":"quote"}'
+    request = rf.generic(method, path, prefix, content_type="application/json", headers=HEADERS)
+    stream = Mock()
+    stream.read.side_effect = [prefix, ConnectionResetError("private transport details")]
+    monkeypatch.setattr(request, "_stream", stream)
+    route = resolve(path)
+    response = route.func(request, **route.kwargs)
+
+    assert response.status_code == 400
+    assert json.loads(response.content) == {"error": "Could not read request body"}
+    assert stream.read.call_count == 2
+    assert list(Item.objects.values()) == before
+    for work in no_capture:
+        work.assert_not_called()
+
+
 @pytest.mark.parametrize("field", FIELDS)
 @pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
 def test_capture_rejects_lone_surrogates_before_work(client, no_capture, field, surrogate):

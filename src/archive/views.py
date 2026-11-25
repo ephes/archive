@@ -785,7 +785,10 @@ def _read_capture_payload(request: HttpRequest) -> dict | JsonResponse:
 
     body = bytearray()
     while len(body) <= limit:
-        chunk = request.read(limit + 1 - len(body))
+        try:
+            chunk = request.read(limit + 1 - len(body))
+        except OSError:  # Includes Django's UnreadablePostError.
+            return JsonResponse({"error": "Could not read request body"}, status=400)
         if not chunk:
             break
         body.extend(chunk)

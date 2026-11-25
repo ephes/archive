@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Return a fixed JSON 400 when an authenticated capture request body read fails.
+- Report deferred orphan candidates with unknown ages separately from young objects.
+
 - Keep later commit callbacks running when item-deletion media cleanup and its
   warning both fail.
 - Limit capture deduplication to the inclusive interval from the configured

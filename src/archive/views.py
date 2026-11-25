@@ -18,7 +18,7 @@ from django.core.exceptions import ValidationError
 from django.core.paginator import EmptyPage, Paginator
 from django.core.validators import URLValidator
 from django.db import connection, transaction
-from django.db.models import Q, Value
+from django.db.models import Func, Q, Value
 from django.db.models.functions import Coalesce, NullIf, Substr, Trim, TruncWeek
 from django.http import (
     Http404,
@@ -65,6 +65,12 @@ logger = logging.getLogger(__name__)
 
 url_validator = URLValidator()
 FEED_PAGE_SIZE = 50
+# Match Python str.strip(), which defines blank titles in podcast eligibility.
+_FEED_TITLE_WHITESPACE = (
+    "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
 WEEK_PAGE_SIZE = 50
 OVERVIEW_PAGE_SIZE = 50
 SEARCH_PAGE_SIZE = 20
@@ -103,7 +109,7 @@ def _build_week_navigation(items) -> list:
 def _public_feed_items():
     return (
         Item.objects.filter(is_public=True, published_at__isnull=False)
-        .annotate(feed_title=Trim("title"))
+        .alias(feed_title=Func("title", Value(_FEED_TITLE_WHITESPACE), function="TRIM"))
         .exclude(feed_title="")
         .order_by("-published_at", "-id")
     )

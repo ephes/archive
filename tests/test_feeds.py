@@ -101,17 +101,23 @@ def test_rss_feed_includes_only_eligible_public_items_and_uses_detail_urls(clien
 
 
 @pytest.mark.django_db
-def test_rss_feed_excludes_whitespace_only_titles(client) -> None:
+def test_rss_feed_excludes_whitespace_only_titles(client, monkeypatch) -> None:
+    monkeypatch.setattr("archive.views.FEED_PAGE_SIZE", 1)
     Item.objects.create(
-        original_url="https://example.com/whitespace",
-        title="   ",
+        original_url="https://example.com/titled",
+        title="Titled item",
     )
+    for index, title in enumerate(("   ", "\t\n\r", "\u00a0\u2003\u3000", " \t\u202f ")):
+        item = Item.objects.create(original_url=f"https://example.com/blank/{index}")
+        Item.objects.filter(pk=item.pk).update(title=title)
 
     response = client.get(reverse("archive:rss-feed"))
 
     assert response.status_code == 200
     channel = parse_channel(response.content)
-    assert channel.findall("item") == []
+    assert [item.findtext("title") for item in channel.findall("item")] == ["Titled item"]
+    assert [link.get("rel") for link in channel.findall("atom:link", ATOM_NS)] == ["self"]
+    assert client.get(reverse("archive:rss-feed-page", kwargs={"page": 2})).status_code == 404
 
 
 @pytest.mark.django_db

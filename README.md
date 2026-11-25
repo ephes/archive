@@ -87,6 +87,8 @@ Public endpoints:
 
 The numbered first page (`/feeds/rss/page/1.xml` or `/feeds/podcast/page/1.xml`)
 permanently redirects to its canonical feed URL before any feed item lookup.
+The general RSS feed excludes empty and whitespace-only titles before counting
+and selecting pages. Tabs and Unicode whitespace follow Python’s `str.strip()`.
 
 ## Public search
 

@@ -132,6 +132,10 @@ def test_poll_does_not_admit_a_transcript_normalized_after_deadline(monkeypatch,
         "307",
         "500",
         "limit",
+        "request-close-success",
+        "request-close-limit",
+        "request-close-http",
+        "request-close-transport",
         "media",
         "wrong-type",
         "oversized-header",
@@ -144,6 +148,7 @@ def test_poll_does_not_admit_a_transcript_normalized_after_deadline(monkeypatch,
     ],
 )
 def test_real_child_transport_round_trip(monkeypatch, case):
+    import json
     from urllib.error import HTTPError
 
     helper = Path(upstream_http.__file__).with_name("upstream_download.py")
@@ -151,10 +156,37 @@ def test_real_child_transport_round_trip(monkeypatch, case):
 import runpy, sys
 from email.message import Message
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError
 ns = runpy.run_path(sys.argv[1])
 case = sys.argv[2]
+if case.startswith('request-close-'):
+    retired = False
+
+    def emit_receipt(*args, **kwargs):
+        assert retired, 'receipt published before request close'
+        print(*args, **kwargs)
+
+    class RequestFile(BytesIO):
+        def close(self):
+            global retired
+            if not self.closed:
+                super().close()
+                retired = True
+                print('synthetic request close attempted', file=sys.stderr)
+                raise OSError('synthetic request close fault')
+
+    class HelperPath(type(Path())):
+        def open(self, mode):
+            if mode == 'rb':
+                with super().open(mode) as request_file:
+                    return RequestFile(request_file.read())
+            return super().open(mode)
+
+    ns['main'].__globals__['Path'] = HelperPath
+    ns['main'].__globals__['print'] = emit_receipt
+
 class Response(BytesIO):
     code = 200
     headers = Message()
@@ -185,6 +217,10 @@ def open_url(request, timeout):
     assert request.get_header('Authorization') == 'Bearer SYNTHETIC'
     body = b'x' * (9 * 1024 * 1024) if case == 'media' else b'response'
     response = Response(body)
+    if case == 'request-close-transport':
+        raise OSError('synthetic transport failure')
+    if case == 'request-close-http':
+        raise HTTPError(request.full_url, 503, 'Synthetic', response.headers, response)
     if case in ('307', '500'):
         raise HTTPError(request.full_url, int(case), 'Synthetic', response.headers, response)
     return response
@@ -196,6 +232,18 @@ raise SystemExit(ns['main']())
 
     def run(command, **kwargs):
         result = real_run([sys.executable, "-I", "-c", script, str(helper), case], **kwargs)
+        if case.startswith("request-close-"):
+            assert result.stderr == "synthetic request close attempted\n"
+            receipt = json.loads(result.stdout)
+            if case == "request-close-success":
+                assert result.returncode == 0
+                assert receipt["status"] == 200
+            elif case == "request-close-http":
+                assert result.returncode == 0
+                assert receipt == {"http_error": 503}
+            else:
+                assert result.returncode == 1
+                assert set(receipt) == {"error"}
         if case == "irrelevant-headers":
             assert len(result.stdout) < 256
         return result
@@ -207,7 +255,7 @@ raise SystemExit(ns['main']())
         headers={"Authorization": "Bearer SYNTHETIC"},
     )
     options = {"max_bytes": 10 * 1024 * 1024, "audio": True} if case == "media" else {}
-    if case == "limit":
+    if case in ("limit", "request-close-limit"):
         options = {"max_bytes": 3}
     if case in (
         "wrong-type",
@@ -218,18 +266,28 @@ raise SystemExit(ns['main']())
         "parameterized-type",
     ):
         options = {"audio": True}
-    if case in ("307", "500"):
+    if case in ("307", "500", "request-close-http"):
         with pytest.raises(HTTPError) as caught:
             with upstream_http.open_authenticated_url(request, timeout=5, **options):
                 pytest.fail("HTTP error accepted")
         with caught.value as response:
-            assert response.code == int(case)
+            assert response.code == (503 if case == "request-close-http" else int(case))
             assert response.read() == b""
     elif case.startswith("duplicate-type"):
         with pytest.raises(OSError, match="ambiguous Content-Type"):
             with upstream_http.open_authenticated_url(request, timeout=5, **options):
                 pytest.fail("ambiguous Content-Type accepted")
-    elif case in ("limit", "wrong-type", "oversized-header", "oversized-receipt"):
+    elif case == "request-close-transport":
+        with pytest.raises(OSError, match="^Upstream transport failed or response exceeded limit$"):
+            with upstream_http.open_authenticated_url(request, timeout=5, **options):
+                pytest.fail("transport failure accepted")
+    elif case in (
+        "limit",
+        "wrong-type",
+        "oversized-header",
+        "oversized-receipt",
+        "request-close-limit",
+    ):
         with pytest.raises(OSError, match=("not MP3" if case == "wrong-type" else "exceeded")):
             with upstream_http.open_authenticated_url(request, timeout=5, **options):
                 pytest.fail("invalid body accepted")

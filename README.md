@@ -1695,6 +1695,10 @@ nonstandard numeric literals (`NaN`, `Infinity`, `-Infinity`), numbers that over
 infinity, malformed encoding, JSON recursion and integer-decoding limits become
 fixed stage errors. Responses close before worker failure/retry bookkeeping.
 Invalid output publishes no generated fields or audio artifacts.
+The helper closes its staged request-body read handle before sending one terminal
+receipt. A local close failure preserves an already validated upstream response,
+so it alone cannot trigger a repeat of the remote operation. HTTP statuses and
+primary transport or response failures also retain their existing categories.
 
 Normal stored errors and logs include HTTP status or a fixed transport/limit
 category. They omit upstream error bodies, failed-job messages, raw transport

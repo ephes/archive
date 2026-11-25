@@ -55,6 +55,7 @@
 
 - Reject `NaN`, `Infinity`, and `-Infinity` in upstream JSON before consuming
   responses, using the existing invalid-JSON diagnostics.
+- Reject exponent notation that overflows to infinity with the same invalid-JSON diagnostics.
 
 - Reject lone Unicode surrogates in capture fields with a field-specific 400
   before classification or storage.

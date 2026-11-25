@@ -6,7 +6,24 @@ from urllib.request import Request
 import pytest
 
 from archive import article_audio, summaries, transcriptions
-from archive.api_responses import MAX_API_ERROR_BYTES, MAX_API_RESPONSE_BYTES
+from archive.api_responses import (
+    MAX_API_ERROR_BYTES,
+    MAX_API_RESPONSE_BYTES,
+    InvalidAPIJSON,
+    decode_api_json,
+)
+
+
+def test_decode_api_json_accepts_finite_exponents_near_float_limit():
+    assert decode_api_json(b'{"numbers":[1.79e308,-1.79e308]}') == {
+        "numbers": [1.79e308, -1.79e308]
+    }
+
+
+@pytest.mark.parametrize("payload", [b'{"numbers":[1e309]}', '{"numbers":[-1e309]}'])
+def test_decode_api_json_rejects_overflowed_exponents(payload):
+    with pytest.raises(InvalidAPIJSON, match="^Invalid upstream JSON$"):
+        decode_api_json(payload)
 
 
 class Response(io.BytesIO):

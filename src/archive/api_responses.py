@@ -1,6 +1,7 @@
 """Bound reads from operator-configured upstream APIs."""
 
 import json
+import math
 from typing import Never, Protocol
 from urllib.error import HTTPError, URLError
 
@@ -33,12 +34,20 @@ def _reject_nonstandard_number(_literal: str) -> Never:
     raise ValueError("Nonstandard JSON number")
 
 
+def _parse_finite_float(literal: str) -> float:
+    value = float(literal)
+    if not math.isfinite(value):
+        raise ValueError("JSON number exceeds finite float range")
+    return value
+
+
 def decode_api_json(payload: bytes | str):
     try:
         text = payload.decode("utf-8") if isinstance(payload, bytes) else payload
         return json.loads(
             text,
             object_pairs_hook=unique_json_object,
+            parse_float=_parse_finite_float,
             parse_constant=_reject_nonstandard_number,
         )
     except (ValueError, RecursionError):

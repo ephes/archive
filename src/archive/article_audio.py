@@ -98,12 +98,12 @@ def build_article_audio_script(
     remaining = max_chars if max_chars >= 0 else max(0, length + max_chars)
     prefix = []
     for text, start, end in parts:
-        if remaining == 0:
-            break
         stop = min(end, start + remaining)
         prefix.append(text[start:stop])
+        if stop < end:
+            return _trim_partial_script("".join(prefix), text[stop])
         remaining -= stop - start
-    return _trim_partial_script("".join(prefix))
+    return "".join(prefix)
 
 
 def _script_part_bounds(value: str) -> tuple[int, int]:
@@ -303,13 +303,14 @@ def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
         ) from None
 
 
-def _trim_partial_script(prefix: str) -> str:
-    truncated = prefix.rstrip()
-    whitespace_positions = [truncated.rfind(char) for char in (" ", "\n", "\t")]
-    last_whitespace = max(whitespace_positions)
-    if last_whitespace > 0:
-        return truncated[:last_whitespace].rstrip()
-    return truncated
+def _trim_partial_script(prefix: str, next_char: str) -> str:
+    if not prefix or prefix[-1].isspace() or next_char.isspace():
+        return prefix.rstrip()
+
+    for index in range(len(prefix) - 1, -1, -1):
+        if prefix[index].isspace():
+            return prefix[:index].rstrip()
+    return prefix
 
 
 def _synthesis_job_payload(item: Item, text: str) -> dict[str, object]:

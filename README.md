@@ -1639,6 +1639,10 @@ HEAD without body reads, and storage-reader cleanup after a client disconnects.
 
 ### Synthesis task identity
 
+The script character cap keeps complete words when it lands at a word boundary.
+If the cap splits a word, the script ends at the preceding complete word when
+one fits. A first word longer than the cap is kept as a capped prefix.
+
 Article-audio `task_ref` v3 hashes the canonical submitted job payload, including
 text, model, voice, language, output format and backend settings. Identical requests
 retain stable identity; changing synthesis configuration intentionally creates a

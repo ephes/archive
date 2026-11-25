@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import tracemalloc
 
 import pytest
@@ -97,17 +98,19 @@ def test_build_article_audio_script_applies_max_chars() -> None:
 
 @pytest.mark.parametrize("title", [" \u2003A title \n", " \t"])
 def test_article_audio_caps_match_the_complete_script_prefix(title):
-    item = Item(kind=ItemKind.ARTICLE, title=title, long_summary=" \tBody\ttext words.\u2003")
-    complete = "\n\n".join(part for part in (title.strip(), "Body\ttext words.") if part)
+    item = Item(kind=ItemKind.ARTICLE, title=title, long_summary=" \tBody\ttext\u2003words.\u2003")
+    complete = "\n\n".join(part for part in (title.strip(), "Body\ttext\u2003words.") if part)
     assert build_article_audio_script(item) == complete
 
     for cap in range(-3, len(complete) + 2):
         expected = complete
         if len(complete) > cap:
             expected = complete[:cap].rstrip()
-            boundary = max(expected.rfind(char) for char in (" ", "\n", "\t"))
-            if boundary > 0:
-                expected = expected[:boundary].rstrip()
+            limit = len(complete[:cap])
+            for word in re.finditer(r"\S+", complete):
+                if 0 < word.start() < limit < word.end():
+                    expected = complete[: word.start()].rstrip()
+                    break
         assert build_article_audio_script(item, max_chars=cap) == expected, cap
 
 
@@ -124,7 +127,7 @@ def test_capped_article_audio_script_avoids_copying_a_large_note():
     finally:
         tracemalloc.stop()
 
-    assert script == "Synthetic title\n\nbody body"
+    assert script == "Synthetic title\n\nbody body body"
     assert peak < 64 * 1024
 
 
@@ -193,8 +196,9 @@ def test_generate_item_article_audio_submits_batch_job(monkeypatch, settings) ->
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("cap", [25, 26, 27, 28])
 def test_generate_item_article_audio_truncates_script_to_configured_limit(
-    monkeypatch, settings
+    monkeypatch, settings, cap
 ) -> None:
     item = Item.objects.create(
         original_url="https://example.com/article",
@@ -205,7 +209,7 @@ def test_generate_item_article_audio_truncates_script_to_configured_limit(
     settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = "tts-token"
     settings.ARCHIVE_ARTICLE_AUDIO_API_BASE = "https://voxhelm.example.test/v1"
     settings.ARCHIVE_ARTICLE_AUDIO_MODEL = "tts-1"
-    settings.ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS = 32
+    settings.ARCHIVE_ARTICLE_AUDIO_SCRIPT_MAX_CHARS = cap
 
     def fake_extract_summary_source_from_url(url, timeout, *, max_chars):
         return SummarySource(extracted_text="Original article body text that keeps going.")
@@ -213,9 +217,8 @@ def test_generate_item_article_audio_truncates_script_to_configured_limit(
     def fake_urlopen(request, timeout):
         payload = json.loads(request.data.decode("utf-8"))
         script = payload["input"]["text"]
-        assert len(script) <= 32
-        assert script.startswith("Article headline")
-        assert script != "Article headline\n\nOriginal article body text that keeps going."
+        assert len(script) <= cap
+        assert script == ("Article headline" if cap == 25 else "Article headline\n\nOriginal")
         return _FakeResponse(
             json.dumps({"id": "job-123", "state": "queued"}).encode("utf-8"),
             content_type="application/json",

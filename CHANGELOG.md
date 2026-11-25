@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Read processing health projections in one snapshot on the health writer database.
 - Match DNS hostnames with or without a trailing root dot in `reclassify_items --host`.
 - Recognize numbered Markdown list markers in podcast-feed eligibility for generated article audio.
 - Use four-digit ISO week-years in week tokens for dates before year 1000.

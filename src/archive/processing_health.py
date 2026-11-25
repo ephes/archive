@@ -133,7 +133,9 @@ def _prune_events(*, cutoff: datetime, using: str = "default") -> None:
     ProcessingEvent.objects.using(using).filter(pk__in=expired).delete()
 
 
-def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:
+def processing_health_snapshot(
+    now: datetime | None = None, *, using: str | None = None
+) -> dict[str, Any]:
     """Bound event totals by now, while reading the current durable streak state."""
     now = now or timezone.now()
     try:
@@ -144,16 +146,16 @@ def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:
     except (OverflowError, ValueError):
         raise ValueError("Invalid processing health reference clock") from None
     supported_steps = ProcessingStep.values
-    with snapshot_read_transaction():
+    using = using or router.db_for_write(ProcessingStepState)
+    with snapshot_read_transaction(using=using):
         states = {
             state.step: state
-            for state in ProcessingStepState.objects.filter(step__in=supported_steps)
+            for state in ProcessingStepState.objects.using(using).filter(step__in=supported_steps)
         }
         counts: dict[tuple[str, bool], int] = {
             (row["step"], row["succeeded"]): row["total"]
-            for row in ProcessingEvent.objects.filter(
-                step__in=supported_steps, occurred_at__range=(window_start, reference)
-            )
+            for row in ProcessingEvent.objects.using(using)
+            .filter(step__in=supported_steps, occurred_at__range=(window_start, reference))
             .values("step", "succeeded")
             .annotate(total=Count("id"))
         }
@@ -164,7 +166,8 @@ def processing_health_snapshot(now: datetime | None = None) -> dict[str, Any]:
             # Membership already enforces each state's cutoff and resets on success.
             failing_counts = {
                 row["step"]: row["total"]
-                for row in ProcessingFailureItem.objects.filter(step__in=active_steps)
+                for row in ProcessingFailureItem.objects.using(using)
+                .filter(step__in=active_steps)
                 .values("step")
                 .annotate(total=Count("item_id"))
             }

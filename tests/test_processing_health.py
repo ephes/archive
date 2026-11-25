@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 from django.apps import apps as django_apps
-from django.db import DatabaseError, connection, transaction
+from django.db import DatabaseError, connection, connections, transaction
 from django.test.utils import CaptureQueriesContext
 from test_media_publication import fake_video_download
 
@@ -71,6 +71,53 @@ def test_snapshot_reports_every_step_with_empty_state() -> None:
             "failing_for_seconds": 0,
             "failing_items": 0,
         }
+
+
+@pytest.mark.django_db(databases=["default", "secondary"], transaction=True)
+def test_snapshot_uses_one_read_transaction_on_the_health_writer(settings, monkeypatch) -> None:
+    class HealthRouter:
+        def db_for_read(self, model, **hints):
+            return "default"
+
+        def db_for_write(self, model, **hints):
+            return "secondary" if model is ProcessingStepState else None
+
+    settings.DATABASE_ROUTERS = [HealthRouter()]
+    monkeypatch.setattr("archive.processing_health.timezone.now", lambda: NOW)
+    success_at = NOW - timedelta(hours=2)
+    failure_at = NOW - timedelta(hours=1)
+    record_step_outcome(YOUTUBE, succeeded=True, item_id=1, now=success_at, using="secondary")
+    record_step_outcome(YOUTUBE, succeeded=False, item_id=2, now=failure_at)
+    record_step_outcome(YOUTUBE, succeeded=False, item_id=3, now=NOW)
+
+    with (
+        CaptureQueriesContext(connection) as reader,
+        CaptureQueriesContext(connections["secondary"]) as writer,
+    ):
+        step = processing_health_snapshot(NOW)["steps"][YOUTUBE]
+
+    assert step == {
+        "successes": 1,
+        "failures": 2,
+        "last_success_at": success_at.isoformat(),
+        "last_success_age_seconds": 7200,
+        "last_failure_at": NOW.isoformat(),
+        "failing_since": failure_at.isoformat(),
+        "failing_for_seconds": 3600,
+        "failing_items": 2,
+    }
+    assert not reader.captured_queries
+    sql = [query["sql"] for query in writer if query["sql"] != "BEGIN"]
+    assert sql[0] == "BEGIN DEFERRED"
+    assert [statement.split()[0] for statement in sql[1:]] == [
+        "SELECT",
+        "SELECT",
+        "SELECT",
+        "COMMIT",
+    ]
+
+    settings.DATABASE_ROUTERS = []
+    assert processing_health_snapshot(NOW, using="secondary")["steps"][YOUTUBE] == step
 
 
 @pytest.mark.django_db

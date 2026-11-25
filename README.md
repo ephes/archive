@@ -1014,7 +1014,10 @@ Per step:
 
 An explicit `now` passed to `processing_health_snapshot` sets the event window and
 the reference for age calculations. Latest timestamps and streak membership
-reflect the current durable state in the read snapshot.
+reflect the current durable state in the read snapshot. All projections use a
+single snapshot on the database routed for processing health writes. Callers
+that record outcomes on an explicit database can pass the same `using` alias to
+`processing_health_snapshot`.
 The reference must be timezone-aware, with both ends of the elapsed 24-hour
 window representable in UTC. Invalid references raise `ValueError` before any
 snapshot queries run.

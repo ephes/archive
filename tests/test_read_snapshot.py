@@ -21,7 +21,7 @@ def test_owned_snapshot_preserves_primary_failure_and_settles_connection(
 ):
     db = MagicMock(in_atomic_block=False)
     db.get_autocommit.return_value = True
-    monkeypatch.setattr(read_snapshot, "connection", db)
+    monkeypatch.setattr(read_snapshot, "connections", {"default": db})
     primary = KeyboardInterrupt("cancelled") if stage == "body" else RuntimeError(stage)
     if stage == "commit":
         db.commit.side_effect = primary

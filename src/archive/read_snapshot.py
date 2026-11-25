@@ -24,26 +24,28 @@ def snapshot_read_transaction() -> Iterator[None]:
         yield
         connection.commit()
     except BaseException:
-        rollback_failed = False
         try:
             connection.rollback()
         except BaseException:
-            rollback_failed = True
-        with suppress(BaseException):
-            _restore_autocommit(retire=rollback_failed)
+            # Restoring autocommit could commit a transaction that failed to roll back.
+            _retire_connection()
+        else:
+            with suppress(BaseException):
+                _restore_autocommit()
         raise
     else:
         _restore_autocommit()
 
 
-def _restore_autocommit(*, retire: bool = False) -> None:
+def _restore_autocommit() -> None:
     try:
         connection.set_autocommit(True)
     except BaseException:
-        retire = True
+        _retire_connection()
         raise
-    finally:
-        if retire:
-            # Django reconnects on the next use. Closing must preserve the primary error.
-            with suppress(BaseException):
-                connection.close()
+
+
+def _retire_connection() -> None:
+    # Django reconnects on the next use. Closing must preserve the primary error.
+    with suppress(BaseException):
+        connection.close()

@@ -46,13 +46,12 @@ def test_owned_snapshot_preserves_primary_failure_and_settles_connection(
         expected.append(call.commit())
     if stage != "reset":
         expected.append(call.rollback())
-    expected.append(call.set_autocommit(True))
+    if not rollback_fails:
+        expected.append(call.set_autocommit(True))
     if rollback_fails or reset_fails:
         expected.append(call.close())
     assert db.method_calls[1:] == expected
-    db.cursor.return_value.__enter__.return_value.execute.assert_called_once_with(
-        "BEGIN DEFERRED"
-    )
+    db.cursor.return_value.__enter__.return_value.execute.assert_called_once_with("BEGIN DEFERRED")
 
     db.reset_mock(side_effect=True)
     next_request = Mock()

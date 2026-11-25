@@ -640,6 +640,10 @@ across each storage deletion to preserve its reference/reservation safety check:
 can hold up other writers and exhaust their busy timeout. Database migrations and bulk admin
 deletions can also hold the writer lock longer; schedule long maintenance accordingly. Keep
 future explicit transactions short, since even read-only atomic blocks acquire the writer lock.
+
+When a read snapshot owns the transaction and rollback fails, it attempts to
+close the connection directly and propagates the original error. Autocommit is
+restored after a successful rollback or commit.
 See [Django's SQLite transaction documentation](https://docs.djangoproject.com/en/6.0/ref/databases/#transactions-behavior).
 
 Metadata extraction plus transcription plus summary/tag generation runs in a separate worker process:

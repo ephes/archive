@@ -582,6 +582,48 @@ def test_podcast_feed_excludes_short_or_mixed_topic_generated_article_audio_by_d
     assert channel.findall("item") == []
 
 
+@pytest.mark.parametrize(
+    ("prefixes", "end_each_line", "eligible"),
+    [
+        (("1. ", "2. ", "3. "), True, False),
+        (("1) ", "2) ", "3) "), True, False),
+        (("2022 ", "2023 ", "2024 "), True, True),
+        (("1.5 ", "2.5 ", "3.5 "), True, True),
+        (("1. ", "2. ", ""), False, False),
+    ],
+    ids=["period-markers", "parenthesis-markers", "prose-years", "decimals", "marker-dots"],
+)
+@pytest.mark.django_db
+def test_podcast_feed_distinguishes_numbered_markers_from_prose(
+    client, prefixes: tuple[str, str, str], end_each_line: bool, eligible: bool
+) -> None:
+    lines = (
+        "The archive team reviewed its migration plan with the volunteers at the start of spring",
+        "The volunteers explained how the same plan would affect the storage of the older records",
+        "The team then adjusted the plan to keep all the records accessible throughout the move",
+    )
+    joiner = ".\n" if end_each_line else "\n"
+    summary = joiner.join(prefix + line for prefix, line in zip(prefixes, lines, strict=True))
+    Item.objects.create(
+        original_url="https://example.test/migration-plan",
+        title="Migration plan",
+        short_summary="The team explains its updated migration plan.",
+        long_summary=summary + ".",
+        kind=ItemKind.ARTICLE,
+        article_audio_status="complete",
+        article_audio_generated=True,
+        article_audio_artifact_path="/v1/jobs/job-123/artifacts/speech.mp3",
+    )
+
+    response = client.get(reverse("archive:podcast-feed"))
+
+    assert response.status_code == 200
+    entries = parse_channel(response.content).findall("item")
+    assert [entry.findtext("title") for entry in entries] == (
+        ["Migration plan"] if eligible else []
+    )
+
+
 @pytest.mark.django_db
 def test_podcast_feed_policy_overrides_auto_behavior(client) -> None:
     Item.objects.create(

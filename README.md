@@ -1119,7 +1119,9 @@ Current automatic policy:
 - source-derived archived audio is podcast-feed eligible when the item is public, published, titled, and has
   a non-blank short summary
 - generated article audio may also be podcast-feed eligible, but only for article items whose summary content
-  looks substantial and coherent rather than like a short note or mixed-topic link dump
+  looks substantial and coherent rather than like a short note or mixed-topic link dump.
+  The list heuristic counts numbered Markdown markers such as `1.` and `1)` followed by
+  a space or tab at the start of a line. Periods in those markers do not count as sentence endings.
 - if both source-derived archived audio and generated article audio exist, the source-derived archived audio
   wins for the feed enclosure
 

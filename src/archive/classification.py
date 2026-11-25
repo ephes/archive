@@ -17,6 +17,7 @@ YOUTUBE_PAGE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.
 OVERRIDE_CLASSIFICATION_RULES = {"explicit_kind", "operator_override"}
 CURRENT_CLASSIFICATION_ENGINE_VERSION = 2
 MAX_MEDIA_CANDIDATE_URL_LENGTH = 8192
+_NUMBERED_LIST_MARKER_RE = re.compile(r"[0-9]{1,9}[.)][ \t]+")
 _MEDIA_CANDIDATE_SOURCE_TYPES = {
     "explicit_audio_url": {"audio"},
     "html_audio": {"audio"},
@@ -388,13 +389,17 @@ def _article_audio_is_feed_worthy(item: Item) -> bool:
         return False
 
     word_count = len(re.findall(r"\w+", body))
-    sentence_count = len(re.findall(r"[.!?]", body))
-    nonempty_lines = [line.strip() for line in body.splitlines() if line.strip()]
-    list_like_lines = sum(
-        1
-        for line in nonempty_lines
-        if line.startswith(("-", "*", "•")) or line[:3].isdigit() or line.count(":") >= 2
-    )
+    sentence_count = 0
+    list_like_lines = 0
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        marker = _NUMBERED_LIST_MARKER_RE.match(line)
+        if marker:
+            list_like_lines += 1
+            line = line[marker.end() :]
+        elif line.startswith(("-", "*", "•")) or line.count(":") >= 2:
+            list_like_lines += 1
+        sentence_count += len(re.findall(r"[.!?]", line))
     url_count = body.count("http://") + body.count("https://")
     separator_count = body.count(" / ") + body.count(" | ") + body.count(" - ")
 

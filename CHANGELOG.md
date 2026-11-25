@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reuse podcast eligibility decisions through page hydration and enclosure rendering.
 - Exclude tab- and Unicode-whitespace-only titles from general RSS pagination.
 - Redirect numbered first RSS and podcast pages before querying feed items.
 - Preserve item updates if processing health recording and its diagnostic both fail.

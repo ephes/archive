@@ -1,3 +1,4 @@
+from collections import Counter
 from datetime import timedelta
 from xml.etree import ElementTree as ET
 
@@ -87,6 +88,8 @@ def test_podcast_pages_preserve_policy_and_bound_materialization(
     expected = [*podcast_corpus, extra]
     full_loads = []
     batch_sizes = []
+    scanned_ids = []
+    decision_ids = []
     original_from_db = Item.from_db
     original_iterator = QuerySet.iterator
 
@@ -98,10 +101,18 @@ def test_podcast_pages_preserve_policy_and_bound_materialization(
     def iterator(queryset, chunk_size=None):
         if queryset.model is Item:
             batch_sizes.append(chunk_size)
-        return original_iterator(queryset, chunk_size=chunk_size)
+        for item in original_iterator(queryset, chunk_size=chunk_size):
+            if queryset.model is Item:
+                scanned_ids.append(item.pk)
+            yield item
+
+    def observe_decision(item):
+        decision_ids.append(item.pk)
+        return podcast_feed_decision_for_item(item)
 
     monkeypatch.setattr(Item, "from_db", classmethod(from_db))
     monkeypatch.setattr(QuerySet, "iterator", iterator)
+    monkeypatch.setattr("archive.views.podcast_feed_decision_for_item", observe_decision)
     url = (
         reverse("archive:podcast-feed")
         if page == 1
@@ -120,6 +131,24 @@ def test_podcast_pages_preserve_policy_and_bound_materialization(
     assert ("previous" in links) == (page > 1)
     assert ("next" in links) == (page < 3)
     assert len(full_loads) == len(selected)
+    assert scanned_ids and len(scanned_ids) == len(set(scanned_ids))
+    assert Counter(decision_ids) == Counter(scanned_ids)
+    for entry, item in zip(entries, selected, strict=True):
+        source = podcast_feed_decision_for_item(item).enclosure_source
+        if source == "generated_article_audio":
+            audio_path = reverse("archive:item-article-audio", kwargs={"pk": item.pk})
+            audio_type = item.article_audio_content_type or "audio/mpeg"
+            audio_size = item.article_audio_size_bytes or 0
+        else:
+            audio_path = item.stable_audio_enclosure_url
+            audio_type = item.stable_audio_content_type
+            audio_size = item.stable_audio_size_bytes
+        assert entry.findtext("description") == item.short_summary.strip()
+        assert entry.find("enclosure").attrib == {
+            "url": f"http://testserver{audio_path}",
+            "type": audio_type,
+            "length": str(audio_size),
+        }
     assert batch_sizes and all(size is not None and 0 < size <= 100 for size in batch_sizes)
 
 

@@ -15,7 +15,7 @@ from django.contrib.auth.views import LoginView, LogoutView
 from django.core import signing
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
-from django.core.paginator import EmptyPage, Paginator
+from django.core.paginator import EmptyPage, Page, Paginator
 from django.core.validators import URLValidator
 from django.db import connection, transaction
 from django.db.models import Func, Q, Value
@@ -41,6 +41,7 @@ from archive.article_audio import store_generated_article_audio
 from archive.capture import capture_item
 from archive.classification import (
     CURRENT_CLASSIFICATION_ENGINE_VERSION,
+    PodcastFeedDecision,
     classify_item,
     podcast_feed_decision_for_item,
 )
@@ -115,7 +116,7 @@ def _public_feed_items():
     )
 
 
-def _public_podcast_feed_page(page: int):
+def _public_podcast_feed_page(page: int) -> tuple[Page, dict[int, PodcastFeedDecision]]:
     candidates = (
         Item.objects.filter(
             is_public=True,
@@ -132,9 +133,9 @@ def _public_podcast_feed_page(page: int):
         .order_by("-published_at", "-id")
     )
     # Python owns whitespace and generated-summary policy. Stream only its inputs;
-    # retain a count and one page of ids, then load full items for that page alone.
+    # keep the count and decisions for the selected page, then hydrate only that page.
     eligible_count = 0
-    page_ids = []
+    selected: dict[int, tuple[Item, PodcastFeedDecision]] = {}
     start = (page - 1) * FEED_PAGE_SIZE
     policy_fields = (
         "id",
@@ -149,18 +150,27 @@ def _public_podcast_feed_page(page: int):
         "article_audio_artifact_path",
     )
     for item in candidates.only(*policy_fields).iterator(chunk_size=100):
-        if not podcast_feed_decision_for_item(item).eligible:
+        decision = podcast_feed_decision_for_item(item)
+        if not decision.eligible:
             continue
         if start <= eligible_count < start + FEED_PAGE_SIZE:
-            page_ids.append(item.pk)
+            selected[item.pk] = (item, decision)
         eligible_count += 1
+
     page_obj = _feed_page(range(eligible_count), page)
-    page_obj.object_list = [
-        item
-        for item in candidates.filter(pk__in=page_ids)
-        if podcast_feed_decision_for_item(item).eligible
-    ]
-    return page_obj
+    page_items = []
+    decisions = {}
+    for item in candidates.filter(pk__in=selected):
+        scanned, decision = selected[item.pk]
+        # The read snapshot excludes external edits. If the current transaction
+        # wrote policy fields since selection, re-evaluate this changed row.
+        if any(getattr(item, field) != getattr(scanned, field) for field in policy_fields):
+            decision = podcast_feed_decision_for_item(item)
+        if decision.eligible:
+            page_items.append(item)
+            decisions[item.pk] = decision
+    page_obj.object_list = page_items
+    return page_obj, decisions
 
 
 def _feed_page(items, page: int):
@@ -241,7 +251,7 @@ def _render_feed(
     feed_title: str,
     feed_description: str,
     page_description: str,
-    include_enclosures: bool = False,
+    podcast_decisions: dict[int, PodcastFeedDecision] | None = None,
     feed_image_path: str | None = None,
 ) -> HttpResponse:
     page = page_obj.number
@@ -279,13 +289,15 @@ def _render_feed(
             "title": item.display_title,
             "link": request.build_absolute_uri(item.get_absolute_url()),
             "description": (
-                item.short_summary.strip() if include_enclosures else item.feed_description
+                item.short_summary.strip()
+                if podcast_decisions is not None
+                else item.feed_description
             ),
             "pub_date": item.feed_published_at,
             "kind": item.get_kind_display(),
         }
-        if include_enclosures:
-            entry.update(_podcast_enclosure_attributes(request, item))
+        if podcast_decisions is not None:
+            entry.update(_podcast_enclosure_attributes(request, item, podcast_decisions[item.pk]))
         feed_items.append(
             {
                 key: _xml_safe_text(value) if isinstance(value, str) else value
@@ -445,9 +457,10 @@ def podcast_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
     if page == 1 and request.path != reverse("archive:podcast-feed"):
         return redirect("archive:podcast-feed", permanent=True)
     with snapshot_read_transaction():
+        page_obj, decisions = _public_podcast_feed_page(page)
         return _render_feed(
             request,
-            page_obj=_public_podcast_feed_page(page),
+            page_obj=page_obj,
             canonical_view_name="archive:podcast-feed",
             paged_view_name="archive:podcast-feed-page",
             feed_title="Archive Podcast",
@@ -455,7 +468,7 @@ def podcast_feed(request: HttpRequest, page: int = 1) -> HttpResponse:
                 "Podcast-style archive feed for items with stable local audio enclosures."
             ),
             page_description="Archive podcast feed page {page}.",
-            include_enclosures=True,
+            podcast_decisions=decisions,
             feed_image_path="archive/podcast-cover.png",
         )
 
@@ -972,8 +985,9 @@ def _apply_api_quote_classifier_kind(*, item: Item) -> list[str]:
     return update_fields
 
 
-def _podcast_enclosure_attributes(request: HttpRequest, item: Item) -> dict[str, str | int]:
-    decision = podcast_feed_decision_for_item(item)
+def _podcast_enclosure_attributes(
+    request: HttpRequest, item: Item, decision: PodcastFeedDecision
+) -> dict[str, str | int]:
     if decision.enclosure_source == "generated_article_audio":
         return {
             "enclosure_url": request.build_absolute_uri(

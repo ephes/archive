@@ -1129,9 +1129,11 @@ SQLite VM work with 1,000 and 10,000 historical rows.
 
 Podcast feed selection applies public/published, basic title/summary/audio and operator-exclude
 filters in SQL, then streams policy fields in batches of 100 to preserve Python whitespace and
-generated-summary eligibility rules. It retains only the exact eligible count and the requested
-page's ids, then loads full items for that page and rechecks eligibility within the same
-read snapshot. Notes and transcripts are excluded from the scan;
+generated-summary eligibility rules. It retains the exact eligible count and the requested
+page's policy inputs and decisions. It loads full items for that page in the same read
+snapshot and uses those decisions to render enclosure metadata. If policy inputs change
+within the current transaction, hydration re-evaluates the changed row.
+Notes and transcripts are excluded from the scan;
 summary text remains necessary for generated-audio policy. Counting still scans candidate history,
 but memory no longer grows with that history and no eligible history is truncated.
 

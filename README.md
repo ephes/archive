@@ -118,6 +118,8 @@ page query selects only card fields (including title/URL and summary/notes fallb
 leaving transcripts and processing payloads deferred.
 `/?week=<YYYY-Wnn>&page=<n>` serves at most 50 cards, newest `shared_at` then highest
 id first. Page links retain the selected week; week links start at its first page.
+Week tokens use a four-digit ISO week-year, including leading zeroes for dates before
+year 1000 (for example, `0001-W01`).
 Missing/invalid page text selects page 1; nonpositive/out-of-range numbers select
 the last page. An empty archive shows an empty first page; an unoccupied week is
 rejected with HTTP 400 once there are occupied weeks. Pagination is a live view:

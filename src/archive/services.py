@@ -176,18 +176,19 @@ class WeekPage:
         return f"Week {self.week}, {self.year}"
 
 
-def to_week_page(value: datetime) -> WeekPage:
-    local_value = timezone.localtime(value)
-    iso_year, iso_week, _ = local_value.isocalendar()
-    starts_on = date.fromisocalendar(iso_year, iso_week, 1)
-    ends_on = date.fromisocalendar(iso_year, iso_week, 7)
+def _build_week_page(year: int, week: int) -> WeekPage:
     return WeekPage(
-        token=f"{iso_year}-W{iso_week:02d}",
-        year=iso_year,
-        week=iso_week,
-        starts_on=starts_on,
-        ends_on=ends_on,
+        token=f"{year:04d}-W{week:02d}",
+        year=year,
+        week=week,
+        starts_on=date.fromisocalendar(year, week, 1),
+        ends_on=date.fromisocalendar(year, week, 7),
     )
+
+
+def to_week_page(value: datetime) -> WeekPage:
+    year, week, _ = timezone.localtime(value).isocalendar()
+    return _build_week_page(year, week)
 
 
 def week_page_from_token(token: str) -> WeekPage:
@@ -195,17 +196,7 @@ def week_page_from_token(token: str) -> WeekPage:
     if match is None:
         raise ValueError("Invalid week token")
 
-    year = int(match.group(1))
-    week = int(match.group(2))
-    starts_on = date.fromisocalendar(year, week, 1)
-    ends_on = date.fromisocalendar(year, week, 7)
-    return WeekPage(
-        token=f"{year}-W{week:02d}",
-        year=year,
-        week=week,
-        starts_on=starts_on,
-        ends_on=ends_on,
-    )
+    return _build_week_page(int(match.group(1)), int(match.group(2)))
 
 
 def week_bounds(page: WeekPage) -> tuple[datetime, datetime]:

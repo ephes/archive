@@ -6,6 +6,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from archive.models import Item, ItemKind, PodcastFeedPolicy
+from archive.services import to_week_page, week_page_from_token
 
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 ITUNES_NS = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
@@ -29,6 +30,23 @@ def aware_datetime(
         datetime(year, month, day, hour, minute),
         timezone.get_current_timezone(),
     )
+
+
+@pytest.mark.parametrize(
+    ("year", "month", "day", "token"),
+    [
+        (1, 1, 1, "0001-W01"),
+        (999, 1, 1, "0999-W01"),
+        (999, 12, 30, "1000-W01"),
+        (1000, 1, 1, "1000-W01"),
+        (2021, 1, 1, "2020-W53"),
+    ],
+)
+def test_iso_week_token_round_trips(year: int, month: int, day: int, token: str) -> None:
+    page = to_week_page(aware_datetime(year, month, day, hour=12))
+
+    assert page.token == token
+    assert week_page_from_token(token) == page
 
 
 @pytest.mark.django_db

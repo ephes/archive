@@ -335,6 +335,8 @@ valid UTF-8, UTF-16, and UTF-32 JSON retain support.
 
 Repeated shares through the API or authenticated web form resolve to the newest existing
 item with the same URL within `ARCHIVE_CAPTURE_DEDUPE_SECONDS` (default `86400`, 24 hours).
+Both endpoints of the interval from the cutoff through the current time are inclusive.
+Future-dated shares do not suppress a capture.
 The API returns `201` with `duplicate: false` for a new item and `200` with `duplicate: true`
 and the existing `id` / `detail_url` for a repeat. The web form shows a duplicate notice
 with a link to the public existing item (or a private-item notice), preserving submitted
@@ -1286,9 +1288,10 @@ a durable database transaction and cannot be nested inside an application
 transaction. Superseded objects are deleted only after commit. A failure that
 surfaces during or after the commit (for example the worker's processing alarm)
 never deletes the new objects when their references were committed; at worst the
-superseded objects stay behind as ordinary orphans. Item-deletion cleanup failures are
-logged without backend details and do not fail the already committed deletion or prevent
-later commit callbacks. The same guarantee applies to stale source-media cleanup after
+superseded objects stay behind as ordinary orphans. Item-deletion cleanup emits a
+warning without backend details when logging is available. The committed deletion
+and later commit callbacks survive both storage and logging failures.
+The same callback guarantee applies to stale source-media cleanup after
 reprocessing changes an item's kind: the committed classification and cleared media
 references remain authoritative, callers report success, and later callbacks still run.
 Cleanup logs use a fixed category without keys, URLs or exception details; referenced

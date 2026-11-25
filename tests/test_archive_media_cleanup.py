@@ -166,7 +166,8 @@ def test_cleanup_archive_media_orphans_delete_removes_only_orphans() -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-def test_post_delete_storage_failure_is_recoverable(monkeypatch, caplog):
+@pytest.mark.parametrize("logging_fails", [False, True])
+def test_post_delete_storage_failure_is_recoverable(monkeypatch, caplog, logging_fails):
     path = "items/failed-cleanup/audio.mp3"
     item = Item.objects.create(
         original_url="https://example.com/cleanup-fault", archived_audio_path=path
@@ -181,7 +182,12 @@ def test_post_delete_storage_failure_is_recoverable(monkeypatch, caplog):
         faults.append(name)
         raise RuntimeError("private-backend-details")
 
+    def fail_warning(message):
+        raise RuntimeError("logging unavailable")
+
     monkeypatch.setattr(storage, "delete", fail_delete)
+    if logging_fails:
+        monkeypatch.setattr("archive.signals.logger.warning", fail_warning)
     with transaction.atomic():
         item.delete()
         transaction.on_commit(lambda: callbacks.append(True))
@@ -189,7 +195,8 @@ def test_post_delete_storage_failure_is_recoverable(monkeypatch, caplog):
     assert callbacks == [True]
     assert not Item.objects.filter(pk=pk).exists()
     assert storage.exists(path)
-    assert "orphan sweep" in caplog.text
+    if not logging_fails:
+        assert "orphan sweep" in caplog.text
     assert "private-backend-details" not in caplog.text
     assert path not in caplog.text
 

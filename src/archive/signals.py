@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
 from functools import partial
 
 from django.db import transaction
@@ -22,7 +23,8 @@ def _cleanup_after_delete(paths: tuple[str, ...], *, using: str) -> None:
     except Exception:
         # The row deletion has committed. Leave objects for reference-safe recovery;
         # backend exception text and object keys may contain private information.
-        logger.warning("Archive media cleanup failed after deletion; retry the orphan sweep.")
+        with suppress(Exception):
+            logger.warning("Archive media cleanup failed after deletion; retry the orphan sweep.")
 
 
 @receiver(post_delete, sender=Item)

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Keep later commit callbacks running when item-deletion media cleanup and its
+  warning both fail.
+- Limit capture deduplication to the inclusive interval from the configured
+  cutoff through the current time.
+
 - Enforce the advertised byte count on full stored-audio GETs. File growth
   cannot add bytes to the response, and premature EOF raises a streaming error.
 

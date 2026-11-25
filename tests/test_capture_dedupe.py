@@ -103,15 +103,17 @@ def test_repeat_leaves_completed_enrichment_untouched(
 @pytest.mark.parametrize("channel", ["api", "web"])
 @pytest.mark.parametrize(
     "seconds,age,created",
-    [(86400, 86390, False), (86400, 86410, True), (60, 61, True), (0, 1, True)],
+    [(60, -1, True), (60, 0, False), (60, 60, False), (60, 61, True), (0, 1, True)],
 )
-def test_window(client, editor_user, settings, channel, seconds, age, created):
+def test_window(client, editor_user, settings, monkeypatch, channel, seconds, age, created):
     settings.ARCHIVE_CAPTURE_DEDUPE_SECONDS = seconds
     client.force_login(editor_user)
+    now = timezone.now()
+    monkeypatch.setattr("archive.capture.timezone.now", lambda: now)
     old = Item.objects.create(
-        original_url="https://example.com/story", shared_at=timezone.now() - timedelta(seconds=age)
+        original_url="https://example.com/story", shared_at=now - timedelta(seconds=age)
     )
-    pk, response = share(client, channel, old.original_url)
+    pk, response = share(client, channel, "https://EXAMPLE.com:443/story#repeat")
     assert (pk != old.pk) is created
     assert Item.objects.count() == (2 if created else 1)
     if created:

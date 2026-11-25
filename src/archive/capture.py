@@ -25,12 +25,14 @@ def capture_item(item: Item) -> tuple[Item, bool]:
     using = item._state.db or router.db_for_write(Item, instance=item)
     with transaction.atomic(using=using):
         if seconds > 0:
-            cutoff = timezone.now() - timedelta(seconds=seconds)
+            now = timezone.now()
+            cutoff = now - timedelta(seconds=seconds)
             key = normalize_capture_url(item.original_url)
             candidates = (
                 Item.objects.using(using)
                 .filter(
-                    capture_url_digest=capture_url_digest(item.original_url), shared_at__gte=cutoff
+                    capture_url_digest=capture_url_digest(item.original_url),
+                    shared_at__range=(cutoff, now),
                 )
                 .order_by("-shared_at", "-pk")
                 .values_list("pk", "original_url")

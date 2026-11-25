@@ -1445,7 +1445,15 @@ must be bare `type/subtype` tokens; header parameters are refused. Both length
 calculation and streaming use the same validated UTF-8 prefix. The authenticated
 transport also checks any declared Content-Length against the completed request
 file before starting the child and sends the staged byte count as Content-Length.
+For these uploads, the request cap is the admitted source size plus the multipart
+envelope.
 
+
+Authenticated request bodies are capped at 32 MiB by default, including multipart
+framing. Callers of `open_authenticated_url` can set `max_request_bytes` independently
+of the response cap. Archive checks the byte count before writing each chunk to
+the temporary request file. A refused request discards the file before any
+network process starts.
 
 Summary, transcription (including plain-text transcripts), and article-audio JSON
 API responses are capped at 8 MiB. Larger responses fail with the stage's existing

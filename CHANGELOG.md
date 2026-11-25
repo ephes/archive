@@ -14,6 +14,8 @@
   Content-Type and Content-Length metadata from successful responses.
 - Check authenticated request framing against the staged request body before
   contacting the upstream service.
+- Cap authenticated request bodies before staging each chunk. Archived-audio
+  uploads use the admitted multipart request length as their cap.
 
 - Admit only HTML and XML media types for metadata downloads, including structured
   `+xml` types such as XHTML, RSS and Atom.

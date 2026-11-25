@@ -173,7 +173,7 @@ def test_real_batch_boundaries_share_deadline(clock, monkeypatch, settings, expi
     )
     seen = []
 
-    def request(req, timeout):
+    def request(req, timeout, **kwargs):
         name = req.full_url.rsplit("/", 1)[-1]
         seen.append((name, timeout))
         if name == "uploads":

@@ -59,31 +59,43 @@ def _open_authenticated_url(request: Request, *, timeout: float):
 
 @contextmanager
 def open_authenticated_url(
-    request: Request, *, timeout: float, max_bytes: int = 8 * 1024 * 1024, audio: bool = False
+    request: Request,
+    *,
+    timeout: float,
+    max_bytes: int = 8 * 1024 * 1024,
+    audio: bool = False,
+    max_request_bytes: int = 32 * 1024 * 1024,
 ):
     """Bound DNS, headers, redirects, bodies and child teardown by one deadline.
 
     Only the disposable stdlib transport process performs network I/O. Killing and
     reaping it also closes its sockets, including a stalled resolver or error read.
     Bodies stay on disk; credentials travel over stdin, never command arguments.
+    The request cap includes framing such as multipart headers. Use
+    max_request_bytes to set it independently of the response cap (max_bytes).
     """
     _origin(request.full_url)
+    if type(max_request_bytes) is not int or max_request_bytes < 0:
+        raise ValueError("Upstream request byte limit must be a nonnegative integer")
     deadline = monotonic() + timeout
     with TemporaryDirectory(prefix="archive-upstream-") as directory:
         path = Path(directory) / "body"
         request_path = Path(directory) / "request"
         request_headers = dict(request.header_items())
         if request.data is not None:
+            chunks = (request.data,) if isinstance(request.data, bytes) else request.data
+            if not isinstance(chunks, Iterable):
+                raise OSError("Unsupported upstream request body")
+            remaining_bytes = max_request_bytes
             with request_path.open("wb") as output:
-                if isinstance(request.data, bytes):
-                    output.write(request.data)
-                elif isinstance(request.data, Iterable):
-                    for chunk in request.data:
-                        output.write(chunk)
-                        if monotonic() >= deadline:
-                            raise OSError("Upstream exchange exceeded the total timeout")
-                else:
-                    raise OSError("Unsupported upstream request body")
+                for chunk in chunks:
+                    with memoryview(chunk) as view:
+                        if view.nbytes > remaining_bytes:
+                            raise OSError("Upstream request body exceeded staging byte limit")
+                        remaining_bytes -= view.nbytes
+                        output.write(view)
+                    if monotonic() >= deadline:
+                        raise OSError("Upstream exchange exceeded the total timeout")
             staged_length = str(request_path.stat().st_size)
             declared = request_headers.get("Content-length")
             if declared is not None:

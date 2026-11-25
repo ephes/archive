@@ -53,6 +53,7 @@ _SAFE_TRANSPORT_ERRORS = frozenset(
         "API response did not return a complete representation",
         "API response has an invalid Content-Length",
         "API response download was incomplete",
+        "Upstream request body exceeded staging byte limit",
         "Upstream exchange exceeded the total timeout",
         "Upstream URL must be HTTP(S) without userinfo",
         "Upstream destination must match the configured API origin",

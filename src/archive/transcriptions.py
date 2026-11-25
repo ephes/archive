@@ -615,19 +615,20 @@ def _send_staged_upload(
         expected_size=source.size_bytes,
         deadline=deadline,
     )
+    content_length = _multipart_content_length(
+        boundary=boundary,
+        field_name="file",
+        filename=filename,
+        content_type=content_type,
+        payload_size=source.size_bytes,
+    )
     request = Request(
         _api_url("uploads"),
         data=body,
         headers={
             "Authorization": f"Bearer {settings.ARCHIVE_TRANSCRIPTION_API_KEY}",
             "Content-Type": f"multipart/form-data; boundary={boundary}",
-            **_multipart_content_length_header(
-                boundary=boundary,
-                field_name="file",
-                filename=filename,
-                content_type=content_type,
-                payload_size=source.size_bytes,
-            ),
+            "Content-Length": str(content_length),
         },
         method="POST",
     )
@@ -637,6 +638,7 @@ def _send_staged_upload(
             timeout=timeout,
             deadline=deadline,
             error_prefix="Archived audio staging failed",
+            max_request_bytes=content_length,
         )
     except BaseException:
         # A failed transport may retain a request with a suspended body iterator.
@@ -840,21 +842,19 @@ def _iter_file_multipart_formdata(
     return body()
 
 
-def _multipart_content_length_header(
+def _multipart_content_length(
     *,
     boundary: str,
     field_name: str,
     filename: str,
     content_type: str,
     payload_size: int,
-) -> dict[str, str]:
-    if payload_size <= 0:
-        return {}
+) -> int:
     prefix = _multipart_prefix(
         boundary=boundary, field_name=field_name, filename=filename, content_type=content_type
     )
     suffix = f"\r\n--{boundary}--\r\n".encode()
-    return {"Content-Length": str(len(prefix) + payload_size + len(suffix))}
+    return len(prefix) + payload_size + len(suffix)
 
 
 def _transcription_source_filename(*, source: TranscriptionSource, default_suffix: str) -> str:
@@ -1004,11 +1004,16 @@ def _request_json(
     deadline: float | None = None,
     *,
     invalid_payload_error: type[TranscriptionGenerationError] = TranscriptionGenerationError,
+    max_request_bytes: int | None = None,
 ) -> dict[str, object]:
     try:
-        with urlopen(
-            request, timeout=_remaining(deadline) if deadline is not None else timeout
-        ) as response:
+        budget = _remaining(deadline) if deadline is not None else timeout
+        exchange = (
+            urlopen(request, timeout=budget)
+            if max_request_bytes is None
+            else urlopen(request, timeout=budget, max_request_bytes=max_request_bytes)
+        )
+        with exchange as response:
             payload = decode_api_json(read_api_response(response))
     except HTTPError as exc:
         raise TranscriptionGenerationError(f"{error_prefix}: {safe_api_error(exc)}") from None

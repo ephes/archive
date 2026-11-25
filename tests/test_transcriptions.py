@@ -268,12 +268,13 @@ def test_generate_item_transcript_stages_oversized_archived_audio_for_batch_job(
         ContentFile(b"oversized-archived-audio".ljust(MAX_TRANSCRIPTION_BYTES + 1, b"x")),
     )
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, **kwargs):
         assert request.full_url != "https://cdn.example.com/episode.mp3"
         if request.full_url == "https://voxhelm.example.test/v1/uploads":
             request_body = (
                 request.data if isinstance(request.data, bytes) else b"".join(request.data)
             )
+            assert kwargs["max_request_bytes"] == len(request_body)
             assert b'name="file"' in request_body
             assert b"oversized-archived-audio" in request_body
             return _FakeResponse(
@@ -330,7 +331,7 @@ def _oversized_archived_audio_item() -> Item:
 def _batch_job_urlopen(*, segments: list[dict[str, object]], requested: list[str]):
     """Fake Voxhelm: upload, job submission, a succeeded job, and its segment JSON."""
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, **kwargs):
         requested.append(request.full_url)
         if request.full_url == "https://voxhelm.example.test/v1/uploads":
             b"".join(request.data)
@@ -474,7 +475,7 @@ def test_generate_item_transcript_reports_failed_batch_job_for_oversized_archive
         ContentFile(b"oversized-archived-audio".ljust(MAX_TRANSCRIPTION_BYTES + 1, b"x")),
     )
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, **kwargs):
         assert request.full_url != "https://cdn.example.com/episode.mp3"
         if request.full_url == "https://voxhelm.example.test/v1/uploads":
             return _FakeResponse(
@@ -639,7 +640,7 @@ def test_generate_transcript_rejects_malformed_batch_evidence(
         requested=requested,
     )
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, **kwargs):
         if malformed_text and request.full_url.endswith("/jobs/job-123"):
             return _FakeResponse(
                 json.dumps(
@@ -756,7 +757,7 @@ def test_missing_coverage_evidence_cannot_publish_transcript(monkeypatch, settin
     requested: list[str] = []
     response = _batch_job_urlopen(segments=[], requested=requested)
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, **kwargs):
         payload: object
         if request.full_url.endswith("/jobs/job-123") and evidence.endswith("artifact"):
             payload = {"id": "job-123", "state": "succeeded", "result": {"text": "Unchecked"}}
@@ -803,7 +804,7 @@ def test_old_batch_service_requires_explicit_coverage_opt_out(monkeypatch, setti
     requested: list[str] = []
     response = _batch_job_urlopen(segments=[], requested=requested)
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, **kwargs):
         if request.full_url.endswith("/jobs/job-123"):
             return _FakeResponse(
                 json.dumps(
@@ -835,7 +836,7 @@ class _FakeVoxhelm:
         self.result_metadata: dict[str, object] = {}
         self.jobs = 0
 
-    def __call__(self, request, timeout):
+    def __call__(self, request, timeout, **kwargs):
         url = request.full_url
         self.requested.append(url)
         payload: object
@@ -1388,7 +1389,7 @@ def test_staging_closes_reader_even_if_failed_transport_keeps_request(
         opened.append(reader)
         return reader
 
-    def interrupted_transport(request, timeout):
+    def interrupted_transport(request, timeout, **kwargs):
         retained.append(request)
         if read_payload:
             next(request.data)  # Multipart headers.

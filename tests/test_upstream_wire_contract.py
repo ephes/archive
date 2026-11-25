@@ -175,14 +175,14 @@ def test_multipart_parser_and_length_share_exact_encoding(filename):
         file_opener=lambda: io.BytesIO(b"synthetic media"),
     )
     body = b"".join(chunks)
-    length = tr._multipart_content_length_header(
+    length = tr._multipart_content_length(
         boundary="synthetic",
         field_name="file",
         filename=filename,
         content_type="audio/mpeg",
         payload_size=len(b"synthetic media"),
     )
-    assert int(length["Content-Length"]) == len(body)
+    assert length == len(body)
     message = BytesParser(policy=default).parsebytes(
         b"Content-Type: multipart/form-data; boundary=synthetic\r\n\r\n" + body
     )
@@ -233,7 +233,7 @@ def test_staged_length_checked_before_transport(actual, monkeypatch, settings):
 def test_upload_ids_are_validated(value, monkeypatch, settings):
     monkeypatch.setattr(tr, "open_archived_audio", lambda item: io.BytesIO(b"abc"))
 
-    def upload(request, timeout):
+    def upload(request, timeout, **kwargs):
         b"".join(request.data)
         return Response({"id": value})
 
@@ -458,3 +458,56 @@ def test_authenticated_body_uses_admitted_staged_length(declared, monkeypatch):
             with upstream_http.open_authenticated_url(request, timeout=5):
                 pytest.fail("invalid framing accepted")
         assert not calls
+
+
+@pytest.mark.parametrize("use_chunks", [False, True])
+def test_authenticated_requests_admit_only_bodies_within_the_byte_cap(use_chunks, monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from urllib.request import Request
+
+    from archive import upstream_http
+
+    calls = []
+
+    def run(command, **kwargs):
+        options = json.loads(kwargs["input"])
+        calls.append(Path(options["data_path"]).read_bytes())
+        assert options["headers"]["Content-length"] == "3"
+        Path(options["path"]).write_bytes(b"ok")
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"headers": [], "is_error": False}))
+
+    monkeypatch.setattr(upstream_http.subprocess, "run", run)
+
+    def request(tail):
+        return Request("https://api.test/", data=iter([b"a", tail]) if use_chunks else b"a" + tail)
+
+    with pytest.raises(OSError, match="request body exceeded"):
+        with upstream_http.open_authenticated_url(request(b"bcd"), timeout=5, max_request_bytes=3):
+            pytest.fail("over-limit request accepted")
+    assert not calls
+
+    with upstream_http.open_authenticated_url(
+        request(b"bc"), timeout=5, max_request_bytes=3
+    ) as response:
+        assert response.read() == b"ok"
+    assert calls == [b"abc"]
+
+
+def test_authenticated_requests_bound_staging_by_default(monkeypatch):
+    from itertools import repeat
+    from urllib.request import Request
+
+    from archive import upstream_http
+
+    monkeypatch.setattr(
+        upstream_http.subprocess,
+        "run",
+        lambda *a, **kw: pytest.fail("transport started for an over-limit request"),
+    )
+    chunks = repeat(b"x" * (1024 * 1024), 33)
+    with pytest.raises(OSError, match="request body exceeded"):
+        with upstream_http.open_authenticated_url(
+            Request("https://api.test/", data=chunks), timeout=5
+        ):
+            pytest.fail("over-limit request accepted")

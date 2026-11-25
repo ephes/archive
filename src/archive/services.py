@@ -930,8 +930,8 @@ def _recover_processing_items(query: Q) -> int:
 
 def claim_pending_item(*, exclude_ids: set[int] | None = None) -> Item | None:
     using = router.db_for_write(Item)
-    now = timezone.now()
     with transaction.atomic(using=using):
+        now = timezone.now()
         queryset = (
             Item.objects.using(using)
             .select_for_update()
@@ -991,6 +991,8 @@ def claim_pending_item(*, exclude_ids: set[int] | None = None) -> Item | None:
                     update_fields.extend([f"{stage}_status", f"{stage}_error"])
                     break
         if update_fields:
+            item.processing_started_at = now
+            update_fields.append("processing_started_at")
             item.save(using=using, update_fields=sorted(set(update_fields)))
     return item
 

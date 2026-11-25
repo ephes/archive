@@ -1,6 +1,10 @@
+import os
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from django.core.files.base import ContentFile
@@ -56,6 +60,81 @@ def test_claim_skips_item_with_any_inflight_stage(stage):
         == 2
     )
     assert services.claim_pending_item() is not None
+
+
+def test_claim_takes_retry_clock_after_sqlite_writer_admission(tmp_path):
+    # Use an on-disk database so separate connections wait for BEGIN IMMEDIATE.
+    script = """
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
+from threading import Event
+from unittest.mock import Mock, patch
+
+import django
+django.setup()
+from django.core.management import call_command
+from django.db import connections, transaction
+
+from archive.models import EnrichmentStatus as Status, Item
+from archive.services import claim_pending_item
+
+call_command("migrate", verbosity=0)
+before = datetime(2026, 11, 1, 12, tzinfo=UTC)
+retry_at = before + timedelta(seconds=1)
+item = Item.objects.create(
+    original_url="https://example.test/delayed-retry",
+    enrichment_status=Status.COMPLETE,
+    summary_status=Status.FAILED,
+    summary_retry_at=retry_at,
+    transcript_status=Status.COMPLETE,
+    media_archive_status=Status.COMPLETE,
+    article_audio_status=Status.COMPLETE,
+)
+claim_started = Event()
+retry_due = Event()
+clock = Mock(side_effect=lambda: retry_at if retry_due.is_set() else before)
+
+def claim():
+    db = connections["default"]
+
+    def observe(execute, sql, params, many, context):
+        if sql == "BEGIN IMMEDIATE":
+            claim_started.set()
+        return execute(sql, params, many, context)
+
+    try:
+        with db.execute_wrapper(observe), patch("archive.services.timezone.now", clock):
+            return claim_pending_item()
+    finally:
+        db.close()
+
+with ThreadPoolExecutor(max_workers=1) as pool:
+    with transaction.atomic():
+        future = pool.submit(claim)
+        assert claim_started.wait(5)
+        retry_due.set()
+    claimed = future.result(timeout=5)
+
+assert claimed is not None and claimed.pk == item.pk, "retry matured during writer admission"
+item.refresh_from_db()
+assert item.summary_status == Status.PROCESSING
+assert item.summary_retry_at is None
+assert item.processing_started_at == retry_at
+clock.assert_called_once_with()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1] / "src" / "django",
+        env={
+            **os.environ,
+            "DJANGO_SETTINGS_MODULE": "config.settings.test",
+            "DJANGO_DB_PATH": str(tmp_path / "claim.sqlite3"),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("handoff", [False, True])

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Claim retries that become due while waiting for the SQLite writer lock.
 - Use the current retention clock when pruning processing health events after commit.
 - Read processing health projections in one snapshot on the health writer database.
 - Match DNS hostnames with or without a trailing root dot in `reclassify_items --host`.

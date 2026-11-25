@@ -6,7 +6,7 @@ import selectors
 import subprocess
 import sys
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from time import monotonic
 
 import yt_dlp
@@ -54,15 +54,30 @@ class BoundedPopen(ytdlp_ffmpeg.Popen):
         if kwargs.get("stdin") == subprocess.PIPE:
             kwargs["stdin"] = subprocess.DEVNULL  # communicate() closes it unused
         deadline = None if timeout is None else monotonic() + timeout
-        with cls(*args, **kwargs) as process:
-            try:
-                stdout, stderr = _read_bounded(process, deadline, timeout)
-                remaining = None if deadline is None else max(deadline - monotonic(), 0)
-                process.wait(timeout=remaining)
-            except BaseException:
-                with suppress(OSError, subprocess.TimeoutExpired):
-                    process.kill(timeout=None)
-                raise
+        process = cls(*args, **kwargs)
+        try:
+            stdout, stderr = _read_bounded(process, deadline, timeout)
+            remaining = None if deadline is None else max(deadline - monotonic(), 0)
+            process.wait(timeout=remaining)
+            if deadline is not None and monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(process.args, timeout or 0)
+        except BaseException as exc:
+            if process.returncode is None:
+                try:
+                    process.kill(timeout=0)
+                except BaseException:
+                    exc.add_note("FFmpeg cleanup failed while killing the process")
+                try:
+                    # yt-dlp also makes calls without a timeout. The parent owns the
+                    # process group, so give up on a failed reap after at most one second.
+                    remaining = 1 if deadline is None else min(1, max(deadline - monotonic(), 0))
+                    process.wait(timeout=remaining)
+                except BaseException:
+                    exc.add_note("FFmpeg cleanup failed while reaping the process")
+            _close_streams(process, exc)
+            raise
+
+        _close_streams(process)
         if deadline is not None and monotonic() >= deadline:
             raise subprocess.TimeoutExpired(process.args, timeout or 0)
         if text:
@@ -72,6 +87,26 @@ class BoundedPopen(ytdlp_ffmpeg.Popen):
                 (process.returncode),
             )
         return bytes(stdout), bytes(stderr), process.returncode
+
+
+def _close_streams(process: subprocess.Popen[bytes], primary: BaseException | None = None) -> None:
+    failure = primary
+    for name, stream in (
+        ("stdin", process.stdin),
+        ("stdout", process.stdout),
+        ("stderr", process.stderr),
+    ):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+            else:
+                failure.add_note(f"FFmpeg cleanup failed while closing {name}")
+    if primary is None and failure is not None:
+        raise failure
 
 
 def _read_bounded(

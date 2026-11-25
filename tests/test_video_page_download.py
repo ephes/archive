@@ -7,6 +7,7 @@ without network access, so a yt-dlp refactor that bypasses the bound fails here.
 import os
 import subprocess
 import sys
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -136,6 +137,7 @@ def test_nested_ffmpeg_rejects_completion_at_or_after_deadline(phase, finished_a
         return data
 
     class CompletedProcess:
+        stdin = None
         args = ("ffmpeg",)
         returncode = 0
         stderr = None
@@ -164,3 +166,75 @@ def test_nested_ffmpeg_rejects_completion_at_or_after_deadline(phase, finished_a
         with pytest.raises(subprocess.TimeoutExpired) as caught:
             run(CompletedProcess, "ffmpeg", timeout=10)
         assert caught.value.timeout == 10
+
+
+@pytest.mark.parametrize("failure", [video_page_download.DiagnosticLimitError, KeyboardInterrupt])
+def test_nested_ffmpeg_retirement_preserves_primary_and_attempts_every_step(monkeypatch, failure):
+    primary = failure()
+    calls = []
+    clock = [0.0]
+
+    def fail_read(*args):
+        clock[0] = 8
+        raise primary
+
+    class Stream:
+        def __init__(self, name, *, fails=False):
+            self.name = name
+            self.fails = fails
+
+        def close(self):
+            calls.append(self.name)
+            if self.fails:
+                raise OSError("synthetic stream close fault")
+
+    class Process:
+        args = ("ffmpeg",)
+        returncode = None
+
+        def __init__(self, *args, **kwargs):
+            self.stdin = None
+            self.stdout = Stream("stdout", fails=True)
+            self.stderr = Stream("stderr")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            raise RuntimeError("synthetic context exit fault")
+
+        def kill(self, *, timeout):
+            calls.append(("kill", timeout))
+            clock[0] = 9
+            raise RuntimeError("synthetic kill fault")
+
+        def wait(self, *, timeout):
+            calls.append(("wait", timeout))
+            raise subprocess.TimeoutExpired(self.args, timeout)
+
+    monkeypatch.setattr(video_page_download, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(video_page_download, "_read_bounded", fail_read)
+
+    observed = []
+
+    def download(*args):
+        try:
+            video_page_download.BoundedPopen.run.__func__(Process, "ffmpeg", timeout=10)
+        except BaseException as exc:
+            observed.append(exc)
+            raise
+
+    if failure is video_page_download.DiagnosticLimitError:
+        monkeypatch.setattr(sys, "stdin", StringIO("{}"))
+        monkeypatch.setattr(video_page_download, "download", download)
+        assert video_page_download.main() == 1  # Parent receives the normal download failure.
+    else:
+        with pytest.raises(KeyboardInterrupt):
+            download()
+    assert observed == [primary]
+    assert primary.__notes__ == [
+        "FFmpeg cleanup failed while killing the process",
+        "FFmpeg cleanup failed while reaping the process",
+        "FFmpeg cleanup failed while closing stdout",
+    ]
+    assert calls == [("kill", 0), ("wait", 1.0), "stdout", "stderr"]

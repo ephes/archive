@@ -1290,6 +1290,11 @@ that reads each stream under its own 1 MiB budget and, past it, kills the comman
 and fails the download (persisted as `Video page download failed`). YouTube download failures remain
 retryable under the existing media retry policy and do not replace previously
 archived media.
+The download child attempts to kill and reap a failed nested FFmpeg command and
+closes each pipe independently. The cleanup reap uses at most one second of the
+remaining command budget, with the outer process-group deadline as a backstop.
+A diagnostic limit, timeout or cancellation remains the primary failure. Cleanup
+failures add fixed notes to it.
 
 An interruption or error during TERM/grace still attempts KILL and the bounded
 reap. Both diagnostic streams are closed independently, including when another

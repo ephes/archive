@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preserve nested video command failures while independently killing, reaping and closing pipes.
 - Send one direct-media receipt after response cleanup and discard failed downloads.
 - Validate health snapshot reference clocks and UTC window bounds before querying.
 - Close the SQLite read-snapshot connection directly when rollback fails.

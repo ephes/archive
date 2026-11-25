@@ -4,6 +4,7 @@ import importlib
 from datetime import UTC, datetime, timedelta, timezone
 from sqlite3 import SQLITE_LIMIT_VARIABLE_NUMBER
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from django.apps import apps as django_apps
@@ -11,7 +12,9 @@ from django.db import DatabaseError, connection, transaction
 from django.test.utils import CaptureQueriesContext
 from test_media_publication import fake_video_download
 
+from archive.metadata import ExtractedMetadata
 from archive.models import (
+    EnrichmentStatus,
     Item,
     ItemKind,
     ProcessingEvent,
@@ -24,7 +27,11 @@ from archive.processing_health import (
     processing_health_snapshot,
     record_step_outcome,
 )
-from archive.services import enrich_item_media_archive, enrich_item_metadata
+from archive.services import (
+    _enrich_item_metadata_fields,
+    enrich_item_media_archive,
+    enrich_item_metadata,
+)
 
 NOW = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 YOUTUBE = ProcessingStep.MEDIA_ARCHIVE_YOUTUBE
@@ -263,6 +270,39 @@ def test_recording_errors_do_not_reach_the_processing_path(monkeypatch, caplog) 
     record_step_outcome(YOUTUBE, succeeded=True, item_id=1)
 
     assert "Could not record processing health" in caplog.text
+
+
+@pytest.mark.django_db(transaction=True)
+def test_metadata_commits_when_health_write_and_diagnostic_both_fail(monkeypatch) -> None:
+    item = Item.objects.create(original_url="https://example.com/article")
+
+    observations = []
+
+    def fail_event_save(event, *args, **kwargs):
+        saved_item = Item.objects.get(pk=item.pk)
+        observations.append((connection.in_atomic_block, saved_item.enrichment_status))
+        raise DatabaseError("synthetic health write failure")
+
+    diagnostic = Mock(side_effect=RuntimeError("synthetic logging failure"))
+    monkeypatch.setattr(
+        "archive.services.extract_metadata_from_url",
+        lambda url, timeout: ExtractedMetadata(title="Synthetic title"),
+    )
+    monkeypatch.setattr(ProcessingEvent, "save", fail_event_save)
+    monkeypatch.setattr("archive.processing_health.logger.exception", diagnostic)
+
+    assert _enrich_item_metadata_fields(item) is True
+
+    assert observations == [(True, EnrichmentStatus.COMPLETE)]
+    assert not connection.in_atomic_block
+    item.refresh_from_db()
+    assert item.enrichment_status == EnrichmentStatus.COMPLETE
+    assert item.title == "Synthetic title"
+    assert not ProcessingStepState.objects.filter(step=ProcessingStep.METADATA).exists()
+    assert not ProcessingEvent.objects.exists()
+    diagnostic.assert_called_once_with(
+        "Could not record processing health for step %s", ProcessingStep.METADATA
+    )
 
 
 @pytest.mark.django_db

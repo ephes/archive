@@ -66,7 +66,8 @@ def record_step_outcome(
             using=using or router.db_for_write(ProcessingStepState),
         )
     except Exception:
-        logger.exception("Could not record processing health for step %s", step)
+        with suppress(Exception):
+            logger.exception("Could not record processing health for step %s", step)
 
 
 def _record_step_outcome(

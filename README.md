@@ -1005,6 +1005,9 @@ The reference must be timezone-aware, with both ends of the elapsed 24-hour
 window representable in UTC. Invalid references raise `ValueError` before any
 snapshot queries run.
 
+If recording an outcome fails, the worker attempts to log the failure. An exception
+from that diagnostic still allows the item update to commit.
+
 After each outcome commits, the worker prunes at most 100 events older than 30 days
 on the same database, oldest timestamp first (then primary key). A pruning failure
 logs `Could not prune expired processing health events` and leaves the committed

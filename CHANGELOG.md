@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preserve item updates if processing health recording and its diagnostic both fail.
 - Preserve the fetch refusal when closing a rejected redirect response fails.
 - Limit processing health snapshots and new outcome writes to supported steps.
 - Retire staged upstream request handles before sending the terminal receipt and preserve completed results.

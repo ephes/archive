@@ -16,6 +16,7 @@ import http.client
 import ipaddress
 import os
 import socket
+from contextlib import suppress
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import (
@@ -131,7 +132,8 @@ class _CheckedRedirectHandler(HTTPRedirectHandler):
                 raise BlockedFetchError(f"URL fetch exceeded {MAX_REDIRECTS} redirects")
             require_http_url(newurl)
         except BlockedFetchError:
-            fp.close()
+            with suppress(Exception):
+                fp.close()
             raise
         new_request = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new_request is not None:

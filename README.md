@@ -771,6 +771,8 @@ redirect or a changing DNS answer cannot point the worker at loopback, private, 
 link-local services. List a hostname in `ARCHIVE_FETCH_PRIVATE_HOSTS` when a source on the home
 network must be archived; link-local addresses stay blocked. The summary, transcription, and
 article-audio API endpoints configured through `ARCHIVE_*_API_BASE` are not affected.
+When a redirect exceeds the hop limit or targets a non-HTTP(S) URL, the fetch
+reports the original refusal even if its single attempt to close the response fails.
 
 Summary generation is asynchronous and does not block capture or immediate publication. Audio/video
 transcription is also asynchronous and writes transcript text back onto the item when a transcribable media

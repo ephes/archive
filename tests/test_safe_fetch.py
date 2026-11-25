@@ -3,6 +3,7 @@ from __future__ import annotations
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from unittest.mock import Mock
 from urllib.error import URLError
 from urllib.request import Request
 
@@ -152,6 +153,32 @@ def test_redirect_to_other_scheme_is_refused(loopback_server, monkeypatch):
     monkeypatch.setenv("ARCHIVE_FETCH_PRIVATE_HOSTS", "127.0.0.1")
     with pytest.raises(BlockedFetchError):
         open_public_url(Request(loopback_server + "/redirect-to-ftp"), timeout=2)
+
+
+@pytest.mark.parametrize(
+    ("new_url", "hops", "reason"),
+    [
+        ("ftp://example.com/episode.mp3", 0, "Only http and https URLs can be fetched"),
+        (
+            "https://example.com/next",
+            safe_fetch.MAX_REDIRECTS,
+            f"URL fetch exceeded {safe_fetch.MAX_REDIRECTS} redirects",
+        ),
+    ],
+)
+def test_redirect_policy_refusal_survives_response_close_failure(new_url, hops, reason):
+    request = Request("https://example.com/start")
+    request.archive_redirect_hops = hops
+    response = Mock()
+    response.close.side_effect = OSError("synthetic close failure")
+
+    with pytest.raises(BlockedFetchError, match=f"^{reason}$"):
+        safe_fetch._CheckedRedirectHandler().redirect_request(
+            request, response, 302, "Found", {}, new_url
+        )
+
+    response.close.assert_called_once_with()
+    response.read.assert_not_called()
 
 
 @pytest.mark.parametrize("path", ["/loop", "/ping-a"])

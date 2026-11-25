@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preserve the fetch refusal when closing a rejected redirect response fails.
 - Limit processing health snapshots and new outcome writes to supported steps.
 - Retire staged upstream request handles before sending the terminal receipt and preserve completed results.
 - Preserve nested video command failures while independently killing, reaping and closing pipes.

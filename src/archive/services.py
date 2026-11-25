@@ -1466,8 +1466,8 @@ class ReprocessItemDisappeared(Item.DoesNotExist):  # type: ignore[name-defined]
     """The selected item disappeared before the locked reprocess reload."""
 
 
-def request_item_reprocess(item: Item) -> Item:
-    using = item._state.db or "default"
+def request_item_reprocess(item: Item, *, using: str | None = None) -> Item:
+    using = using or item._state.db or "default"
     with transaction.atomic(using=using):
         try:
             item.refresh_from_db(from_queryset=Item.objects.using(using).select_for_update())

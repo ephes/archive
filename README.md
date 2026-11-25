@@ -1147,9 +1147,12 @@ this check or turn stale generated text into an operator override. New items and
 manual overrides retain their existing behavior. Validation and save share the admin POST
 transaction and SQLite's configured IMMEDIATE write reservation.
 
-Reprocessing reloads each selected row under the same short write reservation before
-classification and status changes. Rows with an active processing stage are skipped
-and counted separately; retry after the worker finishes (or use explicit stale recovery).
+Reprocessing reads selected IDs in ascending order in pages of up to 200, bounded
+by the highest matching ID at the start of the action. Each page finishes reading
+before any row write begins. Reprocessing loads the current full row under a short
+write reservation before classification and status changes. The action counts rows with
+an active processing stage separately. Retry after the worker finishes or use explicit
+stale recovery.
 If a selected row disappears before the reload, reprocessing continues and reports
 the disappeared item separately from items with active processing.
 Only names retired from the current row are queued for reference-aware storage cleanup
@@ -1158,10 +1161,8 @@ Regression tests in `tests/test_admin_mutations.py` use synthetic content and in
 connections to temporary SQLite files in both rollback-journal and WAL modes:
 `uv run pytest tests/test_admin_mutations.py`.
 
-The reprocess action is intentionally per-item or small-batch in this slice. It does not trigger any implicit
-bulk historical replay. It also does not currently clear an existing generated article-audio artifact or job
-reference on its own, so a true article-audio regeneration still requires clearing the stored article-audio
-state first and then reprocessing the item. It now does clear stale archived source media when the current
+To regenerate article audio, first clear the stored article-audio state, including the artifact
+and job reference, then reprocess the item. Reprocessing clears stale archived source media when the current
 classification/media-resolution policy no longer supports that stored enclosure, so a previously misclassified
 embedded-video page can move back onto the article-audio path without manual database edits. Because this
 first pass uses only currently stored fields, an item that depends on fresh metadata hints can briefly fall
@@ -1615,8 +1616,9 @@ transport refuses incomplete staging before the parent can upload it, removes
 temporary downloads and preserves any previously published copy. Without a declared
 length, a nonempty EOF within the cap is accepted. JSON responses and HTTP error
 diagnostics retain their separate 8 MiB and 64 KiB bounds. Expiry closes the upstream
-and removes temporary downloads. Backfill failure returns `503` with
-`Retry-After: 60`; retrying can create the copy later. Anonymous requests start at
+and removes temporary downloads. For a still-eligible item, backfill failure returns
+a `no-store` `503` with `Retry-After: 60` even if the warning cannot be logged.
+Retrying can create the copy later. Anonymous requests start at
 most one copy per item and artifact in a 60-second window (tracked in the default
 cache, so per server process): while a copy runs, and for the rest of the window
 after a failed one, other GET/HEAD requests get the same `no-store` `503` with

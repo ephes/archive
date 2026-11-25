@@ -1,6 +1,7 @@
 import json
 
 from django.contrib import admin
+from django.db.models import Max
 
 from archive.classification import (
     CURRENT_CLASSIFICATION_ENGINE_VERSION,
@@ -15,6 +16,8 @@ from archive.services import (
     describe_item_downstream_normalization,
     request_item_reprocess,
 )
+
+REPROCESS_PAGE_SIZE = 200
 
 
 @admin.register(Item)
@@ -122,16 +125,27 @@ class ItemAdmin(admin.ModelAdmin):
         count = 0
         skipped = 0
         disappeared = 0
-        for item in queryset:
-            try:
-                request_item_reprocess(item)
-            except ReprocessItemDisappeared:
-                disappeared += 1
-                continue
-            if item._has_processing_status():
-                skipped += 1
-            else:
-                count += 1
+        selected_ids = queryset.order_by("pk").values_list("pk", flat=True)
+        horizon = selected_ids.aggregate(max_id=Max("pk"))["max_id"]
+        if horizon is not None:
+            using = selected_ids.db
+            selected_ids = selected_ids.filter(pk__lte=horizon)
+            while True:
+                # Materialize each ID page before opening any SQLite write transactions.
+                page = list(selected_ids[:REPROCESS_PAGE_SIZE])
+                for pk in page:
+                    try:
+                        item = request_item_reprocess(Item(pk=pk), using=using)
+                    except ReprocessItemDisappeared:
+                        disappeared += 1
+                        continue
+                    if item._has_processing_status():
+                        skipped += 1
+                    else:
+                        count += 1
+                if len(page) < REPROCESS_PAGE_SIZE or page[-1] == horizon:
+                    break
+                selected_ids = selected_ids.filter(pk__gt=page[-1])
         self.message_user(
             request,
             f"Queued {count} item(s) for reprocessing. Skipped {skipped} active item(s). "

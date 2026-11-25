@@ -14,6 +14,7 @@ from django.core.cache import cache
 from django.urls import reverse
 
 from archive import views
+from archive.article_audio import ArticleAudioGenerationError
 from archive.models import EnrichmentStatus, Item, ItemKind
 
 PAYLOAD = b"\xff\xfb" + bytes(range(256)) * 40
@@ -102,6 +103,37 @@ def test_failed_public_copy_is_not_retried_by_every_request(client, upstream):
     # The stored copy is served without contacting upstream again.
     assert body(client.get(audio_url(article))) == PAYLOAD
     assert len(upstream["requests"]) == 2
+
+
+@pytest.mark.parametrize("hide_during_copy", [False, True])
+def test_failed_public_copy_preserves_response_when_warning_fails(
+    client, monkeypatch, hide_during_copy
+):
+    article = make_article()
+    warnings = []
+
+    def fail_copy(*, item):
+        if hide_during_copy:
+            Item.objects.filter(pk=item.pk).update(is_public=False)
+        raise ArticleAudioGenerationError("Synthetic download failure")
+
+    def fail_warning(message, *args):
+        warnings.append(args)
+        raise RuntimeError("Synthetic warning failure")
+
+    monkeypatch.setattr(views, "store_generated_article_audio", fail_copy)
+    monkeypatch.setattr(views.logger, "warning", fail_warning)
+
+    response = client.get(audio_url(article))
+
+    assert response["Cache-Control"] == "no-store"
+    if hide_during_copy:
+        assert response.status_code == 404
+        assert not warnings
+    else:
+        assert response.status_code == 503
+        assert response["Retry-After"] == "60"
+        assert warnings == [(article.pk, "ArticleAudioGenerationError")]
 
 
 def test_concurrent_request_during_a_copy_does_not_start_another(client, upstream, monkeypatch):

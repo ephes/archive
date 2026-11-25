@@ -702,11 +702,12 @@ def item_article_audio(request: HttpRequest, pk: int) -> HttpResponse:
         if not eligible.exists():
             raise Http404("Article audio is not available") from None
         # Log only the exception class: messages may carry remote URLs or paths.
-        logger.warning(
-            "Article audio is temporarily unavailable for item %s (%s)",
-            item.pk,
-            type(exc).__name__,
-        )
+        with suppress(Exception):
+            logger.warning(
+                "Article audio is temporarily unavailable for item %s (%s)",
+                item.pk,
+                type(exc).__name__,
+            )
         return _article_audio_unavailable()
 
     # Storage open may also block. Reauthorize immediately before handing the

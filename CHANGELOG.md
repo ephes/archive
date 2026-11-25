@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Page selected admin reprocessing IDs before loading current items under row locks.
+- Preserve the public article-audio retry response if the warning fails.
+
 - Require autocommit for reclassification apply so reported row updates are committed.
 - Escape and bound legacy kind and rule values in reclassification output.
 

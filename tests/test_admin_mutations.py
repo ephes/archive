@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 from django.contrib.auth.models import Permission
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from archive.models import EnrichmentStatus, Item, ItemKind
@@ -263,7 +265,9 @@ def test_admin_reprocess_requires_change_permission(client, django_user_model, c
 
 
 @pytest.mark.django_db(transaction=True)
-def test_admin_reprocess_continues_after_selected_item_disappears(client, editor_user, monkeypatch):
+def test_admin_reprocess_pages_selected_ids_and_counts_disappeared(
+    client, editor_user, monkeypatch
+):
     client.force_login(editor_user)
     first, middle, last = [
         Item.objects.create(
@@ -273,19 +277,32 @@ def test_admin_reprocess_continues_after_selected_item_disappears(client, editor
     ]
     selected = []
 
-    def delete_before_reload(item):
+    def delete_before_reload(item, **kwargs):
         selected.append(item.pk)
         if item.pk == middle.pk:
             Item.objects.filter(pk=middle.pk).delete()
-        return request_item_reprocess(item)
+        return request_item_reprocess(item, **kwargs)
 
+    monkeypatch.setattr("archive.admin.REPROCESS_PAGE_SIZE", 2, raising=False)
     monkeypatch.setattr("archive.admin.request_item_reprocess", delete_before_reload)
-    response = client.post(
-        reverse("admin:archive_item_changelist"),
-        {"action": "reprocess_selected_items", "_selected_action": [first.pk, middle.pk, last.pk]},
-        follow=True,
-    )
-    assert selected[1] == middle.pk
+    with CaptureQueriesContext(connection) as queries:
+        response = client.post(
+            reverse("admin:archive_item_changelist"),
+            {
+                "action": "reprocess_selected_items",
+                "_selected_action": [last.pk],
+                "select_across": "1",
+            },
+            follow=True,
+        )
+    pages = [
+        query["sql"]
+        for query in queries
+        if query["sql"].startswith('SELECT "archive_item"."id" AS "pk" FROM "archive_item"')
+    ]
+    assert len(pages) == 2
+    assert all("ORDER BY 1 ASC LIMIT 2" in sql for sql in pages)
+    assert selected == [first.pk, middle.pk, last.pk]
     assert b"Queued 2 item(s) for reprocessing. Skipped 0 active item(s)." in response.content
     assert b"Skipped 1 disappeared item(s)." in response.content
     assert not Item.objects.filter(pk=middle.pk).exists()
@@ -302,7 +319,7 @@ def test_admin_reprocess_selection_preserves_later_kind_media_and_active_attempt
     items = [Item.objects.create(original_url=f"https://example.test/{n}") for n in range(2)]
     selected = []
 
-    def publish_then_reprocess(stale):
+    def publish_then_reprocess(stale, **kwargs):
         selected.append(stale.pk)
         Item.objects.filter(pk=stale.pk).update(
             kind=ItemKind.VIDEO,
@@ -315,7 +332,7 @@ def test_admin_reprocess_selection_preserves_later_kind_media_and_active_attempt
                 else EnrichmentStatus.COMPLETE
             ),
         )
-        return request_item_reprocess(stale)
+        return request_item_reprocess(stale, **kwargs)
 
     monkeypatch.setattr("archive.admin.request_item_reprocess", publish_then_reprocess)
     response = client.post(

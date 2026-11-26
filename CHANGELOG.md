@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Stamp worker ownership after selecting and locking the item, using a fresh clock for stale recovery.
 - Report confirmed reservation releases and object deletes when reconciliation output fails.
 - Enforce the retired reservation object budget before validating or sorting each storage listing.
 - Keep confirmed object delete counts when reservation release fails and report whether the reservation was confirmed to remain.

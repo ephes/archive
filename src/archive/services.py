@@ -936,17 +936,17 @@ def _recover_processing_items(query: Q) -> int:
 def claim_pending_item(*, exclude_ids: set[int] | None = None) -> Item | None:
     using = router.db_for_write(Item)
     with transaction.atomic(using=using):
-        now = timezone.now()
+        eligible_at = timezone.now()
         queryset = (
             Item.objects.using(using)
             .select_for_update()
             .exclude(_processing_item_query())
             .filter(
                 Q(enrichment_status=EnrichmentStatus.PENDING)
-                | _claimable_media_archive_query(now)
-                | _claimable_transcript_query(now)
-                | _claimable_summary_query(now)
-                | _claimable_article_audio_query(now)
+                | _claimable_media_archive_query(eligible_at)
+                | _claimable_transcript_query(eligible_at)
+                | _claimable_summary_query(eligible_at)
+                | _claimable_article_audio_query(eligible_at)
             )
         )
         if exclude_ids:
@@ -960,23 +960,23 @@ def claim_pending_item(*, exclude_ids: set[int] | None = None) -> Item | None:
             item.enrichment_status = EnrichmentStatus.PROCESSING
             item.enrichment_error = ""
             update_fields.extend(["enrichment_status", "enrichment_error"])
-        if _summary_should_start(item, now):
+        if _summary_should_start(item, eligible_at):
             item.summary_status = EnrichmentStatus.PROCESSING
             item.summary_error = ""
             item.summary_retry_at = None
             update_fields.extend(["summary_status", "summary_error", "summary_retry_at"])
-        if _media_archive_should_start(item, now):
+        if _media_archive_should_start(item, eligible_at):
             item.media_archive_status = EnrichmentStatus.PROCESSING
             item.media_archive_error = ""
             item.media_archive_retry_at = None
             update_fields.extend(
                 ["media_archive_status", "media_archive_error", "media_archive_retry_at"]
             )
-        if _transcript_should_start(item, now):
+        if _transcript_should_start(item, eligible_at):
             item.transcript_status = EnrichmentStatus.PROCESSING
             item.transcript_error = ""
             update_fields.extend(["transcript_status", "transcript_error"])
-        if _article_audio_should_start(item, now):
+        if _article_audio_should_start(item, eligible_at):
             item.article_audio_status = EnrichmentStatus.PROCESSING
             item.article_audio_error = ""
             update_fields.extend(["article_audio_status", "article_audio_error"])
@@ -986,9 +986,9 @@ def claim_pending_item(*, exclude_ids: set[int] | None = None) -> Item | None:
             # (for example pending media with no supported source). Own that
             # stage too, so every returned claim has a recoverable timestamp.
             for stage, query in (
-                ("media_archive", _claimable_media_archive_query(now)),
-                ("transcript", _claimable_transcript_query(now)),
-                ("article_audio", _claimable_article_audio_query(now)),
+                ("media_archive", _claimable_media_archive_query(eligible_at)),
+                ("transcript", _claimable_transcript_query(eligible_at)),
+                ("article_audio", _claimable_article_audio_query(eligible_at)),
             ):
                 if Item.objects.using(using).filter(pk=item.pk).filter(query).exists():
                     setattr(item, f"{stage}_status", EnrichmentStatus.PROCESSING)
@@ -996,7 +996,7 @@ def claim_pending_item(*, exclude_ids: set[int] | None = None) -> Item | None:
                     update_fields.extend([f"{stage}_status", f"{stage}_error"])
                     break
         if update_fields:
-            item.processing_started_at = now
+            item.processing_started_at = timezone.now()
             update_fields.append("processing_started_at")
             item.save(using=using, update_fields=sorted(set(update_fields)))
     return item

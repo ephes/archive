@@ -120,7 +120,7 @@ item.refresh_from_db()
 assert item.summary_status == Status.PROCESSING
 assert item.summary_retry_at is None
 assert item.processing_started_at == retry_at
-clock.assert_called_once_with()
+assert clock.call_count == 2
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
@@ -304,3 +304,31 @@ def test_superseded_media_cleanup_failure_is_contained(monkeypatch, caplog):
     assert "Failed to discard superseded media" in caplog.text
     assert PendingArchiveMediaUpload.objects.exists()
     assert storages["archive_media"].exists(paths[0])
+
+
+def test_claim_timestamps_ownership_after_waiting_for_selected_row(monkeypatch):
+    item = idle_item(enrichment_status=Status.PENDING, summary_status=Status.PENDING)
+    eligible_at = timezone.now()
+    acquired_at = eligible_at + timedelta(hours=2)
+    clock = eligible_at
+
+    def delayed_claim_query(execute, sql, params, many, context):
+        nonlocal clock
+        # SQLite locks at BEGIN IMMEDIATE. Model a backend that waits for
+        # a row lock during the claim query by advancing the clock there.
+        if sql.startswith("SELECT") and 'FROM "archive_item"' in sql:
+            clock = acquired_at
+        return execute(sql, params, many, context)
+
+    monkeypatch.setattr(services.timezone, "now", lambda: clock)
+    with connection.execute_wrapper(delayed_claim_query):
+        claimed = services.claim_pending_item()
+
+    assert claimed is not None and claimed.pk == item.pk
+    assert claimed.processing_started_at == acquired_at
+    item.refresh_from_db()
+    assert item.processing_started_at == acquired_at
+    assert item.enrichment_status == item.summary_status == Status.PROCESSING
+    assert (
+        services.recover_stale_processing_items(stale_before=acquired_at - timedelta(hours=1)) == 0
+    )

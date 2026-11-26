@@ -649,8 +649,9 @@ Public RSS and processing-health responses explicitly use `BEGIN DEFERRED` read
 snapshots instead of acquiring the IMMEDIATE writer lock. Worker claims, upload
 reservations, and media publication use short database
 transactions; fetching, paid enrichment, and uploads run outside them. Worker claims
-use one timestamp taken after SQLite grants the writer lock, both to decide which retries
-are due and to stamp the processing attempt. Management commands
+check which retries are due after SQLite grants the writer lock. After selecting
+and locking the item, they record a fresh processing timestamp shared by all claimed
+stages, so time spent waiting for the item does not age the new attempt. Management commands
 do not wrap processing loops in transactions. Media cleanup deliberately holds a transaction
 across each storage deletion to preserve its reference/reservation safety check: slow storage
 can hold up other writers and exhaust their busy timeout. Database migrations and bulk admin

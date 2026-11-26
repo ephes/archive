@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Report requeue and hold counts and the last processed item when command output fails.
 - Require an exact read of known-size archived audio and video before synchronous transcription.
 - Stamp worker ownership after selecting and locking the item, using a fresh clock for stale recovery.
 - Report confirmed reservation releases and object deletes when reconciliation output fails.

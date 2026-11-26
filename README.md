@@ -957,6 +957,11 @@ just manage reprocess_items --ids 111 --only summary --regenerate --dry-run
 - `--dry-run` prints the same per-item lines without writing. Output contains item ids, step
   names, states, retry counts, and due times only, no titles, URLs, or error messages.
 
+If a receipt write or flush fails, the command stops before starting the next item.
+The error gives the mode, queued, held and skipped counts, and the last processed ID.
+Apply changes commit per item in autocommit mode. When invoked within an outer
+transaction, the reported changes depend on that transaction committing.
+
 The command only changes database state; the worker must be running to pick the items up.
 In production, ops-control's `just archive-reprocess` runs it on macmini.
 

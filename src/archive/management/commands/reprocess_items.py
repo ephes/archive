@@ -134,24 +134,44 @@ class Command(BaseCommand):
         now = timezone.now()
         prefix = "[dry-run] " if dry_run else ""
         queued = skipped = held = 0
+        last_item_id: int | None = None
+        mode = "dry-run" if dry_run else "apply"
+        caller_transaction = not dry_run and not transaction.get_autocommit()
+
+        def write_receipt(message: str) -> None:
+            try:
+                self.stdout.write(message)
+                self.stdout.flush()
+            except (OSError, ValueError) as exc:
+                pending = (
+                    " Changes are pending in the caller's transaction."
+                    if caller_transaction
+                    else ""
+                )
+                raise CommandError(
+                    f"Reprocessing output failed. mode={mode} "
+                    f"queued={queued} held={held} skipped={skipped} "
+                    f"last_item={last_item_id or '-'}.{pending}"
+                ) from exc
 
         for item_id in item_ids:
+            last_item_id = item_id
             item = items.get(item_id)
             if item is None:
-                self.stdout.write(f"{prefix}item {item_id}: skipped, not found")
                 skipped += 1
+                write_receipt(f"{prefix}item {item_id}: skipped, not found")
                 continue
             reason = _skip_reason(item, step, regenerate=regenerate)
             if reason:
-                self.stdout.write(f"{prefix}item {item_id}: skipped, {reason}")
                 skipped += 1
+                write_receipt(f"{prefix}item {item_id}: skipped, {reason}")
                 continue
 
             due_at = now + timedelta(seconds=stagger * queued)
             hold = hold_article_audio and _article_audio_holdable(item)
             if not dry_run and not _requeue(item_id, step, due_at, hold, regenerate=regenerate):
-                self.stdout.write(f"item {item_id}: skipped, {step} changed concurrently")
                 skipped += 1
+                write_receipt(f"item {item_id}: skipped, {step} changed concurrently")
                 continue
             queued += 1
             if step == "article_audio":
@@ -171,13 +191,13 @@ class Command(BaseCommand):
             if hold:
                 held += 1
                 line += "; article audio pending -> held"
-            self.stdout.write(line)
+            write_receipt(line)
 
         verb = "Would re-queue" if dry_run else "Re-queued"
         summary = f"{prefix}{verb} {step} for {queued} item(s), skipped {skipped}"
         if hold_article_audio:
             summary += f", article audio held for {held}"
-        self.stdout.write(self.style.SUCCESS(summary + "."))
+        write_receipt(self.style.SUCCESS(summary + "."))
 
 
 def _skip_reason(item: Item, step: str, *, regenerate: bool = False) -> str:

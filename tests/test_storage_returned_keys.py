@@ -206,7 +206,10 @@ class _FailingHandler(logging.Handler):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_storage_key_refusal_is_recorded_when_a_shared_log_handler_fails(monkeypatch):
+@pytest.mark.parametrize("cleanup_fails", [False, True], ids=["cleanup", "cleanup-fails"])
+def test_storage_key_refusal_is_recorded_when_a_shared_log_handler_fails(
+    monkeypatch, cleanup_fails
+):
     item = _podcast_item()
     item.media_archive_status = EnrichmentStatus.PROCESSING
     item.save()
@@ -223,6 +226,14 @@ def test_storage_key_refusal_is_recorded_when_a_shared_log_handler_fails(monkeyp
         "archive.media_archival._open_direct_media",
         lambda request, timeout: _FakeResponse([b"audio"]),
     )
+    if cleanup_fails:
+
+        def fail_cleanup(*args, **kwargs):
+            raise RuntimeError("synthetic cleanup failure")
+
+        monkeypatch.setattr(
+            "archive.media_archival.delete_unreferenced_archive_media_paths", fail_cleanup
+        )
     handler = _FailingHandler()
     shared = logging.getLogger("archive")
     shared.addHandler(handler)
@@ -236,7 +247,8 @@ def test_storage_key_refusal_is_recorded_when_a_shared_log_handler_fails(monkeyp
         item.media_archive_error
         == "Archive media storage key escaped its reserved upload namespace"
     )
-    assert not PendingArchiveMediaUpload.objects.exists()
+    # A failed cleanup leaves the reservation protecting the object.
+    assert PendingArchiveMediaUpload.objects.exists() is cleanup_fails
 
 
 @pytest.mark.django_db(transaction=True)

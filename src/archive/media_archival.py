@@ -770,8 +770,10 @@ def _discard_unpublished_upload(object_name: str, *, using: str) -> None:
     try:
         delete_unreferenced_archive_media_paths((object_name,), using=using, owns_reservation=True)
     except Exception:
-        # The reservation stays behind and keeps protecting the object.
-        logger.exception("Failed to discard unpublished archive media %s", object_name)
+        # The reservation stays behind and keeps protecting the object; a failing
+        # log handler must not replace the upload error the caller re-raises.
+        with suppress(Exception):
+            logger.exception("Failed to discard unpublished archive media %s", object_name)
 
 
 def _open_archived_file(path: str, *, label: str):

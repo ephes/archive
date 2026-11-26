@@ -6,7 +6,7 @@
 - Preserve media admission refusals and completed staging results when closing the disk lock fails.
 - Report the admitted end of bounded audio upload streams to storage backends.
 - Reject truncated audio upload stages before publishing their archive references, including short single-part reads such as multipart uploads.
-- Record media archival failures even if logging the failure raises.
+- Record media archival failures, including storage-key refusals whose cleanup fails, even if logging raises.
 - Report settled orphan deletion counts when cleanup output fails or a sweep aborts partway.
 - Report the search index rebuild outcome when writing or flushing the success receipt fails.
 - Report and count selected reclassification items deleted before the current-row read.

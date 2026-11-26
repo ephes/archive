@@ -21,11 +21,12 @@ def _count_metadata_lines(html: str) -> int:
     def global_trace(frame, event, arg):
         return local_trace if frame.f_code.co_filename == path else None
 
+    previous = sys.gettrace()
     sys.settrace(global_trace)
     try:
         extract_metadata_from_html(html, base_url=BASE_URL)
     finally:
-        sys.settrace(None)
+        sys.settrace(previous)
     return count
 
 

@@ -327,6 +327,66 @@ def test_storage_failure_keeps_reservation_and_fails_the_command(
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("failure", ["delete", "commit", "commit-ack"])
+def test_database_failure_preserves_completed_storage_deletes(monkeypatch, failure):
+    first = _processing_item()
+    first_name = _upload(first)
+    extra_name = first_name.rsplit("/", 1)[0] + "/extra.mp3"
+    storage = storages["archive_media"]
+    storage.save(extra_name, ContentFile(b"extra"))
+    second = _processing_item()
+    second_name = _upload(second)
+    Item.objects.filter(pk__in=[first.pk, second.pk]).update(processing_started_at=None)
+    first_reservation = PendingArchiveMediaUpload.objects.get(owner_item_id=first.pk)
+
+    if failure == "delete":
+        delete = PendingArchiveMediaUpload.delete
+
+        def failing_delete(reservation):
+            target = reservation.pk == first_reservation.pk
+            result = delete(reservation)
+            if target:
+                raise OperationalError("database details")
+            return result
+
+        monkeypatch.setattr(PendingArchiveMediaUpload, "delete", failing_delete)
+    else:
+        connection = connections["default"]
+        commit = connection.commit
+
+        def fail_first_commit():
+            monkeypatch.setattr(connection, "commit", commit)
+            if failure == "commit-ack":
+                commit()
+            raise OperationalError("database details")
+
+        monkeypatch.setattr(connection, "commit", fail_first_commit)
+
+    out = StringIO()
+    err = StringIO()
+    with pytest.raises(CommandError, match="incomplete") as error:
+        call_command("reconcile_archive_media_reservations", "--apply", stdout=out, stderr=err)
+
+    assert "reservation_release_failed" in err.getvalue()
+    assert "database details" not in err.getvalue()
+    assert "Confirmed object deletes: 2." in err.getvalue()
+    assert f"DELETED {second_name}" in out.getvalue()
+    assert "released=1 deleted=3 mode=apply failed=1" in out.getvalue()
+    assert not any(storage.exists(name) for name in (first_name, extra_name, second_name))
+    assert not PendingArchiveMediaUpload.objects.filter(owner_item_id=second.pk).exists()
+    if failure == "commit-ack":
+        assert not PendingArchiveMediaUpload.objects.filter(pk=first_reservation.pk).exists()
+        assert "Verify the reservation state" in str(error.value)
+        assert "remains for retry" not in err.getvalue()
+    else:
+        assert PendingArchiveMediaUpload.objects.filter(
+            pk=first_reservation.pk, prefix=first_reservation.prefix
+        ).exists()
+        assert "Reservation remains for retry" in err.getvalue()
+        assert "Retry the command" in str(error.value)
+
+
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
 def test_oversized_prefix_is_left_for_manual_recovery(apply):
     item = _processing_item()

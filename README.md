@@ -1443,6 +1443,13 @@ whatever their age. On an expected filesystem/S3 deletion failure, the reservati
 keeps protecting what remains. The command reports `storage_delete_failed` without
 backend details and exits nonzero. The summary includes completed deletes from
 those reservations in `deleted`.
+If the database fails during reservation release or after some objects were
+deleted, apply reports `reservation_release_failed` without database details.
+The confirmed object deletes still count in `deleted`. The command continues
+with other reservations, counts the failure in `failed` and exits nonzero.
+Retry after the database recovers if a fresh read confirmed that the reservation
+remains. If retention could not be confirmed, inspect the reservation's state
+before retrying.
 If a listed subtree disappears, the backend returns an invalid child name, or the
 filesystem/S3 listing itself fails, the command reports `storage_listing_failed` without backend details and leaves the
 affected reservation and its objects protected. Both dry-run and apply continue with

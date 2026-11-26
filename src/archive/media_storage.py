@@ -7,7 +7,7 @@ from itertools import islice
 
 from botocore.exceptions import BotoCoreError, ClientError
 from django.core.files.storage import storages
-from django.db import transaction
+from django.db import DatabaseError, transaction
 from django.db.models import Q
 
 ARCHIVE_MEDIA_STORAGE_ALIAS = "archive_media"
@@ -162,6 +162,15 @@ class ReservationStorageDeleteError(RuntimeError):
         self.deleted_count = deleted_count
 
 
+class ReservationReleaseError(RuntimeError):
+    """A database failure while retiring a reservation, with confirmed storage deletes."""
+
+    def __init__(self, deleted_count: int, *, reservation_retained: bool) -> None:
+        super().__init__("Database failure during reservation reconciliation")
+        self.deleted_count = deleted_count
+        self.reservation_retained = reservation_retained
+
+
 @dataclass(frozen=True)
 class ReservationReconciliation:
     """Outcome for one upload reservation.
@@ -195,7 +204,9 @@ def reconcile_upload_reservation(
     A storage deletion failure raises ReservationStorageDeleteError with the
     number of completed deletes and keeps the reservation protecting what remains.
     An incomplete or failed listing raises IncompleteArchiveMediaListingError before
-    any deletion.
+    any deletion. A database failure after object deletion or during release
+    raises ReservationReleaseError with the count of confirmed deletes and
+    whether a post-transaction read confirmed that the reservation remains.
     Dry runs use advisory reads without write transactions or row locks.
     """
     from archive.models import Item, PendingArchiveMediaUpload
@@ -214,56 +225,78 @@ def reconcile_upload_reservation(
         return ReservationReconciliation(state="unowned", prefix=prefix)
 
     storage = storages[ARCHIVE_MEDIA_STORAGE_ALIAS]
-    with transaction.atomic(using=using, durable=True) if apply else nullcontext():
-        owners = Item.objects.using(using)
-        reservations = PendingArchiveMediaUpload.objects.using(using)
-        if apply:
-            # Acquire the owner row before the reservation, like publication does.
-            owners = owners.select_for_update()
-            reservations = reservations.select_for_update()
-        current_attempts = list(
-            owners.filter(pk=owner_item_id).values_list("processing_started_at", flat=True)
-        )
-        reservation = reservations.filter(
-            pk=reservation_id, prefix=prefix, owner_item_id=owner_item_id
-        ).first()
-        if reservation is None or reservation.owner_attempt is None:
-            return ReservationReconciliation(state="gone", prefix=prefix)
-        if current_attempts and current_attempts[0] == reservation.owner_attempt:
-            return ReservationReconciliation(
-                state="live", prefix=prefix, owner_item_id=owner_item_id
-            )
-
-        inventory = _iter_storage_object_names(
-            storage=storage,
-            prefix=prefix.strip("/"),
-            max_directories=MAX_RECONCILED_PREFIX_DIRECTORIES,
-        )
-        try:
-            names = list(islice(inventory, MAX_RECONCILED_PREFIX_OBJECTS + 1))
-        except _ArchiveMediaDirectoryLimitExceeded:
-            names = None
-        except (OSError, BotoCoreError, ClientError) as exc:
-            # Nothing was deleted yet; report a listing failure, not a deletion failure.
-            raise IncompleteArchiveMediaListingError("Archive media listing failed") from exc
-        if names is None or len(names) > MAX_RECONCILED_PREFIX_OBJECTS:
-            return ReservationReconciliation(
-                state="oversized", prefix=prefix, owner_item_id=owner_item_id
-            )
-        deleted: list[str] = []
-        kept: list[str] = []
-        for name in names:
-            if _is_referenced_archive_media_path(name, using=using, for_update=apply):
-                kept.append(name)
-                continue
+    deleted: list[str] = []
+    release_attempted = False
+    try:
+        with transaction.atomic(using=using, durable=True) if apply else nullcontext():
+            owners = Item.objects.using(using)
+            reservations = PendingArchiveMediaUpload.objects.using(using)
             if apply:
-                try:
-                    storage.delete(name)
-                except (OSError, BotoCoreError, ClientError) as exc:
-                    raise ReservationStorageDeleteError(len(deleted)) from exc
-            deleted.append(name)
-        if apply:
-            reservation.delete()
+                # Acquire the owner row before the reservation, like publication does.
+                owners = owners.select_for_update()
+                reservations = reservations.select_for_update()
+            current_attempts = list(
+                owners.filter(pk=owner_item_id).values_list("processing_started_at", flat=True)
+            )
+            reservation = reservations.filter(
+                pk=reservation_id, prefix=prefix, owner_item_id=owner_item_id
+            ).first()
+            if reservation is None or reservation.owner_attempt is None:
+                return ReservationReconciliation(state="gone", prefix=prefix)
+            if current_attempts and current_attempts[0] == reservation.owner_attempt:
+                return ReservationReconciliation(
+                    state="live", prefix=prefix, owner_item_id=owner_item_id
+                )
+
+            inventory = _iter_storage_object_names(
+                storage=storage,
+                prefix=prefix.strip("/"),
+                max_directories=MAX_RECONCILED_PREFIX_DIRECTORIES,
+            )
+            try:
+                names = list(islice(inventory, MAX_RECONCILED_PREFIX_OBJECTS + 1))
+            except _ArchiveMediaDirectoryLimitExceeded:
+                names = None
+            except (OSError, BotoCoreError, ClientError) as exc:
+                # Nothing was deleted yet; report a listing failure, not a deletion failure.
+                raise IncompleteArchiveMediaListingError("Archive media listing failed") from exc
+            if names is None or len(names) > MAX_RECONCILED_PREFIX_OBJECTS:
+                return ReservationReconciliation(
+                    state="oversized", prefix=prefix, owner_item_id=owner_item_id
+                )
+            kept: list[str] = []
+            for name in names:
+                if _is_referenced_archive_media_path(name, using=using, for_update=apply):
+                    kept.append(name)
+                    continue
+                if apply:
+                    try:
+                        storage.delete(name)
+                    except (OSError, BotoCoreError, ClientError) as exc:
+                        raise ReservationStorageDeleteError(len(deleted)) from exc
+                deleted.append(name)
+            if apply:
+                release_attempted = True
+                reservation.delete()
+    except DatabaseError as exc:
+        if not apply or (not deleted and not release_attempted):
+            raise
+        # Check committed state after atomic exits. A failed commit can mean
+        # either a rollback or a successful commit whose acknowledgement was lost.
+        reservation_retained = False
+        try:
+            reservation_retained = (
+                transaction.get_autocommit(using=using)
+                and PendingArchiveMediaUpload.objects.using(using)
+                .filter(pk=reservation_id, prefix=prefix)
+                .exists()
+            )
+        except DatabaseError:
+            # The storage receipt still holds if the database cannot be read.
+            pass
+        raise ReservationReleaseError(
+            len(deleted), reservation_retained=reservation_retained
+        ) from exc
     return ReservationReconciliation(
         state="retired",
         prefix=prefix,

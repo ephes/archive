@@ -6,6 +6,7 @@ from django.db import router
 
 from archive.media_storage import (
     IncompleteArchiveMediaListingError,
+    ReservationReleaseError,
     ReservationStorageDeleteError,
     reconcile_upload_reservation,
 )
@@ -33,6 +34,7 @@ class Command(BaseCommand):
         using = router.db_for_write(PendingArchiveMediaUpload)
         counts = dict.fromkeys(("live", "retired", "unowned", "oversized", "gone"), 0)
         deleted_count = released_count = failed_count = 0
+        unverified_release_count = 0
         self.stdout.write(
             "Apply mode: releasing retired upload reservations."
             if apply
@@ -46,6 +48,19 @@ class Command(BaseCommand):
         for ordinal, reservation_id in enumerate(reservation_ids, start=1):
             try:
                 outcome = reconcile_upload_reservation(reservation_id, using=using, apply=apply)
+            except ReservationReleaseError as exc:
+                deleted_count += exc.deleted_count
+                failed_count += 1
+                if exc.reservation_retained:
+                    detail = "Reservation remains for retry."
+                else:
+                    unverified_release_count += 1
+                    detail = "Reservation retention could not be confirmed."
+                self.stderr.write(
+                    f"Database failure for reservation {ordinal} (reservation_release_failed). "
+                    f"Confirmed object deletes: {exc.deleted_count}. {detail}"
+                )
+                continue
             except IncompleteArchiveMediaListingError:
                 failed_count += 1
                 self.stderr.write(
@@ -91,8 +106,13 @@ class Command(BaseCommand):
             f"failed={failed_count}"
         )
         follow_up = []
-        if failed_count:
-            follow_up.append(f"Retry the command for {failed_count} failed reservations")
+        retryable_count = failed_count - unverified_release_count
+        if retryable_count:
+            follow_up.append(f"Retry the command for {retryable_count} failed reservations")
+        if unverified_release_count:
+            follow_up.append(
+                f"Verify the reservation state for {unverified_release_count} database failures"
+            )
         if apply and counts["oversized"]:
             follow_up.append(
                 f"{counts['oversized']} oversized reservations require manual recovery"

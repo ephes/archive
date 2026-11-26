@@ -8,6 +8,7 @@ import re
 import uuid
 from contextlib import ExitStack, closing, suppress
 from dataclasses import dataclass
+from io import BytesIO
 from time import monotonic
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -261,7 +262,7 @@ def _load_transcription_media(
         return _download_remote_media(
             source_url=source.location, timeout=timeout, deadline=deadline
         )
-    return _read_archived_media(item=item, source=source)
+    return _read_archived_media(item=item, source=source, deadline=deadline)
 
 
 def _looks_like_media_url(url: str) -> bool:
@@ -330,7 +331,9 @@ def _safe_download_failure(exc: MediaArchivalError) -> str:
     return "Media download failed: transport error"
 
 
-def _read_archived_media(item: Item, source: TranscriptionSource) -> DownloadedMedia:
+def _read_archived_media(
+    item: Item, source: TranscriptionSource, *, deadline: float | None = None
+) -> DownloadedMedia:
     opener = open_archived_audio if source.kind == "archived_audio" else open_archived_video
     source_label = "audio" if source.kind == "archived_audio" else "video"
     content_type = source.content_type.lower()
@@ -348,7 +351,21 @@ def _read_archived_media(item: Item, source: TranscriptionSource) -> DownloadedM
 
     try:
         with closing(opener(item)) as media_file:
-            payload = media_file.read(MAX_TRANSCRIPTION_BYTES + 1)
+            if source.size_bytes > 0:
+                # Raw storage readers may return short chunks before EOF.
+                # Keep the existing cap that routes oversized audio to staging.
+                read_limit = MAX_TRANSCRIPTION_BYTES + 1
+                with BytesIO() as buffer:
+                    while buffer.tell() < read_limit:
+                        if deadline is not None:
+                            _remaining(deadline)
+                        chunk = media_file.read(read_limit - buffer.tell())
+                        if not chunk:
+                            break
+                        buffer.write(chunk)
+                    payload = buffer.getvalue()
+            else:
+                payload = media_file.read(MAX_TRANSCRIPTION_BYTES + 1)
     except MediaArchivalError as exc:
         raise TranscriptionGenerationError(str(exc)) from exc
     except OSError as exc:
@@ -360,6 +377,8 @@ def _read_archived_media(item: Item, source: TranscriptionSource) -> DownloadedM
         if source.kind == "archived_audio":
             raise _ArchivedAudioRequiresBatchUpload
         raise _oversized_archived_video_not_supported()
+    if source.size_bytes > 0 and len(payload) != source.size_bytes:
+        raise TranscriptionGenerationError(f"Archived {source_label} length mismatch")
 
     guessed_content_type = content_type or SUPPORTED_SUFFIXES[suffix]
     if guessed_content_type == "application/octet-stream":

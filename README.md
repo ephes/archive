@@ -1596,6 +1596,9 @@ Long recordings must pass: archival, staging and the batch job are sized for mul
   closed in that case. django-storages' own `S3File` would copy the whole object into
   memory on first read (`AWS_S3_MAX_MEMORY_SIZE` is 0 by default), which a multi-gigabyte
   recording cannot afford. A range request for a public player reads only the requested bytes.
+  Synchronous transcription of archived audio or video checks the bytes read against any
+  positive recorded size. A shorter or longer payload fails the transcript step before
+  submission. Legacy rows with size zero still use the bounded read without a size comparison.
 - **Disk.** Media work refuses to start unless the temporary directory
   keeps `ARCHIVE_MEDIA_TEMP_RESERVE_BYTES` (2 GiB) free after its files: one limit-sized file for a
   direct audio download (the downloaded file is uploaded to storage directly), two for video

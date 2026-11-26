@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 
 import pytest
 from django.core.files.base import ContentFile
@@ -1432,3 +1433,76 @@ def test_batch_trailing_gap_uses_measured_media_duration(voxhelm, metadata, erro
             _transcribe_through_batch_job(item)
     else:
         assert _transcribe_through_batch_job(item) == "Async batch transcript"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("media_kind,suffix", [("audio", "mp3"), ("video", "mp4")])
+@pytest.mark.parametrize(
+    "recorded_size", [6, 4, 5, 0], ids=["truncated", "overlong", "exact", "legacy"]
+)
+def test_sync_archived_transcription_checks_recorded_length(
+    monkeypatch, settings, media_kind, suffix, recorded_size
+):
+    item = Item(
+        original_url="https://example.test/media",
+        **{
+            f"archived_{media_kind}_path": f"synthetic.{suffix}",
+            f"archived_{media_kind}_size_bytes": recorded_size,
+        },
+    )
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "test-key"
+    stored = BytesIO(b"bytes")
+    submitted = []
+
+    def transcribe(*, media, **kwargs):
+        submitted.append(media.payload)
+        return "Test transcript"
+
+    monkeypatch.setattr(f"archive.transcriptions.open_archived_{media_kind}", lambda item: stored)
+    monkeypatch.setattr("archive.transcriptions._request_transcription", transcribe)
+
+    if recorded_size in (0, 5):
+        assert generate_item_transcript(item=item) == "Test transcript"
+        assert submitted == [b"bytes"]
+    else:
+        with pytest.raises(
+            TranscriptionGenerationError, match=f"Archived {media_kind} length mismatch"
+        ):
+            generate_item_transcript(item=item)
+        assert submitted == []
+    assert stored.closed
+
+
+@pytest.mark.parametrize(("extra", "chunk_size"), [(b"", 2), (b"x", 5)], ids=["exact", "overlong"])
+def test_sync_archived_transcription_checks_length_across_short_reads(
+    monkeypatch, settings, extra, chunk_size
+):
+    class ChunkedMedia(BytesIO):
+        def read(self, size: int | None = -1) -> bytes:
+            assert size is not None and 0 < size <= MAX_TRANSCRIPTION_BYTES + 1
+            return super().read(min(size, chunk_size))
+
+    item = Item(
+        original_url="https://example.test/media",
+        archived_audio_path="synthetic.mp3",
+        archived_audio_size_bytes=5,
+    )
+    settings.ARCHIVE_TRANSCRIPTION_API_KEY = "test-key"
+    stored = ChunkedMedia(b"bytes" + extra)
+    submitted = []
+
+    def transcribe(*, media, **kwargs):
+        submitted.append(media.payload)
+        return "Test transcript"
+
+    monkeypatch.setattr("archive.transcriptions.open_archived_audio", lambda item: stored)
+    monkeypatch.setattr("archive.transcriptions._request_transcription", transcribe)
+
+    if extra:
+        with pytest.raises(TranscriptionGenerationError, match="Archived audio length mismatch"):
+            generate_item_transcript(item=item)
+        assert submitted == []
+    else:
+        assert generate_item_transcript(item=item) == "Test transcript"
+        assert submitted == [b"bytes"]
+    assert stored.closed

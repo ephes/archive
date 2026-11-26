@@ -1408,6 +1408,7 @@ or separator characters, or is not a string is refused before publication: the
 upload fails like any storage error, the object inside the reserved prefix and the
 reservation are discarded, and the key outside it is never deleted directly, since
 it may name another upload's object; the orphan sweep reclaims it if unprotected.
+The storage-key refusal is still reported if its warning cannot be logged.
 Orphan cleanup spools the complete object inventory to temporary disk
 storage before deleting anything, streams database references in bounded batches using
 the same whitespace normalization as other media paths, then processes sorted unique

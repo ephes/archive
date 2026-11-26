@@ -161,6 +161,45 @@ def test_refusal_never_touches_another_uploads_reservation_or_object(monkeypatch
 
 
 @pytest.mark.django_db(transaction=True)
+def test_storage_key_refusal_survives_warning_failure(monkeypatch, caplog):
+    item = _podcast_item()
+    storage = storages["archive_media"]
+    unrelated = storage.save("items/unrelated/source.mp3", ContentFile(b"unrelated audio"))
+    save = storage.save
+    intended: list[str] = []
+
+    def misreporting_save(name, content, *args, **kwargs):
+        intended.append(save(name, content, *args, **kwargs))
+        return unrelated
+
+    def fail_warning(*args, **kwargs):
+        raise OSError("synthetic logging failure")
+
+    monkeypatch.setattr(storage, "save", misreporting_save)
+    monkeypatch.setattr("archive.media_archival.logger.warning", fail_warning)
+    monkeypatch.setattr(
+        "archive.media_archival._open_direct_media",
+        lambda request, timeout: _FakeResponse([b"audio"]),
+    )
+
+    assert enrich_item_media_archive(item) is False
+    item.refresh_from_db()
+    assert (
+        item.media_archive_error
+        == "Archive media storage key escaped its reserved upload namespace"
+    )
+    assert any(
+        record.exc_info and isinstance(record.exc_info[1], ArchiveMediaStorageKeyError)
+        for record in caplog.records
+    )
+    assert not item.archived_audio_path
+    assert not PendingArchiveMediaUpload.objects.exists()
+    assert intended and not storage.exists(intended[0])
+    with storage.open(unrelated) as uploaded:
+        assert uploaded.read() == b"unrelated audio"
+
+
+@pytest.mark.django_db(transaction=True)
 def test_available_name_suffix_inside_the_prefix_is_accepted(monkeypatch):
     storage = storages["archive_media"]
     calls = _relocating_save(

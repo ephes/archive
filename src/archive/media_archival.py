@@ -731,7 +731,8 @@ def save_reserved_media_file(
         if not _is_reserved_child_key(stored_name, prefix=prefix):
             # Only the reserved prefix is provably ours; a key elsewhere may name
             # another upload's object, so it is left to the orphan sweep.
-            logger.warning("Archive media storage returned a key outside its reservation")
+            with suppress(Exception):
+                logger.warning("Archive media storage returned a key outside its reservation")
             raise ArchiveMediaStorageKeyError(
                 "Archive media storage key escaped its reserved upload namespace"
             )

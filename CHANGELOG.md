@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preserve the reserved storage-key refusal if logging its warning fails.
 - Preserve media admission refusals and completed staging results when closing the disk lock fails.
 - Report the admitted end of bounded audio upload streams to storage backends.
 - Reject truncated audio upload stages before publishing their archive references.

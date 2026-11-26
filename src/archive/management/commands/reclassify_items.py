@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
+from django.db import DatabaseError, transaction
 from django.db.models import Max
 
 from archive.classification import (
@@ -178,22 +178,40 @@ class Command(BaseCommand):
         changed = 0
         unchanged = 0
         skipped = 0
-        for item_id in self._matching_items(options):
-            # Decide from the current row, holding the lock through normalization
-            # and publication. SQLite rejects a competing write during this read
-            # transaction rather than allowing a stale publication.
-            with transaction.atomic(durable=True) if options["apply"] else nullcontext():
-                current = Item.objects.filter(pk=item_id)
-                if options["apply"]:
-                    current = current.select_for_update()
-                item = current.first()
-                if item is None:
-                    continue
-                if self._matches_current_selectors(item, options):
-                    did_change, lines = self._process_item(item, options)
+        matches = self._matching_items(options)
+        while True:
+            item_id = None
+            try:
+                item_id = next(matches, None)
+                if item_id is None:
+                    break
+                # Hold the current row lock through classification and publication.
+                # SQLite rejects a competing write instead of publishing stale data.
+                with transaction.atomic(durable=True) if options["apply"] else nullcontext():
+                    current = Item.objects.filter(pk=item_id)
+                    if options["apply"]:
+                        current = current.select_for_update()
+                    item = current.first()
+                    if item is None:
+                        continue
+                    if self._matches_current_selectors(item, options):
+                        did_change, lines = self._process_item(item, options)
+                    else:
+                        did_change = None
+                        lines = [f"SKIPPED item {item.pk}: selector changed"]
+            except (CommandError, DatabaseError) as exc:
+                if not options["apply"]:
+                    raise
+                if isinstance(exc, CommandError):
+                    reason = str(exc)
+                elif item_id is None:
+                    reason = "Cannot select items: database operation failed."
                 else:
-                    did_change = None
-                    lines = [f"SKIPPED item {item.pk}: selector changed"]
+                    reason = f"Cannot apply item {item_id}: database operation failed."
+                raise CommandError(
+                    f"{reason} Partial apply: inspected={changed + unchanged} changed={changed} "
+                    f"unchanged={unchanged} mode={mode} skipped={skipped}"
+                ) from None
             if changed + unchanged + skipped == 0:
                 self.stdout.write(self._mode_banner(options))
             for line in lines:

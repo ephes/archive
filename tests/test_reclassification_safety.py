@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import transaction
+from django.db import DatabaseError, transaction
 from django.db.models.query import QuerySet
 
 from archive.management.commands import reclassify_items
@@ -408,6 +408,64 @@ def test_replay_malformed_legacy_url_has_fixed_diagnostic(apply, host_filter):
     assert "private" not in str(error.value)
     assert "secret" not in str(error.value)
     assert error.value.__suppress_context__
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("failure", ["classification", "selection", "write"])
+def test_replay_apply_reports_committed_prefix_on_failure(monkeypatch, failure):
+    second_url = (
+        "https://[synthetic-secret]/second"
+        if failure == "selection"
+        else "https://example.test/second"
+    )
+    first, second, third = Item.objects.bulk_create(
+        [
+            Item(original_url=url, classification_engine_version=0)
+            for url in ["https://example.test/first", second_url, "https://example.test/third"]
+        ]
+    )
+    args = ["--all", "--apply"]
+    if failure == "selection":
+        args.extend(["--host", "example.test"])
+        reason = f"Cannot select item {second.pk}: invalid URL."
+    elif failure == "write":
+        save = Item.save
+
+        def fail_save(item, *args, **kwargs):
+            save(item, *args, **kwargs)
+            if item.pk == second.pk:
+                raise DatabaseError("synthetic-secret")
+
+        monkeypatch.setattr(Item, "save", fail_save)
+        reason = f"Cannot apply item {second.pk}: database operation failed."
+    else:
+        classify = reclassify_items.classify_item
+
+        def fail_classification(**kwargs):
+            if kwargs["original_url"] == second_url:
+                raise ValueError("synthetic-secret")
+            return classify(**kwargs)
+
+        monkeypatch.setattr(reclassify_items, "classify_item", fail_classification)
+        reason = f"Cannot classify item {second.pk}: invalid classification input."
+
+    output = StringIO()
+    with pytest.raises(CommandError) as error:
+        call_command("reclassify_items", *args, stdout=output)
+
+    first.refresh_from_db()
+    second.refresh_from_db()
+    third.refresh_from_db()
+    assert first.classification_engine_version > 0
+    assert second.classification_engine_version == third.classification_engine_version == 0
+    assert str(error.value) == (
+        f"{reason} Partial apply: inspected=1 changed=1 unchanged=0 mode=apply skipped=0"
+    )
+    assert error.value.returncode != 0
+    assert f"UPDATED item {first.pk}" in output.getvalue()
+    assert f"UPDATED item {second.pk}" not in output.getvalue()
+    assert f"UPDATED item {third.pk}" not in output.getvalue()
+    assert "Summary:" not in output.getvalue()
 
 
 @pytest.mark.parametrize("journal", ["DELETE", "WAL"])

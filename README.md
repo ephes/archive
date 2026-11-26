@@ -1236,7 +1236,11 @@ as inspected or changed. The selection limit still caps initial matches; skipped
 not cause replacement selection beyond that cap. Deleted rows are skipped.
 Each selection batch is fully fetched before processing,
 so no live selection cursor pins a stale SQLite snapshot. Apply requires autocommit before
-the scan and emits each row's output after its write transaction commits. Callers embedding
+the scan and emits each row's output after its write transaction commits. If selection,
+classification, or a database operation fails, apply stops with a nonzero exit and a
+`Partial apply` diagnostic in the error (`CommandError` for embedded callers). It names
+the failing item when known and reports the inspected, changed, unchanged and skipped
+counts through the last completed row. Earlier writes stay committed. Callers embedding
 the command should invoke apply after their transaction ends. Dry runs also work inside a
 transaction and use current rows without opening a write transaction. The report escapes
 non-printable characters in kind and rule values and caps each displayed value at 160

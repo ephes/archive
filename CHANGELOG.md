@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Report completed row counts and the failing item when `reclassify_items --apply` aborts partway.
 - Return committed article-audio publication fields to the caller without a post-commit database read.
 
 - Skip whitespace-only article-audio sources when claiming work and keep due saved jobs pollable.

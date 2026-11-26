@@ -837,6 +837,8 @@ def _iter_file_multipart_formdata(
             raise TranscriptionGenerationError(
                 f"Archived audio read failed: {safe_api_error(exc)}"
             ) from None
+        if deadline is not None:
+            _remaining(deadline)
         yield suffix
 
     return body()

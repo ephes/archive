@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Enforce the staged audio upload deadline after closing the storage reader, before emitting the final multipart boundary.
 - Report completed row counts and the failing item when `reclassify_items --apply` aborts partway.
 - Return committed article-audio publication fields to the caller without a post-commit database read.
 

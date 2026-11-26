@@ -253,6 +253,37 @@ def test_storage_staging_deadline_closes_source_without_starting_transport(clock
     assert source.closed
 
 
+@pytest.mark.parametrize("close_time", [9, 10])
+def test_staging_checks_deadline_after_closing_source(clock, close_time):
+    import io
+
+    class TimedSource(io.BytesIO):
+        def close(self):
+            super().close()
+            clock[0] = close_time
+
+    source = TimedSource(b"abc")
+    body = tr._iter_file_multipart_formdata(
+        boundary="synthetic",
+        field_name="file",
+        filename="a.mp3",
+        content_type="audio/mpeg",
+        file_opener=lambda: source,
+        expected_size=3,
+        deadline=10,
+    )
+    assert next(body).startswith(b"--synthetic\r\n")
+    assert next(body) == b"abc"
+
+    if close_time == 10:
+        with pytest.raises(tr.TranscriptionGenerationError, match="pipeline timeout"):
+            next(body)
+        assert list(body) == []
+    else:
+        assert list(body) == [b"\r\n--synthetic--\r\n"]
+    assert source.closed
+
+
 def test_synthesis_identity_hashes_the_submitted_payload(monkeypatch):
     import hashlib
 

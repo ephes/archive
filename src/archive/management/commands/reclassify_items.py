@@ -178,6 +178,23 @@ class Command(BaseCommand):
         changed = 0
         unchanged = 0
         skipped = 0
+
+        def progress() -> str:
+            return (
+                f"inspected={changed + unchanged} changed={changed} "
+                f"unchanged={unchanged} mode={mode} skipped={skipped}"
+            )
+
+        def write_receipt(message: str) -> None:
+            try:
+                self.stdout.write(message)
+                self.stdout.flush()
+            except (OSError, ValueError) as exc:
+                status = "Partial apply" if options["apply"] else "Dry-run progress"
+                raise CommandError(
+                    f"Reclassification output failed. {status}: {progress()}"
+                ) from exc
+
         matches = self._matching_items(options)
         while True:
             item_id = None
@@ -208,29 +225,23 @@ class Command(BaseCommand):
                     reason = "Cannot select items: database operation failed."
                 else:
                     reason = f"Cannot apply item {item_id}: database operation failed."
-                raise CommandError(
-                    f"{reason} Partial apply: inspected={changed + unchanged} changed={changed} "
-                    f"unchanged={unchanged} mode={mode} skipped={skipped}"
-                ) from None
-            if changed + unchanged + skipped == 0:
-                self.stdout.write(self._mode_banner(options))
-            for line in lines:
-                self.stdout.write(line)
+                raise CommandError(f"{reason} Partial apply: {progress()}") from None
+            first_receipt = changed + unchanged + skipped == 0
             if did_change is None:
                 skipped += 1
             elif did_change:
                 changed += 1
             else:
                 unchanged += 1
+            if first_receipt:
+                write_receipt(self._mode_banner(options))
+            for line in lines:
+                write_receipt(line)
 
-        inspected = changed + unchanged
-        if not inspected and not skipped:
-            self.stdout.write(f"No items matched ({mode}).")
+        if not (changed + unchanged + skipped):
+            write_receipt(f"No items matched ({mode}).")
             return
-        self.stdout.write(
-            f"Summary: inspected={inspected} changed={changed} unchanged={unchanged} mode={mode} "
-            f"skipped={skipped}"
-        )
+        write_receipt(f"Summary: {progress()}")
 
     def _process_item(self, item: Item, options: dict[str, Any]) -> tuple[bool, list[str]]:
         lines = []

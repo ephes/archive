@@ -1265,7 +1265,10 @@ The command does not delete stored media.
 - use `--limit N` for a strictly positive cap after filtering; zero/negative values
   fail before selection or mutation. Omitting the limit inspects all matches.
 - add `--apply` to persist `kind`, `classification_rule`, `classification_evidence`, and the stored engine
-  version for the selected items
+  version for the selected items. Apply commits one item at a time. If a report write
+  or flush fails, the command stops before starting another item and reports the
+  inspected, changed, unchanged and skipped counts, including the item whose receipt
+  failed if its outcome was already settled. Dry-run counts describe proposed changes.
 - add `--normalize-downstream` to preview or explicitly apply cheap downstream status cleanup after replay;
   this clears stale unsupported/materialized transcript, media-archive, and article-audio state without
   queuing new worker work

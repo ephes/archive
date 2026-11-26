@@ -630,3 +630,65 @@ def test_replay_escapes_and_bounds_legacy_classification_diagnostics():
     item.refresh_from_db()
     assert item.kind == kind
     assert item.classification_rule == rule
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("failure", "settled"),
+    [("banner", 1), ("detail", 2), ("flush", 2), ("summary", 3)],
+)
+@pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
+def test_replay_output_failure_counts_current_row(monkeypatch, failure, settled, apply):
+    items = Item.objects.bulk_create(
+        [
+            Item(
+                original_url=f"https://example.test/story-{index}", classification_engine_version=0
+            )
+            for index in range(3)
+        ]
+    )
+    second_id = items[1].pk
+    mode = "apply" if apply else "dry-run"
+    detail = f"{'UPDATED' if apply else 'WOULD UPDATE'} item {second_id}:"
+    processed = []
+    process_item = reclassify_items.Command._process_item
+
+    def record_process(command, item, options):
+        processed.append(item.pk)
+        return process_item(command, item, options)
+
+    monkeypatch.setattr(reclassify_items.Command, "_process_item", record_process)
+
+    class BrokenReceipt(StringIO):
+        def write(self, message: str) -> int:
+            target = {
+                "banner": "Apply mode" if apply else "Dry-run mode",
+                "detail": detail,
+                "summary": "Summary:",
+            }.get(failure)
+            if target and message.startswith(target):
+                raise BrokenPipeError("receipt write failed")
+            return super().write(message)
+
+        def flush(self) -> None:
+            if failure == "flush" and detail in self.getvalue():
+                raise BrokenPipeError("receipt flush failed")
+            super().flush()
+
+    with pytest.raises(
+        CommandError,
+        match=(
+            f"output failed.*inspected={settled} changed={settled} "
+            f"unchanged=0 mode={mode} skipped=0"
+        ),
+    ) as error:
+        call_command(
+            "reclassify_items", "--all", *(("--apply",) if apply else ()), stdout=BrokenReceipt()
+        )
+
+    assert isinstance(error.value.__cause__, BrokenPipeError)
+    assert processed == [item.pk for item in items[:settled]]
+    changed = set(
+        Item.objects.exclude(classification_engine_version=0).values_list("pk", flat=True)
+    )
+    assert changed == ({item.pk for item in items[:settled]} if apply else set())

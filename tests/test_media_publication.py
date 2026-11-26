@@ -129,6 +129,37 @@ def test_truncated_stage_is_refused_before_replacing_previous_media(monkeypatch)
 
 
 @pytest.mark.django_db(transaction=True)
+def test_single_part_read_of_truncated_stage_is_refused(monkeypatch):
+    # A multipart uploader reads each part once, so a short read is not a full part.
+    item = Item.objects.create(
+        original_url="https://example.com/episode.mp3",
+        kind=ItemKind.PODCAST_EPISODE,
+        media_archive_status=EnrichmentStatus.PROCESSING,
+    )
+    payload = b"admitted audio"
+    response = _FakeResponse([payload])
+    monkeypatch.setattr(
+        "archive.media_archival._open_direct_media", lambda request, timeout: response
+    )
+    storage = storages["archive_media"]
+    parts: list[bytes] = []
+
+    def part_upload(name, content, *args, **kwargs):
+        os.ftruncate(response.fileno(), len(payload) - 2)
+        parts.append(content.read(content.size))
+        return name
+
+    monkeypatch.setattr(storage, "save", part_upload)
+
+    assert enrich_item_media_archive(item) is False
+    item.refresh_from_db()
+    assert parts == []
+    assert "ended before its admitted size" in item.media_archive_error
+    assert not item.archived_audio_path
+    assert not PendingArchiveMediaUpload.objects.exists()
+
+
+@pytest.mark.django_db(transaction=True)
 def test_storage_sees_admitted_length_and_bytes_after_stage_grows(monkeypatch):
     item = Item.objects.create(
         original_url="https://example.com/episode.mp3",

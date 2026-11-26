@@ -943,11 +943,18 @@ class _BoundedFile(io.RawIOBase):
         remaining = self.size - self._file.tell()
         if remaining <= 0 or not len(buffer):
             return 0
-        data = self._file.read(min(len(buffer), remaining))
-        if not data:
-            raise MediaArchivalError("Media upload stage ended before its admitted size")
-        buffer[: len(data)] = data
-        return len(data)
+        # Uploaders such as multipart transfers read each part once, so a short
+        # read must not pass for a complete part: fill the bounded request or fail.
+        wanted = min(len(buffer), remaining)
+        view = memoryview(buffer).cast("B")
+        filled = 0
+        while filled < wanted:
+            data = self._file.read(wanted - filled)
+            if not data:
+                raise MediaArchivalError("Media upload stage ended before its admitted size")
+            view[filled : filled + len(data)] = data
+            filled += len(data)
+        return filled
 
 
 def _select_audio_archive_source_url(item: Item) -> str | None:

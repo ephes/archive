@@ -1382,7 +1382,8 @@ cannot run or is in doubt, the object is kept and left for a later sweep.
 
 Media replacements use fresh object namespaces. Existing audio/video and database
 references survive failed uploads and failed database publication. Bounded audio
-uploads fail if the staging file ends before the admitted size. The uploader's
+uploads fail if the staging file ends before the admitted size, even when an
+uploader reads a part only once (as multipart uploads do). The uploader's
 end-relative seeks and reads use that same size if the staging file grows.
 Publication uses
 a durable database transaction and cannot be nested inside an application
@@ -1408,7 +1409,8 @@ or separator characters, or is not a string is refused before publication: the
 upload fails like any storage error, the object inside the reserved prefix and the
 reservation are discarded, and the key outside it is never deleted directly, since
 it may name another upload's object; the orphan sweep reclaims it if unprotected.
-The storage-key refusal is still reported if its warning cannot be logged.
+The storage-key refusal is still reported if its warning cannot be logged, and an
+archival failure is recorded on the item even if logging it fails.
 Orphan cleanup spools the complete object inventory to temporary disk
 storage before deleting anything, streams database references in bounded batches using
 the same whitespace normalization as other media paths, then processes sorted unique

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -641,7 +642,9 @@ def enrich_item_media_archive(item: Item, timeout: int = 300) -> bool:
     try:
         archived_audio = archive_item_audio(item=item, timeout=timeout)
     except Exception as exc:
-        logger.exception("Audio archival failed for item %s", item.pk)
+        # A failing log handler must not keep the refusal from being recorded.
+        with suppress(Exception):
+            logger.exception("Audio archival failed for item %s", item.pk)
         return _mark_media_archive_failure(item, str(exc), expected=captured)
 
     published_fields = [

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from io import BytesIO
 
@@ -197,6 +198,45 @@ def test_storage_key_refusal_survives_warning_failure(monkeypatch, caplog):
     assert intended and not storage.exists(intended[0])
     with storage.open(unrelated) as uploaded:
         assert uploaded.read() == b"unrelated audio"
+
+
+class _FailingHandler(logging.Handler):
+    def emit(self, record):
+        raise OSError("synthetic shared handler failure")
+
+
+@pytest.mark.django_db(transaction=True)
+def test_storage_key_refusal_is_recorded_when_a_shared_log_handler_fails(monkeypatch):
+    item = _podcast_item()
+    item.media_archive_status = EnrichmentStatus.PROCESSING
+    item.save()
+    storage = storages["archive_media"]
+    unrelated = storage.save("items/unrelated/source.mp3", ContentFile(b"unrelated audio"))
+    save = storage.save
+
+    def misreporting_save(name, content, *args, **kwargs):
+        save(name, content, *args, **kwargs)
+        return unrelated
+
+    monkeypatch.setattr(storage, "save", misreporting_save)
+    monkeypatch.setattr(
+        "archive.media_archival._open_direct_media",
+        lambda request, timeout: _FakeResponse([b"audio"]),
+    )
+    handler = _FailingHandler()
+    shared = logging.getLogger("archive")
+    shared.addHandler(handler)
+    try:
+        assert enrich_item_media_archive(item) is False
+    finally:
+        shared.removeHandler(handler)
+    item.refresh_from_db()
+    assert item.media_archive_status == EnrichmentStatus.FAILED
+    assert (
+        item.media_archive_error
+        == "Archive media storage key escaped its reserved upload namespace"
+    )
+    assert not PendingArchiveMediaUpload.objects.exists()
 
 
 @pytest.mark.django_db(transaction=True)

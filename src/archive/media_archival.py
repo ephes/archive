@@ -13,6 +13,7 @@ import sys
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from email.message import Message
+from operator import index
 from pathlib import Path
 from subprocess import run as run_download
 from tempfile import TemporaryDirectory, gettempdir
@@ -925,6 +926,11 @@ class _BoundedFile(io.RawIOBase):
         return self._file.tell()
 
     def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        if whence == io.SEEK_END:
+            position = self.size + index(offset)
+            if position < 0:
+                raise OSError("Negative seek position")
+            return self._file.seek(position, io.SEEK_SET)
         return self._file.seek(offset, whence)
 
     def readinto(self, buffer) -> int:

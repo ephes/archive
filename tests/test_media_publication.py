@@ -1,3 +1,4 @@
+import io
 import os
 from datetime import UTC, datetime
 
@@ -124,6 +125,40 @@ def test_truncated_stage_is_refused_before_replacing_previous_media(monkeypatch)
         assert previous.read() == b"old video"
     assert not PendingArchiveMediaUpload.objects.exists()
     assert list(iter_archive_media_object_names()) == [old_path]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_storage_sees_admitted_length_and_bytes_after_stage_grows(monkeypatch):
+    item = Item.objects.create(
+        original_url="https://example.com/episode.mp3",
+        kind=ItemKind.PODCAST_EPISODE,
+    )
+    payload = b"admitted audio"
+    response = _FakeResponse([payload])
+    monkeypatch.setattr(
+        "archive.media_archival._open_direct_media", lambda request, timeout: response
+    )
+    storage = storages["archive_media"]
+    save = storage.save
+
+    def save_after_growth(name, content, *args, **kwargs):
+        os.pwrite(response.fileno(), b"extra bytes", len(payload))
+        assert content.seek(0, io.SEEK_END) == len(payload)
+        assert content.read(1) == b""
+        with pytest.raises(OSError, match="Negative seek position"):
+            content.seek(-len(payload) - 1, io.SEEK_END)
+        assert content.seek(-2, io.SEEK_END) == len(payload) - 2
+        assert content.seek(1, io.SEEK_CUR) == len(payload) - 1
+        assert content.read(2) == payload[-1:]
+        assert content.seek(0, io.SEEK_SET) == 0
+        return save(name, content, *args, **kwargs)
+
+    monkeypatch.setattr(storage, "save", save_after_growth)
+
+    archived = archive_item_audio(item)
+    assert archived.size_bytes == len(payload)
+    with storage.open(archived.object_name) as uploaded:
+        assert uploaded.read() == payload
 
 
 @pytest.mark.django_db(transaction=True)

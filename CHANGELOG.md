@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Report the admitted end of bounded audio upload streams to storage backends.
 - Reject truncated audio upload stages before publishing their archive references.
 - Report settled orphan deletion counts when cleanup output fails or a sweep aborts partway.
 - Report the search index rebuild outcome when writing or flushing the success receipt fails.

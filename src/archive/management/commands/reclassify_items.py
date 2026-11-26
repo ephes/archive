@@ -210,8 +210,9 @@ class Command(BaseCommand):
                         current = current.select_for_update()
                     item = current.first()
                     if item is None:
-                        continue
-                    if item.classification_engine_version > CURRENT_CLASSIFICATION_ENGINE_VERSION:
+                        did_change = None
+                        lines = [f"SKIPPED item {item_id}: item deleted before recheck"]
+                    elif item.classification_engine_version > CURRENT_CLASSIFICATION_ENGINE_VERSION:
                         did_change = None
                         lines = [f"SKIPPED item {item.pk}: newer classification engine version"]
                     elif self._matches_current_selectors(item, options):

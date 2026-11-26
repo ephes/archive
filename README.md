@@ -1242,8 +1242,10 @@ state are preserved, including when `--normalize-downstream` is requested.
 Mutable host/rule/empty-evidence/engine-version selectors are rechecked on that current
 row under the apply-mode lock before normalization. Rows that left the requested scope
 are reported as `SKIPPED ...: selector changed` and counted separately as `skipped`, never
-as inspected or changed. The selection limit still caps initial matches; skipped rows do
-not cause replacement selection beyond that cap. Deleted rows are skipped.
+as inspected or changed. If a row disappears between selection and the current-row
+read, the command reports `SKIPPED ...: item deleted before recheck` and includes it in
+the `skipped` count, even when every selected row disappears. Each selected row uses
+one `--limit` slot, including skipped rows.
 Each selection batch is fully fetched before processing,
 so no live selection cursor pins a stale SQLite snapshot. Apply requires autocommit before
 the scan and emits each row's output after its write transaction commits. If selection,

@@ -237,6 +237,49 @@ def test_replay_decides_and_saves_in_one_transaction(monkeypatch):
     assert phases == ["classify", "save"]
 
 
+@pytest.mark.parametrize("limit", [1, 2])
+@pytest.mark.django_db(transaction=True)
+def test_replay_reports_selected_item_deleted_before_lock(monkeypatch, limit):
+    deleted, sibling, beyond_limit = Item.objects.bulk_create(
+        [
+            Item(
+                original_url=f"https://example.test/story-{index}",
+                classification_engine_version=0,
+            )
+            for index in range(3)
+        ]
+    )
+    deleted_id = deleted.pk
+    atomic = transaction.atomic
+    first_lock = True
+
+    def delete_before_first_lock(*args, **kwargs):
+        nonlocal first_lock
+        if kwargs.get("durable") and first_lock:
+            first_lock = False
+            # Simulate a committed deletion after selection and before the row transaction.
+            deleted.delete()
+        return atomic(*args, **kwargs)
+
+    monkeypatch.setattr(transaction, "atomic", delete_before_first_lock)
+    output = StringIO()
+    call_command("reclassify_items", "--all", "--apply", "--limit", str(limit), stdout=output)
+
+    inspected = limit - 1
+    assert f"SKIPPED item {deleted_id}: item deleted before recheck" in output.getvalue()
+    assert (
+        f"Summary: inspected={inspected} changed={inspected} unchanged=0 mode=apply skipped=1"
+        in output.getvalue()
+    )
+    assert not Item.objects.filter(pk=deleted_id).exists()
+    sibling.refresh_from_db()
+    beyond_limit.refresh_from_db()
+    assert sibling.classification_engine_version == (
+        reclassify_items.CURRENT_CLASSIFICATION_ENGINE_VERSION if limit == 2 else 0
+    )
+    assert beyond_limit.classification_engine_version == 0
+
+
 @pytest.mark.parametrize("size", [1, 501])
 def test_selection_streams_only_ids_and_urls(size, monkeypatch, django_assert_num_queries):
     Item.objects.bulk_create(

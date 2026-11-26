@@ -4,7 +4,11 @@ from botocore.exceptions import BotoCoreError, ClientError
 from django.core.management.base import BaseCommand, CommandError
 from django.db import router
 
-from archive.media_storage import ReservationStorageDeleteError, reconcile_upload_reservation
+from archive.media_storage import (
+    IncompleteArchiveMediaListingError,
+    ReservationStorageDeleteError,
+    reconcile_upload_reservation,
+)
 from archive.models import PendingArchiveMediaUpload
 
 
@@ -42,6 +46,12 @@ class Command(BaseCommand):
         for ordinal, reservation_id in enumerate(reservation_ids, start=1):
             try:
                 outcome = reconcile_upload_reservation(reservation_id, using=using, apply=apply)
+            except IncompleteArchiveMediaListingError:
+                failed_count += 1
+                self.stderr.write(
+                    f"Storage listing failed for reservation {ordinal} (storage_listing_failed)."
+                )
+                continue
             except (ReservationStorageDeleteError, OSError, BotoCoreError, ClientError) as exc:
                 # The release rolled back; the reservation keeps protecting what is left.
                 if isinstance(exc, ReservationStorageDeleteError):
@@ -82,6 +92,6 @@ class Command(BaseCommand):
         )
         if failed_count:
             raise CommandError(
-                f"Reservation reconciliation incomplete: {failed_count} storage deletions "
-                "failed; retry the command."
+                f"Reservation reconciliation incomplete: {failed_count} reservations failed; "
+                "retry the command."
             )

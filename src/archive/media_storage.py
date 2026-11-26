@@ -13,6 +13,10 @@ ARCHIVE_MEDIA_STORAGE_ALIAS = "archive_media"
 ARCHIVE_MEDIA_PATH_FIELDS = ("archived_audio_path", "archived_video_path", "article_audio_file")
 
 
+class IncompleteArchiveMediaListingError(ValueError):
+    """The listing cannot establish all object names under the prefix."""
+
+
 def item_archive_media_paths(item) -> tuple[str, ...]:
     return tuple(
         _normalized_unique_paths(
@@ -90,7 +94,9 @@ def _iter_storage_object_names(*, storage, prefix: str) -> Iterator[str]:
         except (FileNotFoundError, NotADirectoryError):
             if current == prefix:
                 return
-            raise ValueError("Incomplete archive media listing: subtree unavailable") from None
+            raise IncompleteArchiveMediaListingError(
+                "Incomplete archive media listing: subtree unavailable"
+            ) from None
 
         for names in (directories, files):
             for name in names:
@@ -99,7 +105,9 @@ def _iter_storage_object_names(*, storage, prefix: str) -> Iterator[str]:
                     or name in ("", ".", "..")
                     or any(char in name for char in ("/", "\\", "\0"))
                 ):
-                    raise ValueError("Invalid archive media listing: expected a child name")
+                    raise IncompleteArchiveMediaListingError(
+                        "Invalid archive media listing: expected a child name"
+                    )
         for name in sorted(files):
             yield f"{current}/{name}" if current else name
         for name in sorted(directories, reverse=True):
@@ -171,6 +179,7 @@ def reconcile_upload_reservation(
     rows while unreferenced objects are deleted, then releases the reservation.
     A storage deletion failure raises ReservationStorageDeleteError with the
     number of completed deletes and keeps the reservation protecting what remains.
+    An incomplete listing raises IncompleteArchiveMediaListingError before any deletion.
     Dry runs use advisory reads without write transactions or row locks.
     """
     from archive.models import Item, PendingArchiveMediaUpload

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep reservations protected when their storage listings are incomplete, continue reconciling other reservations and report an incomplete run.
 - Enforce the staged audio upload deadline after closing the storage reader, before emitting the final multipart boundary.
 - Calculate the size-scaled transcription allowance only when archived audio enters staged upload.
 - Report completed row counts and the failing item when `reclassify_items --apply` aborts partway.

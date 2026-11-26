@@ -197,6 +197,46 @@ def test_referenced_object_under_retired_prefix_is_kept():
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("problem", ["missing-subtree", "malformed-child"])
+@pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
+def test_incomplete_listing_keeps_reservation_and_allows_later_reservation(
+    monkeypatch, problem, apply
+):
+    first = _processing_item()
+    second = _processing_item()
+    first_name = _upload(first)
+    second_name = _upload(second)
+    Item.objects.filter(pk__in=[first.pk, second.pk]).update(processing_started_at=None)
+    first_prefix = first_name.rsplit("/", 1)[0]
+    storage = storages["archive_media"]
+    listdir = storage.listdir
+
+    def incomplete_listdir(prefix):
+        if prefix == first_prefix:
+            child = "missing" if problem == "missing-subtree" else "invalid/child"
+            return [child], [first_name.rsplit("/", 1)[1]]
+        return listdir(prefix)
+
+    monkeypatch.setattr(storage, "listdir", incomplete_listdir)
+    out = StringIO()
+    err = StringIO()
+    args = ("--apply",) if apply else ()
+    with pytest.raises(CommandError, match="incomplete"):
+        call_command("reconcile_archive_media_reservations", *args, stdout=out, stderr=err)
+
+    assert "Storage listing failed for reservation 1 (storage_listing_failed)." in err.getvalue()
+    assert first_prefix not in err.getvalue()
+    assert "invalid/child" not in err.getvalue()
+    assert PendingArchiveMediaUpload.objects.filter(owner_item_id=first.pk).exists()
+    assert storage.exists(first_name)
+    assert PendingArchiveMediaUpload.objects.filter(owner_item_id=second.pk).exists() is not apply
+    assert storage.exists(second_name) is not apply
+    assert f"{'DELETED' if apply else 'WOULD-DELETE'} {second_name}" in out.getvalue()
+    assert f"released={int(apply)} deleted={int(apply)}" in out.getvalue()
+    assert "failed=1" in out.getvalue()
+
+
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("deletes_before_failure", [0, 1])
 def test_storage_failure_keeps_reservation_and_fails_the_command(
     monkeypatch, deletes_before_failure

@@ -499,3 +499,47 @@ def test_reference_containing_the_path_as_substring_does_not_protect_it():
 
     assert "released=1 deleted=1" in _reconcile("--apply")
     assert not storage.exists(stored)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_flat_file_budget_is_checked_before_visiting_names(monkeypatch):
+    class OversizedFiles(list):
+        def __iter__(self):
+            pytest.fail("oversized listing was traversed")
+
+    item = _processing_item()
+    stored = _upload(item)
+    Item.objects.filter(pk=item.pk).update(processing_started_at=None)
+    storage = storages["archive_media"]
+    monkeypatch.setattr(storage, "listdir", lambda path: ([], OversizedFiles(["x"] * 1000)))
+
+    with pytest.raises(CommandError, match="oversized reservations require manual recovery"):
+        _reconcile("--apply")
+
+    assert storage.exists(stored)
+    assert PendingArchiveMediaUpload.objects.filter(owner_item_id=item.pk).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("extra", [0, 1], ids=["exact-limit", "cumulative-overflow"])
+def test_nested_file_budget_and_order(extra):
+    item = _processing_item()
+    stored = _upload(item)
+    Item.objects.filter(pk=item.pk).update(processing_started_at=None)
+    prefix = stored.rsplit("/", 1)[0]
+    storage = storages["archive_media"]
+    nested = [f"{prefix}/nested/{index:02d}.mp3" for index in range(15 + extra)]
+    for name in reversed(nested):
+        storage.save(name, ContentFile(b"bytes"))
+
+    if extra:
+        with pytest.raises(CommandError, match="oversized reservations require manual recovery"):
+            _reconcile("--apply")
+        assert all(storage.exists(name) for name in [stored, *nested])
+        assert PendingArchiveMediaUpload.objects.filter(owner_item_id=item.pk).exists()
+    else:
+        output = _reconcile("--apply")
+        assert [line.strip() for line in output.splitlines() if line.startswith("  DELETED ")] == [
+            f"DELETED {name}" for name in [stored, *nested]
+        ]
+        assert not PendingArchiveMediaUpload.objects.exists()

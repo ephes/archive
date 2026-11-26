@@ -1457,8 +1457,9 @@ other reservations, count the listing failure in `failed` and exit nonzero.
 Rerun the command after the listing or deletion issue is resolved.
 Prefixes holding more than 16 objects or more than 64 directories (including
 the prefix itself and empty directories) are reported as `OVERSIZED` and left
-for manual recovery. The command checks the directory budget before queuing
-children and continues with other reservations when a prefix exceeds either limit.
+for manual recovery. The command checks cumulative directory and file counts
+before validating or sorting the names in each listing. It continues with other
+reservations when a prefix exceeds either limit.
 Apply prints its summary and exits nonzero if any prefix is oversized, with a
 manual recovery message. Dry-run reports oversized prefixes without changing its
 exit status.

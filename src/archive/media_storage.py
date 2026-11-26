@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from contextlib import nullcontext
 from dataclasses import dataclass
-from itertools import islice
 
 from botocore.exceptions import BotoCoreError, ClientError
 from django.core.files.storage import storages
@@ -18,8 +17,8 @@ class IncompleteArchiveMediaListingError(ValueError):
     """The listing cannot establish all object names under the prefix."""
 
 
-class _ArchiveMediaDirectoryLimitExceeded(Exception):
-    """The prefix contains more directories than the caller can walk."""
+class _ArchiveMediaListingLimitExceeded(Exception):
+    """The prefix exceeds the caller’s directory or object budget."""
 
 
 def item_archive_media_paths(item) -> tuple[str, ...]:
@@ -91,10 +90,15 @@ def iter_archive_media_object_names(prefix: str = "") -> Iterator[str]:
 
 
 def _iter_storage_object_names(
-    *, storage, prefix: str, max_directories: int | None = None
+    *,
+    storage,
+    prefix: str,
+    max_directories: int | None = None,
+    max_objects: int | None = None,
 ) -> Iterator[str]:
     pending = [prefix]
     discovered_directories = 1
+    discovered_objects = 0
     while pending:
         current = pending.pop()
         try:
@@ -110,7 +114,12 @@ def _iter_storage_object_names(
             # Count visited and queued directories before sorting or queuing new children.
             discovered_directories += len(directories)
             if discovered_directories > max_directories:
-                raise _ArchiveMediaDirectoryLimitExceeded
+                raise _ArchiveMediaListingLimitExceeded
+
+        if max_objects is not None:
+            discovered_objects += len(files)
+            if discovered_objects > max_objects:
+                raise _ArchiveMediaListingLimitExceeded
 
         for names in (directories, files):
             for name in names:
@@ -248,22 +257,22 @@ def reconcile_upload_reservation(
                     state="live", prefix=prefix, owner_item_id=owner_item_id
                 )
 
-            inventory = _iter_storage_object_names(
-                storage=storage,
-                prefix=prefix.strip("/"),
-                max_directories=MAX_RECONCILED_PREFIX_DIRECTORIES,
-            )
             try:
-                names = list(islice(inventory, MAX_RECONCILED_PREFIX_OBJECTS + 1))
-            except _ArchiveMediaDirectoryLimitExceeded:
-                names = None
-            except (OSError, BotoCoreError, ClientError) as exc:
-                # Nothing was deleted yet; report a listing failure, not a deletion failure.
-                raise IncompleteArchiveMediaListingError("Archive media listing failed") from exc
-            if names is None or len(names) > MAX_RECONCILED_PREFIX_OBJECTS:
+                names = list(
+                    _iter_storage_object_names(
+                        storage=storage,
+                        prefix=prefix.strip("/"),
+                        max_directories=MAX_RECONCILED_PREFIX_DIRECTORIES,
+                        max_objects=MAX_RECONCILED_PREFIX_OBJECTS,
+                    )
+                )
+            except _ArchiveMediaListingLimitExceeded:
                 return ReservationReconciliation(
                     state="oversized", prefix=prefix, owner_item_id=owner_item_id
                 )
+            except (OSError, BotoCoreError, ClientError) as exc:
+                # Nothing was deleted yet; report a listing failure, not a deletion failure.
+                raise IncompleteArchiveMediaListingError("Archive media listing failed") from exc
             kept: list[str] = []
             for name in names:
                 if _is_referenced_archive_media_path(name, using=using, for_update=apply):

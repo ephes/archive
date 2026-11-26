@@ -929,9 +929,11 @@ class _BoundedFile(io.RawIOBase):
 
     def readinto(self, buffer) -> int:
         remaining = self.size - self._file.tell()
-        if remaining <= 0:
+        if remaining <= 0 or not len(buffer):
             return 0
         data = self._file.read(min(len(buffer), remaining))
+        if not data:
+            raise MediaArchivalError("Media upload stage ended before its admitted size")
         buffer[: len(data)] = data
         return len(data)
 

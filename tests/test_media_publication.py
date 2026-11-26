@@ -1,3 +1,4 @@
+import os
 from datetime import UTC, datetime
 
 import pytest
@@ -13,7 +14,7 @@ from archive.media_storage import (
     delete_unreferenced_archive_media_paths,
     iter_archive_media_object_names,
 )
-from archive.models import Item, ItemKind, PendingArchiveMediaUpload
+from archive.models import EnrichmentStatus, Item, ItemKind, PendingArchiveMediaUpload
 from archive.services import enrich_item_media_archive
 
 
@@ -90,6 +91,39 @@ def test_second_upload_failure_preserves_previous_objects(monkeypatch, failure):
         item.archived_audio_path,
         item.archived_video_path,
     }
+
+
+@pytest.mark.django_db(transaction=True)
+def test_truncated_stage_is_refused_before_replacing_previous_media(monkeypatch):
+    item = old_video()
+    item.audio_url = "https://example.com/replacement.mp3"
+    item.media_archive_status = EnrichmentStatus.PROCESSING
+    item.save()
+    old_path = item.archived_video_path
+    response = _FakeResponse([b"new audio"])
+    monkeypatch.setattr(
+        "archive.media_archival._open_direct_media", lambda request, timeout: response
+    )
+    storage = storages["archive_media"]
+    save = storage.save
+
+    def save_after_truncation(name, content, *args, **kwargs):
+        assert content.size == len(b"new audio")
+        os.ftruncate(response.fileno(), len(b"new"))
+        assert content.read(0) == b""
+        return save(name, content, *args, **kwargs)
+
+    monkeypatch.setattr(storage, "save", save_after_truncation)
+
+    assert enrich_item_media_archive(item) is False
+    item.refresh_from_db()
+    assert "ended before its admitted size" in item.media_archive_error
+    assert item.archived_audio_path == ""
+    assert item.archived_video_path == old_path
+    with storage.open(old_path) as previous:
+        assert previous.read() == b"old video"
+    assert not PendingArchiveMediaUpload.objects.exists()
+    assert list(iter_archive_media_object_names()) == [old_path]
 
 
 @pytest.mark.django_db(transaction=True)

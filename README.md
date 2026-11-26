@@ -1381,7 +1381,8 @@ discard and orphan cleanup) go through that single check; whenever the check
 cannot run or is in doubt, the object is kept and left for a later sweep.
 
 Media replacements use fresh object namespaces. Existing audio/video and database
-references survive failed uploads and failed database publication. Publication uses
+references survive failed uploads and failed database publication. Bounded audio
+uploads fail if the staging file ends before the admitted size. Publication uses
 a durable database transaction and cannot be nested inside an application
 transaction. Superseded objects are deleted only after commit. A failure that
 surfaces during or after the commit (for example the worker's processing alarm)

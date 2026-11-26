@@ -1095,7 +1095,13 @@ Current first-slice behavior:
 - generic metadata extraction still parses OG, Twitter, JSON-LD, and HTML title fields
 - media references found in a page are only kept when they resolve to an `http`/`https` URL;
   `javascript:`, `data:`, `file:` and other schemes are dropped before they can be stored or linked
+- media hints are normalized before one is chosen, in the usual priority order (OG/Twitter, then
+  JSON-LD, then HTML elements; within a JSON-LD record `contentUrl`, `embedUrl`, `associatedMedia`,
+  then a media-looking `url`), so a refused hint falls through to the next admitted one instead of
+  hiding it
 - generic page-media extraction now also parses HTML `<audio>` / `<source>` and `<video>` / `<source>`
+  (a `<source>` belongs to the innermost open `<audio>`/`<video>`; a close tag ends the innermost open
+  element of its own tag, even out of order, and an unmatched close tag is ignored in constant time)
 - WDR/ARD mediathek pages embed the real enclosure in an inline (non-JSON-LD) script as
   `mediaResource.dflt.audioURL` while their `og:audio` deceptively points back at the HTML page;
   extraction now mines that media-object payload so a shared WDR/ARD episode page yields a real

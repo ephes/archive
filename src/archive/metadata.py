@@ -100,6 +100,16 @@ class ExtractedMediaCandidate:
     detection_source: str
 
 
+class _MediaContext:
+    """One open ``<audio>`` or ``<video>`` element; closed contexts are pruned lazily."""
+
+    __slots__ = ("is_open", "tag")
+
+    def __init__(self, tag: str) -> None:
+        self.tag = tag
+        self.is_open = True
+
+
 class _MetadataHTMLParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -114,7 +124,13 @@ class _MetadataHTMLParser(HTMLParser):
         self._jsonld_parts: list[str] = []
         self._in_inline_script = False
         self._inline_script_parts: list[str] = []
-        self._media_context_stack: list[str] = []
+        # Document order of open media contexts; the top entry is always open.
+        self._media_context_stack: list[_MediaContext] = []
+        # Open contexts per tag, innermost last, so a close finds its match in O(1).
+        self._open_media_contexts: dict[str, list[_MediaContext]] = {
+            "audio": [],
+            "video": [],
+        }
         self.head_closed: bool = False
 
     def handle_starttag(self, tag: str, attrs) -> None:
@@ -143,7 +159,9 @@ class _MetadataHTMLParser(HTMLParser):
             return
 
         if tag in {"audio", "video"}:
-            self._media_context_stack.append(tag)
+            context = _MediaContext(tag)
+            self._media_context_stack.append(context)
+            self._open_media_contexts[tag].append(context)
             src = (attr_map.get("src") or "").strip()
             if src:
                 self._add_media_candidate(
@@ -154,7 +172,7 @@ class _MetadataHTMLParser(HTMLParser):
             return
 
         if tag == "source":
-            parent_tag = self._media_context_stack[-1] if self._media_context_stack else ""
+            parent_tag = self._media_context_stack[-1].tag if self._media_context_stack else ""
             src = (attr_map.get("src") or "").strip()
             if src and parent_tag in {"audio", "video"}:
                 self._add_media_candidate(
@@ -184,11 +202,14 @@ class _MetadataHTMLParser(HTMLParser):
         if tag == "title":
             self._in_title = False
             return
-        if tag in {"audio", "video"} and self._media_context_stack:
-            for index in range(len(self._media_context_stack) - 1, -1, -1):
-                if self._media_context_stack[index] == tag:
-                    del self._media_context_stack[index]
-                    break
+        if tag in {"audio", "video"}:
+            # Close the innermost open element of this tag, even out of order.
+            open_contexts = self._open_media_contexts[tag]
+            if open_contexts:
+                open_contexts.pop().is_open = False
+                stack = self._media_context_stack
+                while stack and not stack[-1].is_open:
+                    stack.pop()
             return
         if tag == "script" and self._in_jsonld:
             blob = "".join(self._jsonld_parts).strip()
@@ -390,36 +411,26 @@ def _build_metadata_from_parser(parser: _MetadataHTMLParser, base_url: str) -> E
     )
     if original_published_at is None:
         original_published_at = jsonld_metadata.original_published_at
-    media_url = _normalize_url(
-        _first_nonempty(
-            meta.get("og:audio"),
-            meta.get("og:audio:url"),
-            meta.get("twitter:player:stream"),
-            meta.get("og:video"),
-            meta.get("og:video:url"),
-            jsonld_metadata.media_url,
-            next(
-                (
-                    candidate.url
-                    for candidate in parser.media_candidates
-                    if candidate.candidate_type == "video"
-                ),
-                "",
-            ),
+    media_url = _first_admitted_url(
+        meta.get("og:audio"),
+        meta.get("og:audio:url"),
+        meta.get("twitter:player:stream"),
+        meta.get("og:video"),
+        meta.get("og:video:url"),
+        jsonld_metadata.media_url,
+        *(
+            candidate.url
+            for candidate in parser.media_candidates
+            if candidate.candidate_type == "video"
         ),
         base_url=base_url,
     )
-    audio_url = _normalize_url(
-        _first_nonempty(
-            jsonld_metadata.audio_url,
-            next(
-                (
-                    candidate.url
-                    for candidate in parser.media_candidates
-                    if candidate.candidate_type == "audio"
-                ),
-                "",
-            ),
+    audio_url = _first_admitted_url(
+        jsonld_metadata.audio_url,
+        *(
+            candidate.url
+            for candidate in parser.media_candidates
+            if candidate.candidate_type == "audio"
         ),
         base_url=base_url,
     )
@@ -534,13 +545,11 @@ def _extract_from_jsonld_record(record: dict, base_url: str) -> ExtractedMetadat
         _string_value(record.get("uploadDate")),
     )
 
-    media_url = _normalize_url(
-        _first_nonempty(
-            _string_value(record.get("contentUrl")),
-            _string_value(record.get("embedUrl")),
-            _string_value(record.get("associatedMedia")),
-            record_url if _looks_like_media(record_url) else "",
-        ),
+    media_url = _first_admitted_url(
+        _string_value(record.get("contentUrl")),
+        _string_value(record.get("embedUrl")),
+        _string_value(record.get("associatedMedia")),
+        record_url if _looks_like_media(record_url) else "",
         base_url=base_url,
     )
     audio_url = media_url if media_url and _looks_like_audio(media_url) else ""
@@ -715,6 +724,20 @@ def _is_valid_http_authority(parsed) -> bool:
     return not any(
         char in _FORBIDDEN_HOST_CHARACTERS or char in ":[]" or char.isspace() for char in hostname
     )
+
+
+def _first_admitted_url(*values: str | None, base_url: str) -> str:
+    """First hint, in priority order, that normalizes to an admitted media URL.
+
+    A refused hint (for example a ``javascript:`` reference) must not hide a valid
+    lower-priority hint from the same page.
+    """
+    for value in values:
+        if value:
+            normalized = _normalize_url(value, base_url=base_url)
+            if normalized:
+                return normalized
+    return ""
 
 
 def _first_nonempty(*values: str | None) -> str:

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Ignore unmatched `</audio>`/`</video>` close tags in constant time and close out-of-order media elements without rescanning open contexts.
+- Fall through refused page media hints (Open Graph, JSON-LD, HTML audio/video) to the next admitted hint instead of dropping the media URL.
 - Preserve the reserved storage-key refusal if logging its warning fails.
 - Preserve media admission refusals and completed staging results when closing the disk lock fails.
 - Report the admitted end of bounded audio upload streams to storage backends.

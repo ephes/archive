@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Limit retired upload reservation reconciliation to 64 directories per prefix, including empty directories.
-- Keep reservations protected when their storage listings are incomplete, continue reconciling other reservations and report an incomplete run.
+- Keep reservations protected when their storage listings are incomplete or fail, report `storage_listing_failed` instead of `storage_delete_failed`, continue reconciling other reservations and report an incomplete run.
 - Enforce the staged audio upload deadline after closing the storage reader, before emitting the final multipart boundary.
 - Calculate the size-scaled transcription allowance only when archived audio enters staged upload.
 - Report completed row counts and the failing item when `reclassify_items --apply` aborts partway.

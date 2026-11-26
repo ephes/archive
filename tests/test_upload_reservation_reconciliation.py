@@ -8,6 +8,7 @@ from io import BytesIO, StringIO
 from pathlib import Path
 
 import pytest
+from botocore.exceptions import ClientError, EndpointConnectionError
 from django.core.files.base import ContentFile
 from django.core.files.storage import storages
 from django.core.management import call_command
@@ -233,6 +234,52 @@ def test_incomplete_listing_keeps_reservation_and_allows_later_reservation(
     assert PendingArchiveMediaUpload.objects.filter(owner_item_id=second.pk).exists() is not apply
     assert storage.exists(second_name) is not apply
     assert f"{'DELETED' if apply else 'WOULD-DELETE'} {second_name}" in out.getvalue()
+    assert f"released={int(apply)} deleted={int(apply)}" in out.getvalue()
+    assert "failed=1" in out.getvalue()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "error",
+    [
+        PermissionError("backend down"),
+        ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "backend down"}}, "ListObjectsV2"
+        ),
+        EndpointConnectionError(endpoint_url="https://backend-down.invalid"),
+    ],
+    ids=["permission", "client-error", "botocore-error"],
+)
+@pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
+def test_failed_listing_is_reported_as_listing_failure(monkeypatch, error, apply):
+    first = _processing_item()
+    second = _processing_item()
+    first_name = _upload(first)
+    second_name = _upload(second)
+    Item.objects.filter(pk__in=[first.pk, second.pk]).update(processing_started_at=None)
+    first_prefix = first_name.rsplit("/", 1)[0]
+    storage = storages["archive_media"]
+    listdir = storage.listdir
+
+    def failing_listdir(prefix):
+        if prefix == first_prefix:
+            raise error
+        return listdir(prefix)
+
+    monkeypatch.setattr(storage, "listdir", failing_listdir)
+    out = StringIO()
+    err = StringIO()
+    args = ("--apply",) if apply else ()
+    with pytest.raises(CommandError, match="incomplete"):
+        call_command("reconcile_archive_media_reservations", *args, stdout=out, stderr=err)
+
+    assert "Storage listing failed for reservation 1 (storage_listing_failed)." in err.getvalue()
+    assert "storage_delete_failed" not in err.getvalue()
+    assert "backend" not in err.getvalue()
+    assert PendingArchiveMediaUpload.objects.filter(owner_item_id=first.pk).exists()
+    assert storage.exists(first_name)
+    assert PendingArchiveMediaUpload.objects.filter(owner_item_id=second.pk).exists() is not apply
+    assert storage.exists(second_name) is not apply
     assert f"released={int(apply)} deleted={int(apply)}" in out.getvalue()
     assert "failed=1" in out.getvalue()
 

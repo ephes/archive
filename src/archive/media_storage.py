@@ -194,7 +194,8 @@ def reconcile_upload_reservation(
     rows while unreferenced objects are deleted, then releases the reservation.
     A storage deletion failure raises ReservationStorageDeleteError with the
     number of completed deletes and keeps the reservation protecting what remains.
-    An incomplete listing raises IncompleteArchiveMediaListingError before any deletion.
+    An incomplete or failed listing raises IncompleteArchiveMediaListingError before
+    any deletion.
     Dry runs use advisory reads without write transactions or row locks.
     """
     from archive.models import Item, PendingArchiveMediaUpload
@@ -242,6 +243,9 @@ def reconcile_upload_reservation(
             names = list(islice(inventory, MAX_RECONCILED_PREFIX_OBJECTS + 1))
         except _ArchiveMediaDirectoryLimitExceeded:
             names = None
+        except (OSError, BotoCoreError, ClientError) as exc:
+            # Nothing was deleted yet; report a listing failure, not a deletion failure.
+            raise IncompleteArchiveMediaListingError("Archive media listing failed") from exc
         if names is None or len(names) > MAX_RECONCILED_PREFIX_OBJECTS:
             return ReservationReconciliation(
                 state="oversized", prefix=prefix, owner_item_id=owner_item_id

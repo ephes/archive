@@ -129,6 +129,9 @@ concurrent inserts/deletions or timestamp edits can shift page boundaries.
 It leaves item content and visibility unchanged and can be run repeatedly. It refuses
 unsupported database backends and a missing FTS table (run migrations first); a failed
 SQL operation propagates an error without reporting a successful rebuild.
+If the success receipt cannot be written or flushed, the command exits with an error
+that says the rebuild committed in autocommit mode. When called within a transaction,
+the error reports that the rebuild is pending the caller's commit.
 `uv run pytest tests/test_rebuild_search_index.py` exercises real missing/stale terms,
 public visibility after repair, repeated rebuilding, refusal/failure paths and the
 empty/singular/plural success counts using synthetic, isolated SQLite data.

@@ -26,10 +26,13 @@ class Command(BaseCommand):
 
             cursor.execute("INSERT INTO archive_item_fts(archive_item_fts) VALUES ('rebuild')")
 
+        committed = connection.get_autocommit()
         item_count = Item.objects.count()
         item_label = "item" if item_count == 1 else "items"
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"Rebuilt Archive search index for {item_count} {item_label}."
-            )
-        )
+        receipt = f"Rebuilt Archive search index for {item_count} {item_label}."
+        try:
+            self.stdout.write(self.style.SUCCESS(receipt))
+            self.stdout.flush()
+        except (OSError, ValueError) as exc:
+            status = "Rebuild committed." if committed else "Rebuild pending caller commit."
+            raise CommandError(f"{receipt} {status} Receipt output failed.") from exc

@@ -128,6 +128,23 @@ def test_failed_rebuild_propagates_error_without_success_or_item_changes():
     assert item_rows() == before
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("operation", ["write", "flush"])
+def test_rebuild_reports_completion_when_receipt_fails(client, operation):
+    item = Item.objects.create(original_url="https://example.test/item", title="Repairmarker")
+    with connection.cursor() as cursor:
+        cursor.execute("INSERT INTO archive_item_fts(archive_item_fts) VALUES ('delete-all')")
+    assert public_results(client, "Repairmarker") == []
+
+    stdout = Mock(spec=StringIO)
+    getattr(stdout, operation).side_effect = BrokenPipeError("synthetic receipt failure")
+    with pytest.raises(CommandError, match=r"Rebuilt Archive.*committed.*output failed"):
+        call_command("rebuild_search_index", stdout=stdout, no_color=True)
+
+    assert connection.get_autocommit()
+    assert public_results(client, "Repairmarker") == [item.pk]
+
+
 @pytest.mark.parametrize("count,label", [(0, "items"), (1, "item"), (3, "items")])
 def test_success_count_and_item_preservation(count, label):
     for index in range(count):

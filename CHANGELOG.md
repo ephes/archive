@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Report the search index rebuild outcome when writing or flushing the success receipt fails.
 - Report and count selected reclassification items deleted before the current-row read.
 - Preserve classifications from newer engines during reclassification and report the skip in dry runs and applies.
 - Preserve settled reclassification counts if the banner, item receipt or summary fails to write or flush.

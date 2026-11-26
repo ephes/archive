@@ -187,6 +187,33 @@ def test_replay_uses_edits_and_completed_work_after_selection(monkeypatch):
     assert item.media_archive_status == EnrichmentStatus.COMPLETE
 
 
+@pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
+@pytest.mark.django_db(transaction=True)
+def test_replay_preserves_classification_from_newer_engine(apply):
+    item = Item.objects.create(
+        original_url="https://example.test/story",
+        kind=ItemKind.VIDEO,
+        classification_rule="future_video_rule",
+        classification_evidence={"future": {"signals": ["example"]}},
+        classification_engine_version=reclassify_items.CURRENT_CLASSIFICATION_ENGINE_VERSION + 1,
+    )
+    row = Item.objects.filter(pk=item.pk).values()
+    before = row.get()
+    output = StringIO()
+    call_command(
+        "reclassify_items",
+        "--all",
+        "--normalize-downstream",
+        *(("--apply",) if apply else ()),
+        stdout=output,
+    )
+
+    mode = "apply" if apply else "dry-run"
+    assert f"SKIPPED item {item.pk}: newer classification engine version" in output.getvalue()
+    assert f"Summary: inspected=0 changed=0 unchanged=0 mode={mode} skipped=1" in output.getvalue()
+    assert row.get() == before
+
+
 @pytest.mark.django_db(transaction=True)
 def test_replay_decides_and_saves_in_one_transaction(monkeypatch):
     Item.objects.create(original_url="https://example.com/story")

@@ -1235,6 +1235,10 @@ up to that horizon in bounded batches, in ID order. Captures inserted after that
 horizon belong to the next invocation, so a busy archive cannot extend a run forever.
 Each item is re-read under a transaction/row lock before deciding and applying classification
 and normalization, so edits and completed worker results since selection are used.
+Dry runs and applies skip a selected row if its current classification engine version
+exceeds the running version. The receipt says `SKIPPED ...: newer classification engine
+version` and the summary includes it in `skipped`. Its classification and downstream
+state are preserved, including when `--normalize-downstream` is requested.
 Mutable host/rule/empty-evidence/engine-version selectors are rechecked on that current
 row under the apply-mode lock before normalization. Rows that left the requested scope
 are reported as `SKIPPED ...: selector changed` and counted separately as `skipped`, never

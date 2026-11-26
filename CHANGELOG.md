@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preserve classifications from newer engines during reclassification and report the skip in dry runs and applies.
 - Preserve settled reclassification counts if the banner, item receipt or summary fails to write or flush.
 - Report requeue and hold counts and the last processed item when command output fails.
 - Require an exact read of known-size archived audio and video before synchronous transcription.

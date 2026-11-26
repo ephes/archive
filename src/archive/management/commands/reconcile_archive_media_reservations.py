@@ -90,8 +90,12 @@ class Command(BaseCommand):
             f"mode={'apply' if apply else 'dry-run'} "
             f"failed={failed_count}"
         )
+        follow_up = []
         if failed_count:
-            raise CommandError(
-                f"Reservation reconciliation incomplete: {failed_count} reservations failed; "
-                "retry the command."
+            follow_up.append(f"Retry the command for {failed_count} failed reservations")
+        if apply and counts["oversized"]:
+            follow_up.append(
+                f"{counts['oversized']} oversized reservations require manual recovery"
             )
+        if follow_up:
+            raise CommandError(f"Reservation reconciliation incomplete. {'. '.join(follow_up)}.")

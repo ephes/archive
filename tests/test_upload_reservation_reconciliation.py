@@ -327,20 +327,35 @@ def test_storage_failure_keeps_reservation_and_fails_the_command(
 
 
 @pytest.mark.django_db(transaction=True)
-def test_oversized_prefix_is_left_for_manual_recovery(monkeypatch):
+@pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
+def test_oversized_prefix_is_left_for_manual_recovery(apply):
     item = _processing_item()
     storage = storages["archive_media"]
     stored = _upload(item)
     prefix = stored.rsplit("/", 1)[0] + "/"
     for index in range(17):
         storage.save(f"{prefix}extra-{index}.mp3", ContentFile(b"x"))
-    Item.objects.filter(pk=item.pk).update(processing_started_at=None)
+    sibling = _processing_item()
+    sibling_name = _upload(sibling)
+    Item.objects.filter(pk__in=[item.pk, sibling.pk]).update(processing_started_at=None)
 
-    output = _reconcile("--apply")
+    if apply:
+        out = StringIO()
+        with pytest.raises(CommandError, match="incomplete.*manual recovery") as error:
+            call_command("reconcile_archive_media_reservations", "--apply", stdout=out)
+        assert "retry" not in str(error.value).lower()
+        output = out.getvalue()
+    else:
+        output = _reconcile()
 
-    assert "oversized=1" in output and "released=0" in output
-    assert PendingArchiveMediaUpload.objects.count() == 1
+    assert f"OVERSIZED {prefix} item={item.pk}" in output
+    assert f"oversized=1 released={int(apply)} deleted={int(apply)}" in output
+    assert "failed=0" in output
+    assert f"{'DELETED' if apply else 'WOULD-DELETE'} {sibling_name}" in output
+    assert PendingArchiveMediaUpload.objects.filter(owner_item_id=item.pk).exists()
+    assert PendingArchiveMediaUpload.objects.filter(owner_item_id=sibling.pk).exists() is not apply
     assert storage.exists(stored)
+    assert storage.exists(sibling_name) is not apply
 
 
 @pytest.mark.django_db(transaction=True)
@@ -375,7 +390,13 @@ def test_retired_reservation_directory_budget(
         return listdir(path)
 
     monkeypatch.setattr(storage, "listdir", record_listdir)
-    output = _reconcile("--apply")
+    if oversized:
+        out = StringIO()
+        with pytest.raises(CommandError, match="incomplete.*manual recovery"):
+            call_command("reconcile_archive_media_reservations", "--apply", stdout=out)
+        output = out.getvalue()
+    else:
+        output = _reconcile("--apply")
 
     assert len(listings) == expected_listings
     assert all(path == prefix or path.startswith(prefix + "/") for path in listings)

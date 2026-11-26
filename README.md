@@ -1449,9 +1449,12 @@ affected reservation and its objects protected. Both dry-run and apply continue 
 other reservations, count the listing failure in `failed` and exit nonzero.
 Rerun the command after the listing or deletion issue is resolved.
 Prefixes holding more than 16 objects or more than 64 directories (including
-the prefix itself and empty directories) are reported as `oversized` and left
+the prefix itself and empty directories) are reported as `OVERSIZED` and left
 for manual recovery. The command checks the directory budget before queuing
 children and continues with other reservations when a prefix exceeds either limit.
+Apply prints its summary and exits nonzero if any prefix is oversized, with a
+manual recovery message. Dry-run reports oversized prefixes without changing its
+exit status.
 Reservations without a recorded owner
 attempt (rows created before this change, or uploads by unclaimed direct callers)
 are reported as `unowned` and never released automatically: stop the affected

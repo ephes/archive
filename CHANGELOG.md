@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preserve media admission refusals and completed staging results when closing the disk lock fails.
 - Report the admitted end of bounded audio upload streams to storage backends.
 - Reject truncated audio upload stages before publishing their archive references.
 - Report settled orphan deletion counts when cleanup output fails or a sweep aborts partway.

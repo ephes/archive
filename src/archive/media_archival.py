@@ -190,8 +190,13 @@ def temp_space_admission(required_bytes: int, *, purpose: str, timeout: float):
         ensure_temp_space(required_bytes, purpose=purpose)
         yield
     finally:
-        # Closing the descriptor releases the lock.
-        os.close(descriptor)
+        # Closing releases the lock. Its outcome is separate from the media work,
+        # which may already have written a reserved upload or raised a refusal.
+        try:
+            os.close(descriptor)
+        except OSError:
+            with suppress(Exception):
+                logger.warning("Closing the media temporary-space lock failed")
 
 
 def ensure_temp_space(required_bytes: int, *, purpose: str) -> None:

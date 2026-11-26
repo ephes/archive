@@ -1,6 +1,7 @@
 import io
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from django.core.files.base import ContentFile
@@ -159,6 +160,57 @@ def test_storage_sees_admitted_length_and_bytes_after_stage_grows(monkeypatch):
     assert archived.size_bytes == len(payload)
     with storage.open(archived.object_name) as uploaded:
         assert uploaded.read() == payload
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("admitted", [False, True], ids=["refused", "finished"])
+def test_lock_close_failure_preserves_media_admission_outcome(
+    monkeypatch, settings, caplog, admitted
+):
+    item = Item.objects.create(
+        original_url="https://example.com/episode.mp3",
+        kind=ItemKind.PODCAST_EPISODE,
+        media_archive_status=EnrichmentStatus.PROCESSING,
+    )
+    lock_path = Path(settings.ARCHIVE_MEDIA_TEMP_LOCK_PATH)
+    open_descriptor, close_descriptor = os.open, os.close
+    lock_descriptor = None
+
+    def track_lock_open(path, *args, **kwargs):
+        nonlocal lock_descriptor
+        descriptor = open_descriptor(path, *args, **kwargs)
+        if path == lock_path:
+            lock_descriptor = descriptor
+        return descriptor
+
+    def fail_lock_close(descriptor):
+        nonlocal lock_descriptor
+        close_descriptor(descriptor)
+        if descriptor == lock_descriptor:
+            lock_descriptor = None
+            raise OSError("synthetic private lock details")
+
+    monkeypatch.setattr(os, "open", track_lock_open)
+    monkeypatch.setattr(os, "close", fail_lock_close)
+    monkeypatch.setattr(
+        "archive.media_archival._open_direct_media",
+        lambda request, timeout: _FakeResponse([b"admitted audio"]),
+    )
+    if not admitted:
+        monkeypatch.setattr("archive.media_archival._temp_free_bytes", lambda: 0)
+
+    assert enrich_item_media_archive(item) is admitted
+    item.refresh_from_db()
+    if admitted:
+        with storages["archive_media"].open(item.archived_audio_path) as uploaded:
+            assert uploaded.read() == b"admitted audio"
+        assert item.media_archive_status == EnrichmentStatus.COMPLETE
+    else:
+        assert "free temporary disk space" in item.media_archive_error
+        assert not item.archived_audio_path
+    assert not PendingArchiveMediaUpload.objects.exists()
+    assert "Closing the media temporary-space lock failed" in caplog.messages
+    assert "synthetic private lock details" not in caplog.text
 
 
 @pytest.mark.django_db(transaction=True)

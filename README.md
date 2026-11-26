@@ -1627,8 +1627,10 @@ Long recordings must pass: archival, staging and the batch job are sized for mul
   direct audio download (the downloaded file is uploaded to storage directly), two for video
   sources (download plus extracted audio) and YouTube pages (download plus MP3 conversion), and the
   archived size for staging (the request body is spooled once before it is sent). A failed
-  staging request closes any open archived audio reader before releasing the disk lock. Local
-  filesystem storage on the same volume also counts the copies it stores: the audio for direct
+  staging request closes any open archived audio reader before releasing the disk lock. A
+  lock-close failure is reported separately with a fixed warning when logging is available.
+  The original refusal or completed staging result still reaches the caller. Local filesystem
+  storage on the same volume also counts the copies it stores: the audio for direct
   audio and YouTube pages, the source and the audio for direct video. With the defaults
   (16 GiB limit, 2 GiB reserve) a start needs this much free space:
 

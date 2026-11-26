@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import nullcontext
 from dataclasses import dataclass
 
@@ -34,6 +34,7 @@ def delete_unreferenced_archive_media_paths(
     *,
     using: str = "default",
     owns_reservation: bool = False,
+    on_deleted: Callable[[], None] | None = None,
 ) -> list[str]:
     """Delete objects that no committed item references; keep everything else.
 
@@ -45,6 +46,8 @@ def delete_unreferenced_archive_media_paths(
     reference, so an object seen without a reservation already has its committed
     reference visible to the second check. Callers that created the reservation
     pass ``owns_reservation`` to discard their own unpublished upload.
+    The optional ``on_deleted`` callback records the storage outcome immediately,
+    since a later database failure cannot undo it.
     """
     from archive.models import PendingArchiveMediaUpload
 
@@ -62,6 +65,8 @@ def delete_unreferenced_archive_media_paths(
             if _is_referenced_archive_media_path(path, using=using):
                 continue
             storage.delete(path)
+            if on_deleted is not None:
+                on_deleted()
             if owns_reservation:
                 reservations.delete()
         deleted_paths.append(path)

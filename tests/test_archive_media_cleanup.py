@@ -545,6 +545,7 @@ def test_orphan_sweep_storage_failure_continues_then_retry_converges(monkeypatch
             stderr=err,
         )
     assert caught.value.returncode == 1
+    assert "deleted=2 failed=1" in str(caught.value)
     assert attempted == ["a.mp3", "b.mp3", "c.mp3"]
     assert {path for path in paths if storage.exists(path)} == {
         "b.mp3",
@@ -567,6 +568,67 @@ def test_orphan_sweep_storage_failure_continues_then_retry_converges(monkeypatch
     assert not storage.exists("b.mp3")
     assert storage.exists("d-current.mp3") and storage.exists("reserved/e.mp3")
     assert "deleted=1 mode=delete failed=0" in retry.getvalue()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("stage", ["candidate", "footer"])
+def test_orphan_sweep_reports_settled_deletions_when_output_fails(stage):
+    from django.core.management.base import CommandError
+
+    class FailingReceipt(StringIO):
+        def write(self, message):
+            if stage == "candidate" and message.startswith("ORPHAN b.mp3"):
+                raise BrokenPipeError("synthetic private stream label")
+            return super().write(message)
+
+        def flush(self):
+            if stage == "footer" and "Summary:" in self.getvalue():
+                raise ValueError("synthetic private stream label")
+            return super().flush()
+
+    storage = storages["archive_media"]
+    _save_archive_media("a.mp3")
+    _save_archive_media("b.mp3")
+    args = ["--delete", "--min-age-seconds", "0"]
+    deleted = 1 if stage == "candidate" else 2
+
+    with pytest.raises(CommandError, match=rf"output failed.*deleted={deleted} failed=0") as caught:
+        call_command("cleanup_archive_media_orphans", *args, stdout=FailingReceipt())
+
+    assert "synthetic private stream label" not in str(caught.value)
+    assert not storage.exists("a.mp3")
+    assert storage.exists("b.mp3") is (stage == "candidate")
+    retry = StringIO()
+    call_command("cleanup_archive_media_orphans", *args, stdout=retry)
+    assert "ORPHAN a.mp3" not in retry.getvalue()
+    assert f"deleted={2 - deleted} mode=delete failed=0" in retry.getvalue()
+    assert not storage.exists("b.mp3")
+
+
+@pytest.mark.django_db(transaction=True)
+def test_orphan_sweep_reports_storage_delete_when_database_commit_fails(monkeypatch):
+    from django.core.management.base import CommandError
+    from django.db import DatabaseError, connection
+
+    def fail_commit():
+        raise DatabaseError("synthetic private database detail")
+
+    storage = storages["archive_media"]
+    _save_archive_media("a.mp3")
+    _save_archive_media("b.mp3")
+    with monkeypatch.context() as patch:
+        patch.setattr(connection, "commit", fail_commit)
+        with pytest.raises(CommandError, match=r"incomplete.*deleted=1 failed=0") as caught:
+            call_command(
+                "cleanup_archive_media_orphans",
+                "--delete",
+                "--min-age-seconds",
+                "0",
+                stdout=StringIO(),
+            )
+    assert "synthetic private database detail" not in str(caught.value)
+    assert not storage.exists("a.mp3")
+    assert storage.exists("b.mp3")
 
 
 @pytest.mark.django_db(transaction=True)

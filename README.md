@@ -1433,7 +1433,10 @@ report with `storage_delete_failed`, without backend exception details. Retry th
 command after the backend recovers: final reservation/reference checks run again and
 already removed objects are absent from the new inventory. Inventory, database and
 unexpected programming failures still abort; an incomplete listing never authorizes
-deletion. Cleanup can run
+deletion. If a receipt cannot be written or flushed, or the sweep aborts after a
+deletion or a storage failure, the command error includes `deleted` and `failed`
+totals without object names or backend details. `deleted` counts successful storage
+deletion calls even if a later database or output operation fails. Cleanup can run
 while workers are archiving. Apply database migrations before running updated
 workers or cleanup.
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Report settled orphan deletion counts when cleanup output fails or a sweep aborts partway.
 - Report the search index rebuild outcome when writing or flushing the success receipt fails.
 - Report and count selected reclassification items deleted before the current-row read.
 - Preserve classifications from newer engines during reclassification and report the skip in dry runs and applies.

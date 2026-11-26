@@ -1448,7 +1448,10 @@ command reports `storage_listing_failed` without backend details and leaves the
 affected reservation and its objects protected. Both dry-run and apply continue with
 other reservations, count the listing failure in `failed` and exit nonzero.
 Rerun the command after the listing or deletion issue is resolved.
-Prefixes holding more than 16 objects are reported as `oversized` and left alone.
+Prefixes holding more than 16 objects or more than 64 directories (including
+the prefix itself and empty directories) are reported as `oversized` and left
+for manual recovery. The command checks the directory budget before queuing
+children and continues with other reservations when a prefix exceeds either limit.
 Reservations without a recorded owner
 attempt (rows created before this change, or uploads by unclaimed direct callers)
 are reported as `unowned` and never released automatically: stop the affected

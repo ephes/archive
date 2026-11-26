@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from contextlib import nullcontext
 from dataclasses import dataclass
+from itertools import islice
 
 from botocore.exceptions import BotoCoreError, ClientError
 from django.core.files.storage import storages
@@ -15,6 +16,10 @@ ARCHIVE_MEDIA_PATH_FIELDS = ("archived_audio_path", "archived_video_path", "arti
 
 class IncompleteArchiveMediaListingError(ValueError):
     """The listing cannot establish all object names under the prefix."""
+
+
+class _ArchiveMediaDirectoryLimitExceeded(Exception):
+    """The prefix contains more directories than the caller can walk."""
 
 
 def item_archive_media_paths(item) -> tuple[str, ...]:
@@ -85,8 +90,11 @@ def iter_archive_media_object_names(prefix: str = "") -> Iterator[str]:
     yield from _iter_storage_object_names(storage=storage, prefix=prefix.strip("/"))
 
 
-def _iter_storage_object_names(*, storage, prefix: str) -> Iterator[str]:
+def _iter_storage_object_names(
+    *, storage, prefix: str, max_directories: int | None = None
+) -> Iterator[str]:
     pending = [prefix]
+    discovered_directories = 1
     while pending:
         current = pending.pop()
         try:
@@ -97,6 +105,12 @@ def _iter_storage_object_names(*, storage, prefix: str) -> Iterator[str]:
             raise IncompleteArchiveMediaListingError(
                 "Incomplete archive media listing: subtree unavailable"
             ) from None
+
+        if max_directories is not None:
+            # Count visited and queued directories before sorting or queuing new children.
+            discovered_directories += len(directories)
+            if discovered_directories > max_directories:
+                raise _ArchiveMediaDirectoryLimitExceeded
 
         for names in (directories, files):
             for name in names:
@@ -137,6 +151,7 @@ def _reservation_prefix(path: str) -> str:
 
 
 MAX_RECONCILED_PREFIX_OBJECTS = 16
+MAX_RECONCILED_PREFIX_DIRECTORIES = 64
 
 
 class ReservationStorageDeleteError(RuntimeError):
@@ -153,7 +168,7 @@ class ReservationReconciliation:
 
     ``state`` is ``retired`` (owner attempt provably over), ``live`` (owner attempt
     still current), ``unowned`` (no recorded owner attempt; manual recovery only),
-    ``oversized`` (too many objects under the prefix to reconcile automatically)
+    ``oversized`` (too many objects or directories to reconcile automatically)
     or ``gone`` (released concurrently).
     """
 
@@ -218,13 +233,19 @@ def reconcile_upload_reservation(
                 state="live", prefix=prefix, owner_item_id=owner_item_id
             )
 
-        names = []
-        for name in iter_archive_media_object_names(prefix):
-            names.append(name)
-            if len(names) > MAX_RECONCILED_PREFIX_OBJECTS:
-                return ReservationReconciliation(
-                    state="oversized", prefix=prefix, owner_item_id=owner_item_id
-                )
+        inventory = _iter_storage_object_names(
+            storage=storage,
+            prefix=prefix.strip("/"),
+            max_directories=MAX_RECONCILED_PREFIX_DIRECTORIES,
+        )
+        try:
+            names = list(islice(inventory, MAX_RECONCILED_PREFIX_OBJECTS + 1))
+        except _ArchiveMediaDirectoryLimitExceeded:
+            names = None
+        if names is None or len(names) > MAX_RECONCILED_PREFIX_OBJECTS:
+            return ReservationReconciliation(
+                state="oversized", prefix=prefix, owner_item_id=owner_item_id
+            )
         deleted: list[str] = []
         kept: list[str] = []
         for name in names:

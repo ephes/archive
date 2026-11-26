@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from io import BytesIO, StringIO
+from pathlib import Path
 
 import pytest
 from django.core.files.base import ContentFile
@@ -293,6 +294,50 @@ def test_oversized_prefix_is_left_for_manual_recovery(monkeypatch):
     assert "oversized=1" in output and "released=0" in output
     assert PendingArchiveMediaUpload.objects.count() == 1
     assert storage.exists(stored)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("shape", "children", "expected_listings", "oversized"),
+    [("wide", 64, 1, True), ("deep", 64, 64, True), ("wide", 63, 64, False)],
+    ids=["wide-overflow", "deep-overflow", "exact-limit"],
+)
+def test_retired_reservation_directory_budget(
+    monkeypatch, shape, children, expected_listings, oversized
+):
+    retired = _processing_item()
+    stored = _upload(retired)
+    Item.objects.filter(pk=retired.pk).update(processing_started_at=None)
+    live = _processing_item()
+    live_name = _upload(live)
+
+    storage = storages["archive_media"]
+    prefix = stored.rsplit("/", 1)[0]
+    directory = Path(storage.path(prefix))
+    for index in range(children):
+        child = directory / f"child-{index}"
+        child.mkdir()
+        if shape == "deep":
+            directory = child
+
+    listdir = storage.listdir
+    listings = []
+
+    def record_listdir(path):
+        listings.append(path)
+        return listdir(path)
+
+    monkeypatch.setattr(storage, "listdir", record_listdir)
+    output = _reconcile("--apply")
+
+    assert len(listings) == expected_listings
+    assert all(path == prefix or path.startswith(prefix + "/") for path in listings)
+    assert f"live=1 retired={int(not oversized)}" in output
+    assert f"oversized={int(oversized)} released={int(not oversized)}" in output
+    assert storage.exists(stored) == oversized
+    assert PendingArchiveMediaUpload.objects.filter(owner_item_id=retired.pk).exists() == oversized
+    assert storage.exists(live_name)
+    assert PendingArchiveMediaUpload.objects.filter(owner_item_id=live.pk).exists()
 
 
 @pytest.mark.django_db(transaction=True)

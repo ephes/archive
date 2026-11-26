@@ -161,12 +161,9 @@ def generate_item_transcript(
     ):
         return _poll_stored_batch_transcription_job(job=batch_job, deadline=deadline)
 
-    # Only a staged upload of a long recording gets at least size / minimum rate.
-    staged_deadline = max(deadline, started + staging_allowance_seconds(source.size_bytes))
-
     prompt = _build_transcription_prompt(item=item)
     if source.kind == "archived_audio" and source.size_bytes > MAX_TRANSCRIPTION_BYTES:
-        deadline = staged_deadline
+        deadline = max(deadline, started + staging_allowance_seconds(source.size_bytes))
         raw_transcript = _request_staged_archived_audio_transcription(
             item=item,
             source=source,
@@ -181,7 +178,7 @@ def generate_item_transcript(
                 item=item, source=source, timeout=_remaining(deadline), deadline=deadline
             )
         except _ArchivedAudioRequiresBatchUpload:
-            deadline = staged_deadline
+            deadline = max(deadline, started + staging_allowance_seconds(source.size_bytes))
             raw_transcript = _request_staged_archived_audio_transcription(
                 item=item,
                 source=source,

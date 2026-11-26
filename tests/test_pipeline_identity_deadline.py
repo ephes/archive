@@ -37,6 +37,44 @@ def test_sync_transcription_receives_only_remaining_budget(clock, monkeypatch):
     assert calls == [4]
 
 
+@pytest.mark.parametrize(
+    ("recorded_size", "payload", "staged"),
+    [
+        pytest.param(None, b"a", False, id="remote"),
+        pytest.param(1, b"a", False, id="small-archive"),
+        pytest.param(3, b"abc", True, id="oversized-archive"),
+        pytest.param(1, b"abc", True, id="promoted-archive"),
+    ],
+)
+def test_transcription_only_reads_upload_rate_when_staging(
+    clock, monkeypatch, settings, recorded_size, payload, staged
+):
+    import io
+
+    del settings.ARCHIVE_TRANSCRIPTION_UPLOAD_MIN_BYTES_PER_SECOND
+    monkeypatch.setattr(tr, "MAX_TRANSCRIPTION_BYTES", 2)
+    monkeypatch.setattr(tr, "open_archived_audio", lambda item: io.BytesIO(payload))
+    monkeypatch.setattr(
+        tr,
+        "_download_remote_media",
+        lambda **kw: tr.DownloadedMedia("a.mp3", "audio/mpeg", payload),
+    )
+    monkeypatch.setattr(tr, "_request_transcription", lambda **kw: "words")
+    monkeypatch.setattr(
+        tr, "_stage_archived_audio_upload", lambda **kw: pytest.fail("upload started")
+    )
+    item = Item(audio_url="https://example.test/a.mp3")
+    if recorded_size is not None:
+        item.archived_audio_path = "a.mp3"
+        item.archived_audio_size_bytes = recorded_size
+
+    if staged:
+        with pytest.raises(AttributeError):
+            tr.generate_item_transcript(item, timeout=10)
+    else:
+        assert tr.generate_item_transcript(item, timeout=10) == "words"
+
+
 @pytest.mark.parametrize("step", ["load", "response"])
 def test_expired_sync_pipeline_cannot_submit_or_publish(step, clock, monkeypatch):
     calls = []

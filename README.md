@@ -1691,8 +1691,9 @@ still takes precedence when both versions exist.
 
 Article copies use the same upload reservations and reference-aware deletion guards
 as source media: item deletion and `cleanup_archive_media_orphans` cover both. Concurrent
-backfills may download independently, but only one copy is published and redundant
-uploads are discarded. Failed uploads are discarded through the reference-aware guard, even if publication
+backfills may download independently. The winner publishes the file reference and completed
+state together with reservation release, then updates the caller's item from those committed
+values. A losing writer discards its own upload and reloads the current copy. Failed uploads are discarded through the reference-aware guard, even if publication
 was interrupted. If compensation fails, the original copy error still applies.
 Archive attempts a warning containing the item ID. If a protected reservation
 remains after a cleanup failure or interruption, follow the reservation recovery

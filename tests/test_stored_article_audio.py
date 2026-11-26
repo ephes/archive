@@ -12,6 +12,7 @@ import pytest
 from django.core.files.base import ContentFile
 from django.core.files.storage import storages
 from django.urls import reverse
+from django.utils import timezone
 
 from archive import article_audio
 from archive.article_audio import (
@@ -327,40 +328,112 @@ def test_worker_recovers_generated_flag_without_resubmission(article, voxhelm, m
     assert article.article_audio_file
 
 
-@pytest.mark.parametrize("after_commit", [False, True])
-def test_interrupted_publication_compensation_preserves_committed_copy(
-    article, voxhelm, monkeypatch, after_commit
+def test_interrupted_publication_compensates_unsettled_upload(
+    article, synthetic_audio_download, monkeypatch
 ):
     class Interrupted(BaseException):
         pass
 
-    if after_commit:
-        original_refresh = Item.refresh_from_db
-        refresh_calls = []
+    def interrupted_release(*args, **kwargs):
+        raise Interrupted()
 
-        def interrupted_refresh(self, *args, **kwargs):
-            refresh_calls.append(1)
-            original_refresh(self, *args, **kwargs)
-            if len(refresh_calls) == 2:
-                raise Interrupted()
-
-        monkeypatch.setattr(Item, "refresh_from_db", interrupted_refresh)
-    else:
-
-        def interrupted_release(*args, **kwargs):
-            raise Interrupted()
-
-        monkeypatch.setattr(
-            "archive.article_audio.release_pending_archive_media_paths", interrupted_release
-        )
-
+    monkeypatch.setattr(article_audio, "release_pending_archive_media_paths", interrupted_release)
     with pytest.raises(Interrupted):
         store_generated_article_audio(article)
     fresh = Item.objects.get(pk=article.pk)
-    assert bool(fresh.article_audio_file) == after_commit
+    assert not fresh.article_audio_file
     storage = storages["archive_media"]
-    files = list(Path(storage.location).rglob("*.mp3"))
-    assert len(files) == int(after_commit)
+    assert list(Path(storage.location).rglob("*.mp3")) == []
+    assert not PendingArchiveMediaUpload.objects.exists()
+
+
+@pytest.fixture
+def synthetic_audio_download(settings, monkeypatch):
+    settings.ARCHIVE_ARTICLE_AUDIO_API_KEY = "synthetic-key"
+
+    class Response(io.BytesIO):
+        headers = Message()
+
+    def download(*args, **kwargs):
+        response = Response(PAYLOAD)
+        response.headers["Content-Type"] = "audio/mpeg"
+        return response
+
+    monkeypatch.setattr(article_audio, "urlopen", download)
+    return download
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("worker", [False, True])
+def test_published_copy_needs_no_readback(
+    article, synthetic_audio_download, monkeypatch, caplog, worker
+):
+    article.article_audio_status = EnrichmentStatus.FAILED
+    article.article_audio_error = "old failure"
+    article.article_audio_poll_at = timezone.now()
+    article.save()
+    original_refresh = Item.refresh_from_db
+
+    def fail_publication_readback(self, *args, fields=None, **kwargs):
+        if fields and "article_audio_status" in fields:
+            assert Item.objects.get(pk=self.pk).article_audio_file
+            raise RuntimeError("Synthetic readback failure")
+        return original_refresh(self, *args, fields=fields, **kwargs)
+
+    compensation = []
+    original_delete = article_audio.delete_unreferenced_archive_media_paths
+
+    def track_compensation(paths, **kwargs):
+        compensation.extend(paths)
+        return original_delete(paths, **kwargs)
+
+    monkeypatch.setattr(Item, "refresh_from_db", fail_publication_readback)
+    monkeypatch.setattr(
+        article_audio, "delete_unreferenced_archive_media_paths", track_compensation
+    )
+    if worker:
+        assert enrich_item_article_audio(article)
+    else:
+        store_generated_article_audio(article)
+
+    assert compensation == []
+    assert "lazy backfill will retry" not in caplog.text
+    fresh = Item.objects.get(pk=article.pk)
+    assert article.article_audio_file.name == fresh.article_audio_file.name
+    assert article.article_audio_file.name in referenced_archive_media_paths()
+    assert article.article_audio_size_bytes == fresh.article_audio_size_bytes == len(PAYLOAD)
+    assert article.article_audio_content_type == fresh.article_audio_content_type == "audio/mpeg"
+    assert article.article_audio_status == fresh.article_audio_status == EnrichmentStatus.COMPLETE
+    assert article.article_audio_generated and fresh.article_audio_generated
+    assert article.article_audio_error == fresh.article_audio_error == ""
+    assert article.article_audio_poll_at is fresh.article_audio_poll_at is None
+    with article.article_audio_file.open("rb") as stored:
+        assert stored.read() == PAYLOAD
+    assert not PendingArchiveMediaUpload.objects.exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_losing_copy_reloads_winner_and_discards_own_upload(
+    article, synthetic_audio_download, monkeypatch
+):
+    winner = Item.objects.get(pk=article.pk)
+
+    def publish_winner_during_download(*args, **kwargs):
+        monkeypatch.setattr(article_audio, "urlopen", synthetic_audio_download)
+        store_generated_article_audio(winner)
+        return synthetic_audio_download(*args, **kwargs)
+
+    monkeypatch.setattr(article_audio, "urlopen", publish_winner_during_download)
+    store_generated_article_audio(article)
+
+    assert article.article_audio_file.name == winner.article_audio_file.name
+    assert article.article_audio_size_bytes == len(PAYLOAD)
+    assert article.article_audio_status == EnrichmentStatus.COMPLETE
+    assert article.article_audio_generated
+    storage = storages["archive_media"]
+    assert list(Path(storage.location).rglob("*.mp3")) == [
+        Path(storage.path(winner.article_audio_file.name))
+    ]
     assert not PendingArchiveMediaUpload.objects.exists()
 
 

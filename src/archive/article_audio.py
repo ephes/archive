@@ -147,9 +147,9 @@ def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
 
     A conditional database update prevents concurrent requests from replacing an
     already published copy. Successful publication resets legacy generation failure
-    state and refreshes that state on the caller's item. Losers discard their upload
-    through the normal media deletion guard. No storage object is written until
-    the download is complete.
+    state and copies the committed values onto the caller's item. Losers discard
+    their upload through the normal media deletion guard and reload the current copy.
+    No storage object is written until the download is complete.
     """
     expected = {
         field: getattr(item, field)
@@ -237,6 +237,15 @@ def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
                     using=using,
                     owner=item,
                 )
+            values = {
+                "article_audio_file": stored_name,
+                "article_audio_size_bytes": size,
+                "article_audio_content_type": DEFAULT_AUDIO_CONTENT_TYPE,
+                "article_audio_generated": True,
+                "article_audio_status": EnrichmentStatus.COMPLETE,
+                "article_audio_error": "",
+                "article_audio_poll_at": None,
+            }
             with transaction.atomic(using=using, durable=True):
                 published = (
                     Item.objects.using(using)
@@ -247,15 +256,7 @@ def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
                     .filter(
                         models.Q(article_audio_file="") | models.Q(article_audio_file__isnull=True)
                     )
-                    .update(
-                        article_audio_file=stored_name,
-                        article_audio_size_bytes=size,
-                        article_audio_content_type=DEFAULT_AUDIO_CONTENT_TYPE,
-                        article_audio_generated=True,
-                        article_audio_status=EnrichmentStatus.COMPLETE,
-                        article_audio_error="",
-                        article_audio_poll_at=None,
-                    )
+                    .update(**values)
                 )
                 if published:
                     release_pending_archive_media_paths((stored_name,), using=using)
@@ -265,17 +266,14 @@ def store_generated_article_audio(item: Item, timeout: int = 30) -> None:
                     using=using,
                     owns_reservation=True,
                 )
-            item.refresh_from_db(
-                fields=[
-                    "article_audio_file",
-                    "article_audio_size_bytes",
-                    "article_audio_content_type",
-                    "article_audio_generated",
-                    "article_audio_status",
-                    "article_audio_error",
-                    "article_audio_poll_at",
-                ]
-            )
+            # The upload has either committed or been discarded. Compensation
+            # is only needed while its outcome is unsettled.
+            stored_name = ""
+            if published:
+                for field, value in values.items():
+                    setattr(item, field, value)
+                return
+            item.refresh_from_db(fields=list(values))
             if not item.article_audio_file:
                 raise ArticleAudioGenerationError("Article audio changed during download")
         except BaseException:

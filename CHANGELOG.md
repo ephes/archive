@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Return committed article-audio publication fields to the caller without a post-commit database read.
+
 - Skip whitespace-only article-audio sources when claiming work and keep due saved jobs pollable.
 - Honor the saved article-audio poll deadline while processing other stages on the same item.
 - Match Unicode and ASCII IDNA spellings of the same host in `reclassify_items --host`; stored hosts the IDNA codec rejects are skipped instead of aborting the run.

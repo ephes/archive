@@ -4,7 +4,7 @@ from unittest.mock import Mock
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import OperationalError, connection
+from django.db import OperationalError, connection, transaction
 from django.urls import reverse
 
 from archive.models import Item
@@ -143,6 +143,26 @@ def test_rebuild_reports_completion_when_receipt_fails(client, operation):
 
     assert connection.get_autocommit()
     assert public_results(client, "Repairmarker") == [item.pk]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_rebuild_reports_pending_commit_when_receipt_fails_in_transaction(client):
+    item = Item.objects.create(original_url="https://example.test/item", title="Pendingmarker")
+    with connection.cursor() as cursor:
+        cursor.execute("INSERT INTO archive_item_fts(archive_item_fts) VALUES ('delete-all')")
+    assert public_results(client, "Pendingmarker") == []
+
+    stdout = Mock(spec=StringIO)
+    stdout.write.side_effect = BrokenPipeError("synthetic receipt failure")
+    with pytest.raises(CommandError, match=r"pending caller commit.*output failed"):
+        with transaction.atomic():
+            call_command("rebuild_search_index", stdout=stdout, no_color=True)
+
+    # The caller's transaction rolled back, so the rebuild did not commit.
+    assert connection.get_autocommit()
+    assert public_results(client, "Pendingmarker") == []
+    call_command("rebuild_search_index", stdout=StringIO(), no_color=True)
+    assert public_results(client, "Pendingmarker") == [item.pk]
 
 
 @pytest.mark.parametrize("count,label", [(0, "items"), (1, "item"), (3, "items")])

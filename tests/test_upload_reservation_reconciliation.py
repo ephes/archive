@@ -543,3 +543,43 @@ def test_nested_file_budget_and_order(extra):
             f"DELETED {name}" for name in [stored, *nested]
         ]
         assert not PendingArchiveMediaUpload.objects.exists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("failure", ["write", "flush"])
+@pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
+def test_output_failure_preserves_reconciliation_progress(failure, apply):
+    class BrokenReceipt(StringIO):
+        def write(self, message: str) -> int:
+            if failure == "write" and message.startswith("RETIRED"):
+                raise BrokenPipeError("detail write failed")
+            return super().write(message)
+
+        def flush(self) -> None:
+            if failure == "flush" and "RETIRED " in self.getvalue():
+                raise BrokenPipeError("detail flush failed")
+            super().flush()
+
+    first = _processing_item()
+    first_name = _upload(first)
+    second = _processing_item()
+    second_name = _upload(second)
+    Item.objects.filter(pk__in=[first.pk, second.pk]).update(processing_started_at=None)
+    mode = "apply" if apply else "dry-run"
+    count = int(apply)
+
+    with pytest.raises(
+        CommandError, match=f"output failed.*mode={mode}.*released={count} deleted={count}"
+    ) as error:
+        call_command(
+            "reconcile_archive_media_reservations",
+            *(("--apply",) if apply else ()),
+            stdout=BrokenReceipt(),
+        )
+
+    assert isinstance(error.value.__cause__, BrokenPipeError)
+    storage = storages["archive_media"]
+    assert storage.exists(first_name) is not apply
+    assert storage.exists(second_name)
+    assert PendingArchiveMediaUpload.objects.filter(owner_item_id=first.pk).exists() is not apply
+    assert PendingArchiveMediaUpload.objects.filter(owner_item_id=second.pk).exists()

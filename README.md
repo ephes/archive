@@ -1449,7 +1449,9 @@ The confirmed object deletes still count in `deleted`. The command continues
 with other reservations, counts the failure in `failed` and exits nonzero.
 Retry after the database recovers if a fresh read confirmed that the reservation
 remains. If retention could not be confirmed, inspect the reservation's state
-before retrying.
+before retrying. If a report write or flush fails, reconciliation stops before
+starting another reservation. The command error reports the mode and the
+confirmed releases and object deletes so far.
 If a listed subtree disappears, the backend returns an invalid child name, or the
 filesystem/S3 listing itself fails, the command reports `storage_listing_failed` without backend details and leaves the
 affected reservation and its objects protected. Both dry-run and apply continue with

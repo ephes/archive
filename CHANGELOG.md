@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Report confirmed reservation releases and object deletes when reconciliation output fails.
 - Enforce the retired reservation object budget before validating or sorting each storage listing.
 - Keep confirmed object delete counts when reservation release fails and report whether the reservation was confirmed to remain.
 - Report an incomplete apply when upload reservations exceed the reconciliation budget, with a manual recovery hint.
